@@ -1,0 +1,56 @@
+[tool.poetry]
+name = "ui-bridge-mcp"
+version = "0.1.0"
+description = "MCP server for UI Bridge - enables AI to inspect and interact with UI elements"
+authors = ["Qontinui Team"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/qontinui/ui-bridge-mcp"
+repository = "https://github.com/qontinui/ui-bridge-mcp"
+keywords = ["mcp", "ui", "automation", "ai", "testing", "ui-bridge"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: User Interfaces",
+]
+packages = [{include = "ui_bridge_mcp", from = "src"}]
+
+[tool.poetry.scripts]
+ui-bridge-mcp = "ui_bridge_mcp.server:run"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+mcp = "^1.0.0"
+httpx = "^0.28.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^24.10"
+isort = "^7.0"
+ruff = "^0.14"
+mypy = "^1.14"
+pytest = "^8.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
