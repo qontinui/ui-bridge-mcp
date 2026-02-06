@@ -1,4 +1,12 @@
 repos:
+  - repo: local
+    hooks:
+      - id: no-claude-attribution
+        name: No Claude attribution in commit messages
+        entry: python -c "import sys; msg=open(sys.argv[1]).read().lower(); exit(1 if 'claude' in msg or 'anthropic' in msg or 'co-authored-by' in msg else 0)"
+        language: system
+        stages: [commit-msg]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
