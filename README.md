@@ -10,7 +10,7 @@ This MCP server provides tools for:
 - **Interacting with elements** - Click, type, focus, hover
 - **Two modes of operation**:
   - **Control mode**: Interact with the qontinui-runner's own Tauri webview
-  - **External mode**: Interact with external browser tabs via Chrome extension
+  - **SDK mode**: Interact with external apps via the UI Bridge SDK
 
 ## Installation
 
@@ -26,7 +26,7 @@ poetry add ui-bridge-mcp
 
 The MCP server requires the **qontinui-runner** to be running on port 9876.
 
-For external browser tab access, you also need the Chrome extension connected.
+For external app access, the target application must have the UI Bridge SDK integrated.
 
 ## Configuration
 
@@ -84,17 +84,19 @@ Add to your MCP settings:
 | `ui_type` | Type text into an input element |
 | `ui_focus` | Focus an element |
 
-### External Mode (Browser Tabs)
+### SDK Mode (External Apps)
 
 | Tool | Description |
 |------|-------------|
-| `extension_status` | Check Chrome extension connection |
-| `extension_list_tabs` | List available browser tabs |
-| `extension_select_tab` | Select a tab for subsequent operations |
-| `extension_get_elements` | Get all elements from selected tab |
-| `extension_click` | Click element by CSS selector |
-| `extension_type` | Type into element by CSS selector |
-| `extension_screenshot` | Capture screenshot of current tab |
+| `sdk_connect` | Connect to an SDK-integrated app by URL |
+| `sdk_disconnect` | Disconnect from the current app |
+| `sdk_status` | Check SDK connection status |
+| `sdk_elements` | Get all elements from the connected app |
+| `sdk_snapshot` | Get a full UI snapshot from the connected app |
+| `sdk_click` | Click an element by ID |
+| `sdk_type` | Type into an element by ID |
+
+> **Note:** The MCP server also includes legacy `extension_*` tools for browser tab access via a Chrome extension. These are deprecated and will be removed in a future release. Use the SDK tools instead.
 
 ## Usage Examples
 
@@ -113,25 +115,22 @@ AI: Let me check what's on the runner's Settings page.
    ui_snapshot
 ```
 
-### Inspect External Website
+### Inspect an SDK-Integrated App
 
 ```
-AI: Let me check the login form on localhost:3001.
+AI: Let me check the login form on localhost:3000.
 
-1. Check extension is connected:
-   extension_status
+1. Connect to the app:
+   sdk_connect url="http://localhost:3000"
 
-2. List browser tabs:
-   extension_list_tabs
+2. Get all elements:
+   sdk_elements
 
-3. Select the tab with localhost:3001:
-   extension_select_tab tab_id=123456
+3. Type into the email field:
+   sdk_type element_id="email-input" text="test@example.com"
 
-4. Get page elements:
-   extension_get_elements
-
-5. Type into the email field:
-   extension_type selector="input[name='email']" text="test@example.com"
+4. Click the submit button:
+   sdk_click element_id="login-button"
 ```
 
 ## Element IDs
@@ -149,12 +148,12 @@ Use `ui_snapshot` to discover all available element IDs.
 
 ```
 Claude/AI
-    ↓ MCP Protocol
+    |  MCP Protocol
 ui-bridge-mcp (this server)
-    ↓ HTTP
+    |  HTTP
 qontinui-runner (port 9876)
-    ├── /ui-bridge/control/* → Runner's Tauri webview
-    └── /extension/* → Chrome extension → External browser tabs
+    |-- /ui-bridge/control/* --> Runner's Tauri webview
+    |-- /ui-bridge/sdk/*     --> SDK-integrated apps (direct HTTP)
 ```
 
 ## Development
