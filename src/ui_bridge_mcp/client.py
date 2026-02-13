@@ -46,7 +46,7 @@ class UIBridgeClient:
 
     This client provides access to both:
     - Control mode: Runner's own Tauri webview UI (/ui-bridge/control/*)
-    - External mode: External browser tabs via Chrome extension (/extension/*)
+    - SDK mode: External SDK-integrated apps via runner proxy (/ui-bridge/sdk/*)
     """
 
     def __init__(
@@ -83,14 +83,23 @@ class UIBridgeClient:
         endpoint: str,
         json_data: dict[str, Any] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        params: dict[str, str] | None = None,
     ) -> UIBridgeResponse:
-        """Make an HTTP request to the UI Bridge API."""
+        """Make an HTTP request to the UI Bridge API.
+
+        Args:
+            method: HTTP method (GET or POST).
+            endpoint: API endpoint path.
+            json_data: Optional JSON body for POST requests.
+            timeout: Request timeout in seconds.
+            params: Optional query parameters for GET requests.
+        """
         client = await self._get_client()
         url = f"{self.base_url}{endpoint}"
 
         try:
             if method == "GET":
-                response = await client.get(url, timeout=timeout)
+                response = await client.get(url, params=params, timeout=timeout)
             elif method == "POST":
                 response = await client.post(url, json=json_data, timeout=timeout)
             else:
@@ -222,104 +231,240 @@ class UIBridgeClient:
         )
 
     # -------------------------------------------------------------------------
-    # External Mode - Browser Tabs via Chrome Extension (/extension/*)
+    # SDK Mode - External SDK-Integrated Apps (/ui-bridge/sdk/*)
     # -------------------------------------------------------------------------
 
-    async def extension_status(self) -> UIBridgeResponse:
-        """Check Chrome extension connection status."""
-        return await self._request("GET", "/extension/status")
-
-    async def extension_list_tabs(self) -> UIBridgeResponse:
-        """List available browser tabs from the Chrome extension."""
-        return await self._request(
-            "POST",
-            "/extension/command",
-            {"action": "listTabs"},
-        )
-
-    async def extension_select_tab(self, tab_id: int) -> UIBridgeResponse:
-        """Select a browser tab for subsequent operations.
+    async def sdk_connect(self, url: str) -> UIBridgeResponse:
+        """Connect to an SDK-integrated app.
 
         Args:
-            tab_id: The tab ID from extension_list_tabs().
+            url: The app URL (e.g., 'http://localhost:3001').
         """
-        return await self._request(
-            "POST",
-            "/extension/command",
-            {"action": "selectTab", "params": {"tabId": tab_id}},
-        )
+        return await self._request("POST", "/ui-bridge/sdk/connect", {"url": url})
 
-    async def extension_get_active_tab(self) -> UIBridgeResponse:
-        """Get the currently active browser tab."""
-        return await self._request(
-            "POST",
-            "/extension/command",
-            {"action": "getActiveTab"},
-        )
+    async def sdk_disconnect(self) -> UIBridgeResponse:
+        """Disconnect from the SDK app."""
+        return await self._request("POST", "/ui-bridge/sdk/disconnect")
 
-    async def extension_get_elements(self, timeout_secs: int = 30) -> UIBridgeResponse:
-        """Get all elements from the selected browser tab.
+    async def sdk_status(self) -> UIBridgeResponse:
+        """Check SDK app connection status."""
+        return await self._request("GET", "/ui-bridge/sdk/status")
 
-        Args:
-            timeout_secs: Timeout for element discovery.
-
-        Returns:
-            List of elements with their properties, actions, and bounds.
-        """
-        return await self._request(
-            "POST",
-            "/extension/command",
-            {"action": "getElements", "timeout_secs": timeout_secs},
-            timeout=float(timeout_secs) + 10.0,
-        )
-
-    async def extension_click(
-        self, selector: str, timeout_secs: int = 10
+    async def sdk_elements(
+        self,
+        content_only: bool = False,
+        content_types: list[str] | None = None,
     ) -> UIBridgeResponse:
-        """Click an element in the browser tab.
+        """List all registered UI elements in the connected SDK app.
 
         Args:
-            selector: CSS selector for the element.
-            timeout_secs: Timeout for finding the element.
+            content_only: If True, filter to only content (non-interactive) elements.
+            content_types: Filter to elements matching these content types
+                (e.g., ['heading', 'paragraph', 'badge']).
+
+        Note: These query parameters require SDK handler support.
+        The Rust relay currently does not forward query params for GET requests,
+        so these parameters will only take effect once the relay is updated.
+        """
+        params: dict[str, str] | None = None
+        if content_only or content_types:
+            params = {}
+            if content_only:
+                params["contentOnly"] = "true"
+            if content_types:
+                params["contentTypes"] = ",".join(content_types)
+        return await self._request("GET", "/ui-bridge/sdk/elements", params=params)
+
+    async def sdk_element(self, element_id: str) -> UIBridgeResponse:
+        """Get details for a specific element by its data-ui-id.
+
+        Args:
+            element_id: The element's data-ui-id.
+        """
+        return await self._request("GET", f"/ui-bridge/sdk/element/{element_id}")
+
+    async def sdk_element_action(
+        self, element_id: str, action: str, params: dict[str, Any] | None = None
+    ) -> UIBridgeResponse:
+        """Execute an action on an element.
+
+        Args:
+            element_id: The element's data-ui-id.
+            action: Action to perform (click, type, focus, hover).
+            params: Optional params (e.g., {"text": "hello"} for type).
+        """
+        body: dict[str, Any] = {"action": action}
+        if params:
+            body["params"] = params
+        return await self._request(
+            "POST", f"/ui-bridge/sdk/element/{element_id}/action", body
+        )
+
+    async def sdk_snapshot(
+        self,
+        include_content: bool = True,
+    ) -> UIBridgeResponse:
+        """Get a complete UI snapshot with all elements and their state.
+
+        Args:
+            include_content: Include content (non-interactive) elements in the snapshot.
+                Defaults to True. Set to False to only get interactive elements.
+
+        Note: The includeContent query parameter requires SDK handler support.
+        The Rust relay currently does not forward query params for GET requests,
+        so this parameter will only take effect once the relay is updated or
+        the snapshot endpoint is changed to accept POST body params.
+        """
+        params: dict[str, str] | None = None
+        if not include_content:
+            params = {"includeContent": "false"}
+        return await self._request("GET", "/ui-bridge/sdk/snapshot", params=params)
+
+    async def sdk_discover(
+        self,
+        interactive_only: bool = False,
+        include_content: bool = True,
+        content_roles: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Trigger element discovery in the SDK app.
+
+        Args:
+            interactive_only: If True, only return interactive elements.
+            include_content: Include content (non-interactive) elements in discovery.
+                Defaults to True. Ignored if interactive_only is True.
+            content_roles: Filter content elements to these roles
+                (e.g., ['heading', 'body-text', 'metric']).
+                Only applies when content elements are included.
+        """
+        body: dict[str, Any] = {"interactive_only": interactive_only}
+        if not include_content:
+            body["includeContent"] = False
+        if content_roles:
+            body["contentRoles"] = content_roles
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/discover",
+            body,
+        )
+
+    async def sdk_ai_search(
+        self,
+        text: str,
+        content_role: str | None = None,
+        content_types: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Search for elements by natural language description.
+
+        Args:
+            text: Natural language description of the element.
+            content_role: Filter results to elements with this content role
+                (e.g., 'heading', 'body-text', 'metric', 'badge').
+            content_types: Filter results to elements with these content types
+                (e.g., ['heading', 'paragraph', 'metric-value']).
+        """
+        body: dict[str, Any] = {"text": text}
+        if content_role:
+            body["contentRole"] = content_role
+        if content_types:
+            body["contentTypes"] = content_types
+        return await self._request("POST", "/ui-bridge/sdk/ai/search", body)
+
+    async def sdk_ai_execute(self, instruction: str) -> UIBridgeResponse:
+        """Execute an action by natural language instruction.
+
+        Args:
+            instruction: Natural language instruction (e.g., 'click the Submit button').
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/execute", {"instruction": instruction}
+        )
+
+    async def sdk_ai_assert(
+        self, text: str, state: str | None = None
+    ) -> UIBridgeResponse:
+        """Assert element state using natural language.
+
+        Args:
+            text: Element description or text to find.
+            state: Expected state (e.g., 'visible', 'hidden', 'enabled').
+        """
+        body: dict[str, Any] = {"text": text}
+        if state:
+            body["state"] = state
+        return await self._request("POST", "/ui-bridge/sdk/ai/assert", body)
+
+    async def sdk_ai_summary(self) -> UIBridgeResponse:
+        """Get an AI-friendly summary of the current page."""
+        return await self._request("GET", "/ui-bridge/sdk/ai/summary")
+
+    async def sdk_screenshot(self) -> UIBridgeResponse:
+        """Capture a screenshot of the monitor where the SDK app is running."""
+        return await self._request("GET", "/ui-bridge/sdk/screenshot")
+
+    async def sdk_components(self) -> UIBridgeResponse:
+        """List all registered components in the connected SDK app."""
+        return await self._request("GET", "/ui-bridge/sdk/components")
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Cross-App Analysis (/ui-bridge/sdk/ai/analyze/*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_ai_analyze_data(self) -> UIBridgeResponse:
+        """Extract labeled data values from the connected SDK app's page."""
+        return await self._request("GET", "/ui-bridge/sdk/ai/analyze/data")
+
+    async def sdk_ai_analyze_regions(self) -> UIBridgeResponse:
+        """Segment the connected SDK app's page into semantic regions."""
+        return await self._request("GET", "/ui-bridge/sdk/ai/analyze/regions")
+
+    async def sdk_ai_analyze_structured_data(self) -> UIBridgeResponse:
+        """Extract tables and lists from the connected SDK app's page."""
+        return await self._request("GET", "/ui-bridge/sdk/ai/analyze/structured-data")
+
+    async def sdk_ai_cross_app_compare(
+        self,
+        source_snapshot: dict[str, Any],
+        target_snapshot: dict[str, Any],
+    ) -> UIBridgeResponse:
+        """Compare two semantic snapshots from different apps.
+
+        Args:
+            source_snapshot: Semantic snapshot from the source app.
+            target_snapshot: Semantic snapshot from the target app.
         """
         return await self._request(
             "POST",
-            "/extension/command",
+            "/ui-bridge/sdk/ai/analyze/cross-app-compare",
             {
-                "action": "click",
-                "params": {"selector": selector},
-                "timeout_secs": timeout_secs,
+                "sourceSnapshot": source_snapshot,
+                "targetSnapshot": target_snapshot,
             },
         )
 
-    async def extension_type(
-        self, selector: str, text: str, timeout_secs: int = 10
-    ) -> UIBridgeResponse:
-        """Type text into an element in the browser tab.
+    async def sdk_ai_snapshot(self) -> UIBridgeResponse:
+        """Get a semantic snapshot of the connected SDK app."""
+        return await self._request("GET", "/ui-bridge/sdk/ai/snapshot")
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Page Navigation (/ui-bridge/sdk/page/*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_page_refresh(self) -> UIBridgeResponse:
+        """Refresh the current page in the connected SDK app."""
+        return await self._request("POST", "/ui-bridge/sdk/page/refresh")
+
+    async def sdk_page_navigate(self, url: str) -> UIBridgeResponse:
+        """Navigate the connected SDK app to a URL.
 
         Args:
-            selector: CSS selector for the element.
-            text: Text to type.
-            timeout_secs: Timeout for finding the element.
+            url: The URL to navigate to.
         """
-        return await self._request(
-            "POST",
-            "/extension/command",
-            {
-                "action": "type",
-                "params": {"selector": selector, "text": text},
-                "timeout_secs": timeout_secs,
-            },
-        )
+        return await self._request("POST", "/ui-bridge/sdk/page/navigate", {"url": url})
 
-    async def extension_screenshot(self) -> UIBridgeResponse:
-        """Take a screenshot of the current browser tab.
+    async def sdk_page_go_back(self) -> UIBridgeResponse:
+        """Go back in browser history in the connected SDK app."""
+        return await self._request("POST", "/ui-bridge/sdk/page/back")
 
-        Returns:
-            Base64-encoded PNG image.
-        """
-        return await self._request(
-            "POST",
-            "/extension/command",
-            {"action": "screenshot"},
-        )
+    async def sdk_page_go_forward(self) -> UIBridgeResponse:
+        """Go forward in browser history in the connected SDK app."""
+        return await self._request("POST", "/ui-bridge/sdk/page/forward")
