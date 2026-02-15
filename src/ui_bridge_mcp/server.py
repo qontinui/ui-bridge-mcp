@@ -725,13 +725,13 @@ Example: Compare Runner (localhost:1420) with qontinui-web (localhost:3001)""",
 ]
 
 
-@server.list_tools()  # type: ignore[misc,no-untyped-call]
+@server.list_tools()  # type: ignore
 async def list_tools() -> list[types.Tool]:
     """List available UI Bridge tools."""
     return TOOLS
 
 
-@server.call_tool()  # type: ignore[misc]
+@server.call_tool()  # type: ignore
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     """Handle tool calls."""
     ui_client = get_client()
