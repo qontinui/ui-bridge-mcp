@@ -725,7 +725,7 @@ Example: Compare Runner (localhost:1420) with qontinui-web (localhost:3001)""",
 ]
 
 
-@server.list_tools()  # type: ignore[no-untyped-call,misc]
+@server.list_tools()  # type: ignore[misc,no-untyped-call]
 async def list_tools() -> list[types.Tool]:
     """List available UI Bridge tools."""
     return TOOLS
