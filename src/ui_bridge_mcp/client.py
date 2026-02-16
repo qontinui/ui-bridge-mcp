@@ -230,6 +230,30 @@ class UIBridgeClient:
             {"action": "hover"},
         )
 
+    async def control_action(
+        self,
+        element_id: str,
+        action: str,
+        params: dict[str, Any] | None = None,
+    ) -> UIBridgeResponse:
+        """Execute any action on an element in the runner's webview.
+
+        Generic method for all UI Bridge actions.
+
+        Args:
+            element_id: The element's data-ui-id.
+            action: Action name (click, type, focus, blur, hover, etc.).
+            params: Optional action parameters.
+        """
+        body: dict[str, Any] = {"action": action}
+        if params:
+            body["params"] = params
+        return await self._request(
+            "POST",
+            f"/ui-bridge/control/element/{element_id}/action",
+            body,
+        )
+
     # -------------------------------------------------------------------------
     # SDK Mode - External SDK-Integrated Apps (/ui-bridge/sdk/*)
     # -------------------------------------------------------------------------

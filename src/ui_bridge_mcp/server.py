@@ -221,6 +221,238 @@ Use ui_snapshot first to find the element_id of the input field.""",
             "required": ["element_id"],
         },
     ),
+    types.Tool(
+        name="ui_blur",
+        description="Remove focus from an element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_hover",
+        description="Hover over an element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id to hover over",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_double_click",
+        description="Double-click an element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id to double-click",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_right_click",
+        description="Right-click an element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id to right-click",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_clear",
+        description="Clear the value of an input element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id to clear",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_select",
+        description="Select an option in a dropdown/select element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The value to select",
+                },
+                "by_label": {
+                    "type": "boolean",
+                    "description": "Select by label text instead of value",
+                    "default": False,
+                },
+            },
+            "required": ["element_id", "value"],
+        },
+    ),
+    types.Tool(
+        name="ui_scroll",
+        description="Scroll within an element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id to scroll",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"],
+                    "description": "Scroll direction",
+                },
+                "amount": {
+                    "type": "number",
+                    "description": "Scroll amount in pixels",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_check",
+        description="Check a checkbox element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The checkbox element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_uncheck",
+        description="Uncheck a checkbox element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The checkbox element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_toggle",
+        description="Toggle a checkbox element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The checkbox element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_set_value",
+        description="Set the value of an input element directly in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The value to set",
+                },
+            },
+            "required": ["element_id", "value"],
+        },
+    ),
+    types.Tool(
+        name="ui_drag",
+        description="""Drag an element to a target in the runner's UI.
+
+Drag from source element to target element or position.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The source element's data-ui-id to drag",
+                },
+                "target_element_id": {
+                    "type": "string",
+                    "description": "The target element's data-ui-id to drop on",
+                },
+                "steps": {
+                    "type": "number",
+                    "description": "Number of intermediate mousemove steps (default: 10)",
+                },
+                "hold_delay": {
+                    "type": "number",
+                    "description": "Delay in ms before first move (default: 100)",
+                },
+            },
+            "required": ["element_id", "target_element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_submit",
+        description="Submit the form containing the element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id (element or its parent form)",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_reset",
+        description="Reset the form containing the element in the runner's UI.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id (element or its parent form)",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
     # SDK Mode Tools - External SDK-Integrated Apps
     types.Tool(
         name="sdk_connect",
@@ -449,6 +681,241 @@ Use sdk_snapshot first to find the element_id of the input field.""",
                 },
             },
             "required": ["element_id", "text"],
+        },
+    ),
+    types.Tool(
+        name="sdk_clear",
+        description="Clear an input element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id to clear",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_select",
+        description="Select an option in a dropdown in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The value to select",
+                },
+            },
+            "required": ["element_id", "value"],
+        },
+    ),
+    types.Tool(
+        name="sdk_focus",
+        description="Focus an element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_blur",
+        description="Remove focus from an element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_hover",
+        description="Hover over an element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_double_click",
+        description="Double-click an element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_right_click",
+        description="Right-click an element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_scroll",
+        description="Scroll within an element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down", "left", "right"],
+                    "description": "Scroll direction",
+                },
+                "amount": {
+                    "type": "number",
+                    "description": "Scroll amount in pixels",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_check",
+        description="Check a checkbox in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The checkbox element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_uncheck",
+        description="Uncheck a checkbox in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The checkbox element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_toggle",
+        description="Toggle a checkbox in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The checkbox element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_set_value",
+        description="Set the value of an input element directly in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The value to set",
+                },
+            },
+            "required": ["element_id", "value"],
+        },
+    ),
+    types.Tool(
+        name="sdk_drag",
+        description="Drag an element to a target in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The source element's data-ui-id",
+                },
+                "target_element_id": {
+                    "type": "string",
+                    "description": "The target element's data-ui-id",
+                },
+                "steps": {
+                    "type": "number",
+                    "description": "Number of intermediate mousemove steps (default: 10)",
+                },
+            },
+            "required": ["element_id", "target_element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_submit",
+        description="Submit the form containing the element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_reset",
+        description="Reset the form containing the element in the SDK app.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The element's data-ui-id",
+                },
+            },
+            "required": ["element_id"],
         },
     ),
     types.Tool(
@@ -831,6 +1298,166 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
                 types.TextContent(type="text", text=f"Focused element: {element_id}")
             ]
 
+        elif name == "ui_blur":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "blur")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Blurred element: {element_id}")
+            ]
+
+        elif name == "ui_hover":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_hover(element_id)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Hovered element: {element_id}")
+            ]
+
+        elif name == "ui_double_click":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "doubleClick")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Double-clicked element: {element_id}"
+                )
+            ]
+
+        elif name == "ui_right_click":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "rightClick")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Right-clicked element: {element_id}"
+                )
+            ]
+
+        elif name == "ui_clear":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "clear")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Cleared element: {element_id}")
+            ]
+
+        elif name == "ui_select":
+            element_id = arguments["element_id"]
+            value = arguments["value"]
+            params = {"value": value}
+            if arguments.get("by_label"):
+                params["byLabel"] = True
+            response = await ui_client.control_action(element_id, "select", params)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Selected '{value}' in element: {element_id}"
+                )
+            ]
+
+        elif name == "ui_scroll":
+            element_id = arguments["element_id"]
+            scroll_params: dict[str, Any] = {}
+            if "direction" in arguments:
+                scroll_params["direction"] = arguments["direction"]
+            if "amount" in arguments:
+                scroll_params["amount"] = arguments["amount"]
+            response = await ui_client.control_action(
+                element_id, "scroll", scroll_params
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Scrolled element: {element_id}")
+            ]
+
+        elif name == "ui_check":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "check")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Checked element: {element_id}")
+            ]
+
+        elif name == "ui_uncheck":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "uncheck")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Unchecked element: {element_id}")
+            ]
+
+        elif name == "ui_toggle":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "toggle")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Toggled element: {element_id}")
+            ]
+
+        elif name == "ui_set_value":
+            element_id = arguments["element_id"]
+            value = arguments["value"]
+            response = await ui_client.control_action(
+                element_id, "setValue", {"value": value}
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Set value '{value}' on element: {element_id}"
+                )
+            ]
+
+        elif name == "ui_drag":
+            element_id = arguments["element_id"]
+            target_id = arguments["target_element_id"]
+            params = {"target": {"elementId": target_id}}
+            if "steps" in arguments:
+                params["steps"] = arguments["steps"]
+            if "hold_delay" in arguments:
+                params["holdDelay"] = arguments["hold_delay"]
+            response = await ui_client.control_action(element_id, "drag", params)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Dragged {element_id} to {target_id}"
+                )
+            ]
+
+        elif name == "ui_submit":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "submit")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Submitted form for element: {element_id}"
+                )
+            ]
+
+        elif name == "ui_reset":
+            element_id = arguments["element_id"]
+            response = await ui_client.control_action(element_id, "reset")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Reset form for element: {element_id}"
+                )
+            ]
+
         # SDK Mode Tools
         elif name == "sdk_connect":
             url = arguments["url"]
@@ -988,6 +1615,172 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             return [
                 types.TextContent(
                     type="text", text=f"Typed '{text}' into element: {element_id}"
+                )
+            ]
+
+        elif name == "sdk_clear":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "clear")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Cleared element: {element_id}")
+            ]
+
+        elif name == "sdk_select":
+            element_id = arguments["element_id"]
+            value = arguments["value"]
+            response = await ui_client.sdk_element_action(
+                element_id, "select", {"value": value}
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Selected '{value}' in element: {element_id}"
+                )
+            ]
+
+        elif name == "sdk_focus":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "focus")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Focused element: {element_id}")
+            ]
+
+        elif name == "sdk_blur":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "blur")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Blurred element: {element_id}")
+            ]
+
+        elif name == "sdk_hover":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "hover")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Hovered element: {element_id}")
+            ]
+
+        elif name == "sdk_double_click":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "doubleClick")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Double-clicked element: {element_id}"
+                )
+            ]
+
+        elif name == "sdk_right_click":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "rightClick")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Right-clicked element: {element_id}"
+                )
+            ]
+
+        elif name == "sdk_scroll":
+            element_id = arguments["element_id"]
+            sdk_scroll_params: dict[str, Any] = {}
+            if "direction" in arguments:
+                sdk_scroll_params["direction"] = arguments["direction"]
+            if "amount" in arguments:
+                sdk_scroll_params["amount"] = arguments["amount"]
+            response = await ui_client.sdk_element_action(
+                element_id, "scroll", sdk_scroll_params or None
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Scrolled element: {element_id}")
+            ]
+
+        elif name == "sdk_check":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "check")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Checked element: {element_id}")
+            ]
+
+        elif name == "sdk_uncheck":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "uncheck")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Unchecked element: {element_id}")
+            ]
+
+        elif name == "sdk_toggle":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "toggle")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(type="text", text=f"Toggled element: {element_id}")
+            ]
+
+        elif name == "sdk_set_value":
+            element_id = arguments["element_id"]
+            value = arguments["value"]
+            response = await ui_client.sdk_element_action(
+                element_id, "setValue", {"value": value}
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Set value '{value}' on element: {element_id}"
+                )
+            ]
+
+        elif name == "sdk_drag":
+            element_id = arguments["element_id"]
+            target_id = arguments["target_element_id"]
+            params = {"target": {"elementId": target_id}}
+            if "steps" in arguments:
+                params["steps"] = arguments["steps"]
+            response = await ui_client.sdk_element_action(element_id, "drag", params)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Dragged {element_id} to {target_id}"
+                )
+            ]
+
+        elif name == "sdk_submit":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "submit")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Submitted form for element: {element_id}"
+                )
+            ]
+
+        elif name == "sdk_reset":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_element_action(element_id, "reset")
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Reset form for element: {element_id}"
                 )
             ]
 
