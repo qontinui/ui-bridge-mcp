@@ -40,4 +40,5 @@ repos:
         additional_dependencies:
           - mcp>=1.0.0
           - httpx>=0.28.0
+          - types-Pillow>=10.2.0
         args: ["--strict"]

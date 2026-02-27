@@ -2942,7 +2942,7 @@ def _annotate_screenshot(
 ) -> str:
     """Annotate a screenshot with element ref labels. Returns base64 PNG."""
     try:
-        from PIL import Image, ImageDraw, ImageFont  # type: ignore[import-untyped]
+        from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         logger.warning("Pillow not installed. Returning unannotated screenshot.")
         return screenshot_b64
@@ -2955,6 +2955,7 @@ def _annotate_screenshot(
     scale_y = img.height / height if height else 1
 
     # Try to load a small font; fall back to default
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont
     try:
         font = ImageFont.truetype("arial.ttf", 12)
     except (OSError, IOError):
@@ -2975,14 +2976,14 @@ def _annotate_screenshot(
         h = rect.get("height", 0) * scale_y
 
         # Draw rectangle outline
-        draw.rectangle([x, y, x + w, y + h], outline="red", width=2)
+        draw.rectangle((x, y, x + w, y + h), outline="red", width=2)
 
         # Draw ref label background + text
         text_bbox = draw.textbbox((0, 0), ref, font=font)
         tw = text_bbox[2] - text_bbox[0]
         th = text_bbox[3] - text_bbox[1]
         label_y = max(y - th - 4, 0)
-        draw.rectangle([x, label_y, x + tw + 4, label_y + th + 2], fill="red")
+        draw.rectangle((x, label_y, x + tw + 4, label_y + th + 2), fill="red")
         draw.text((x + 2, label_y), ref, fill="white", font=font)
 
     buf = io.BytesIO()
