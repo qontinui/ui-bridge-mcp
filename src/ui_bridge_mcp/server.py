@@ -9,6 +9,8 @@ This server provides tools for:
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import logging
 from typing import Any
@@ -37,6 +39,182 @@ def get_client() -> UIBridgeClient:
     if client is None:
         client = UIBridgeClient()
     return client
+
+
+# =============================================================================
+# Agent Mode: Compact Refs
+# =============================================================================
+
+
+class RefManager:
+    """Assigns compact refs (@e1, @e2, ...) to element IDs for agent mode."""
+
+    def __init__(self) -> None:
+        self._ref_counter = 0
+        self._ref_to_id: dict[str, str] = {}
+        self._id_to_ref: dict[str, str] = {}
+
+    def reset(self) -> None:
+        """Reset refs. Call at start of each snapshot."""
+        self._ref_counter = 0
+        self._ref_to_id.clear()
+        self._id_to_ref.clear()
+
+    def assign(self, element_id: str) -> str:
+        """Assign a compact ref to an element ID."""
+        if element_id in self._id_to_ref:
+            return self._id_to_ref[element_id]
+        self._ref_counter += 1
+        ref = f"@e{self._ref_counter}"
+        self._ref_to_id[ref] = element_id
+        self._id_to_ref[element_id] = ref
+        return ref
+
+    def resolve(self, ref_or_id: str) -> str:
+        """Resolve @eN to real ID, or pass through if already an ID."""
+        if ref_or_id.startswith("@e"):
+            resolved = self._ref_to_id.get(ref_or_id)
+            if resolved is None:
+                raise ValueError(
+                    f"Unknown ref {ref_or_id}. Take a new snapshot to refresh refs."
+                )
+            return resolved
+        return ref_or_id
+
+
+# =============================================================================
+# Agent Mode: Snapshot Diffing
+# =============================================================================
+
+
+class DiffTracker:
+    """Tracks element state between snapshots for diffing."""
+
+    TRACKED_PROPS = ("visible", "enabled", "focused", "checked", "value", "textContent")
+
+    def __init__(self) -> None:
+        self._last_elements: dict[str, dict[str, Any]] | None = None
+
+    def update_and_diff(self, elements: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Store snapshot, return diff against previous (or None if first)."""
+        new_map = {el["id"]: el for el in elements if "id" in el}
+        diff = None
+        if self._last_elements is not None:
+            diff = self._compute(self._last_elements, new_map)
+        self._last_elements = new_map
+        return diff
+
+    def _compute(
+        self, old: dict[str, dict[str, Any]], new: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
+        appeared = [eid for eid in new if eid not in old]
+        disappeared = [eid for eid in old if eid not in new]
+        modified: list[dict[str, Any]] = []
+        for eid in new:
+            if eid in old:
+                changes = self._prop_changes(old[eid], new[eid])
+                if changes:
+                    modified.append({"id": eid, "changes": changes})
+        return {
+            "appeared": appeared,
+            "disappeared": disappeared,
+            "modified": modified,
+        }
+
+    def _prop_changes(
+        self, old_el: dict[str, Any], new_el: dict[str, Any]
+    ) -> dict[str, Any]:
+        old_state = old_el.get("state", {})
+        new_state = new_el.get("state", {})
+        changes: dict[str, Any] = {}
+        for prop in self.TRACKED_PROPS:
+            old_val = old_state.get(prop)
+            new_val = new_state.get(prop)
+            if old_val != new_val:
+                changes[prop] = {"from": old_val, "to": new_val}
+        return changes
+
+
+# Module-level singletons
+ref_manager = RefManager()
+control_diff_tracker = DiffTracker()
+sdk_diff_tracker = DiffTracker()
+
+
+# =============================================================================
+# Agent Mode: Content Boundary Markers
+# =============================================================================
+
+CONTENT_START = "<<CONTENT>>"
+CONTENT_END = "<</CONTENT>>"
+
+
+def sanitize_element_content(data: dict[str, Any]) -> dict[str, Any]:
+    """Wrap user-generated content fields in boundary markers."""
+    state = data.get("state", {})
+    for field in ("textContent", "innerHTML", "value"):
+        if field in state and state[field]:
+            state[field] = f"{CONTENT_START}{state[field]}{CONTENT_END}"
+    return data
+
+
+# =============================================================================
+# Agent Mode: Output Size Helpers
+# =============================================================================
+
+
+def truncate_field(text: str | None, max_len: int) -> str | None:
+    """Truncate a text field to max_len chars."""
+    if not text or len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}... [{len(text)} chars total]"
+
+
+# =============================================================================
+# Formatting
+# =============================================================================
+
+
+def format_element_compact(element: dict[str, Any], ref: str) -> str:
+    """Single-line compact format for agent mode."""
+    elem_id = element.get("id", "?")
+    elem_type = element.get("type", "?")
+    label = element.get("label", "")
+    category = element.get("category", "")
+    content_meta = element.get("contentMetadata", {})
+    state = element.get("state", {})
+    rect = state.get("rect", {})
+
+    parts = [ref, elem_id, f"({elem_type})"]
+    if label:
+        parts.append(f'"{label}"')
+    if rect:
+        parts.append(
+            f'[{rect.get("x", 0):.0f},{rect.get("y", 0):.0f} '
+            f'{rect.get("width", 0):.0f}x{rect.get("height", 0):.0f}]'
+        )
+
+    # Content role for content elements
+    if category == "content" and content_meta:
+        content_role = content_meta.get("contentRole", "")
+        if content_role:
+            parts.append(f"content:{content_role}")
+
+    flags: list[str] = []
+    if not state.get("visible", True):
+        flags.append("hidden")
+    if not state.get("enabled", True):
+        flags.append("disabled")
+    if state.get("value"):
+        flags.append("has-value")
+    if state.get("checked"):
+        flags.append("checked")
+    if state.get("focused"):
+        flags.append("focused")
+    if flags:
+        parts.append(" ".join(flags))
+
+    return " ".join(parts)
 
 
 def format_element_summary(element: dict[str, Any]) -> str:
@@ -129,10 +307,41 @@ Returns all registered elements with their current state including:
 - Visibility and enabled state
 - Available actions (click, type, focus, etc.)
 
-Use this to understand the current UI state before interacting with elements.""",
+Use agent_mode=true for compact output with short refs (@e1, @e2).
+Use interactive_only=true to exclude content elements.
+Use max_elements to limit output size.""",
         inputSchema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "agent_mode": {
+                    "type": "boolean",
+                    "description": (
+                        "Compact output with short refs (@e1, @e2). "
+                        "Use refs in subsequent actions. "
+                        "Full details via ui_get_element."
+                    ),
+                    "default": False,
+                },
+                "interactive_only": {
+                    "type": "boolean",
+                    "description": (
+                        "Only return interactive elements (buttons, inputs, links). "
+                        "Excludes static content."
+                    ),
+                    "default": False,
+                },
+                "max_elements": {
+                    "type": "integer",
+                    "description": "Max elements to return. Remaining summarized as count.",
+                },
+                "max_content_length": {
+                    "type": "integer",
+                    "description": (
+                        "Max chars per text field (label, value). "
+                        "Longer values truncated."
+                    ),
+                },
+            },
             "required": [],
         },
     ),
@@ -159,13 +368,18 @@ a fresh registration of all interactive elements.""",
         description="""Get detailed information about a specific UI element.
 
 Returns the element's full state including bounds, visibility,
-enabled state, text content, and available actions.""",
+enabled state, text content, and available actions.
+Accepts refs like @e1 from agent_mode snapshots.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id (e.g., 'sidebar-nav-item-settings')",
+                    "description": "The element's data-ui-id or agent ref (e.g., '@e1', 'sidebar-nav-item-settings')",
+                },
+                "max_content_length": {
+                    "type": "integer",
+                    "description": "Max chars per text field. Longer values truncated.",
                 },
             },
             "required": ["element_id"],
@@ -175,13 +389,14 @@ enabled state, text content, and available actions.""",
         name="ui_click",
         description="""Click an element in the runner's UI.
 
-Use ui_snapshot first to find the element_id you want to click.""",
+Use ui_snapshot first to find the element_id you want to click.
+Accepts refs like @e1 from agent_mode snapshots.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to click",
+                    "description": "The element's data-ui-id or agent ref (@e1)",
                 },
             },
             "required": ["element_id"],
@@ -191,13 +406,14 @@ Use ui_snapshot first to find the element_id you want to click.""",
         name="ui_type",
         description="""Type text into an input element in the runner's UI.
 
-Use ui_snapshot first to find the element_id of the input field.""",
+Use ui_snapshot first to find the element_id of the input field.
+Accepts refs like @e1 from agent_mode snapshots.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to type into",
+                    "description": "The element's data-ui-id or agent ref (@e1)",
                 },
                 "text": {
                     "type": "string",
@@ -504,7 +720,9 @@ Returns all registered elements with their current state including:
 - Available actions
 - Content metadata (for content elements like headings, paragraphs, badges, etc.)
 
-Use this to understand the current UI state before interacting with elements.""",
+Use agent_mode=true for compact output with short refs (@e1, @e2).
+Use interactive_only=true to exclude content elements.
+Use max_elements to limit output size.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -517,6 +735,34 @@ Use this to understand the current UI state before interacting with elements."""
                     ),
                     "default": True,
                 },
+                "agent_mode": {
+                    "type": "boolean",
+                    "description": (
+                        "Compact output with short refs (@e1, @e2). "
+                        "Use refs in subsequent actions. "
+                        "Full details via sdk_get_element."
+                    ),
+                    "default": False,
+                },
+                "interactive_only": {
+                    "type": "boolean",
+                    "description": (
+                        "Only return interactive elements (buttons, inputs, links). "
+                        "Excludes static content. Overrides include_content."
+                    ),
+                    "default": False,
+                },
+                "max_elements": {
+                    "type": "integer",
+                    "description": "Max elements to return. Remaining summarized as count.",
+                },
+                "max_content_length": {
+                    "type": "integer",
+                    "description": (
+                        "Max chars per text field (label, value). "
+                        "Longer values truncated."
+                    ),
+                },
             },
             "required": [],
         },
@@ -526,7 +772,8 @@ Use this to understand the current UI state before interacting with elements."""
         description="""List all registered UI elements in the SDK app.
 
 Returns element IDs, types, labels, and current state.
-Supports filtering by content type to find specific kinds of elements.""",
+Supports filtering by content type to find specific kinds of elements.
+Use agent_mode=true for compact output with short refs (@e1, @e2).""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -565,6 +812,25 @@ Supports filtering by content type to find specific kinds of elements.""",
                         "Filter to elements matching specific content types. "
                         "Example: ['heading', 'badge', 'metric-value'] to find "
                         "headings, badges, and metric values on the page."
+                    ),
+                },
+                "agent_mode": {
+                    "type": "boolean",
+                    "description": (
+                        "Compact output with short refs (@e1, @e2). "
+                        "Use refs in subsequent actions."
+                    ),
+                    "default": False,
+                },
+                "max_elements": {
+                    "type": "integer",
+                    "description": "Max elements to return. Remaining summarized as count.",
+                },
+                "max_content_length": {
+                    "type": "integer",
+                    "description": (
+                        "Max chars per text field (label, value). "
+                        "Longer values truncated."
                     ),
                 },
             },
@@ -635,13 +901,18 @@ Call this if elements aren't showing up in sdk_snapshot or sdk_elements.""",
         description="""Get detailed information about a specific element.
 
 Returns the element's full state including bounds, visibility,
-enabled state, text content, and available actions.""",
+enabled state, text content, and available actions.
+Accepts refs like @e1 from agent_mode snapshots.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's data-ui-id or agent ref (e.g., '@e1')",
+                },
+                "max_content_length": {
+                    "type": "integer",
+                    "description": "Max chars per text field. Longer values truncated.",
                 },
             },
             "required": ["element_id"],
@@ -651,13 +922,14 @@ enabled state, text content, and available actions.""",
         name="sdk_click",
         description="""Click an element in the SDK app by its data-ui-id.
 
-Use sdk_snapshot or sdk_elements first to find the element_id.""",
+Use sdk_snapshot or sdk_elements first to find the element_id.
+Accepts refs like @e1 from agent_mode snapshots.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to click",
+                    "description": "The element's data-ui-id or agent ref (@e1)",
                 },
             },
             "required": ["element_id"],
@@ -667,13 +939,14 @@ Use sdk_snapshot or sdk_elements first to find the element_id.""",
         name="sdk_type",
         description="""Type text into an input element in the SDK app.
 
-Use sdk_snapshot first to find the element_id of the input field.""",
+Use sdk_snapshot first to find the element_id of the input field.
+Accepts refs like @e1 from agent_mode snapshots.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to type into",
+                    "description": "The element's data-ui-id or agent ref (@e1)",
                 },
                 "text": {
                     "type": "string",
@@ -1189,6 +1462,67 @@ Example: Compare Runner (localhost:1420) with qontinui-web (localhost:3001)""",
             "required": ["source_url", "target_url"],
         },
     ),
+    # Agent Mode Tools
+    types.Tool(
+        name="ui_diff",
+        description="""Show what changed since the last ui_snapshot.
+
+Returns appeared, disappeared, and modified elements.
+Must call ui_snapshot at least once before using this.
+If agent_mode was used, includes refs in the output.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_diff",
+        description="""Show what changed since the last sdk_snapshot.
+
+Returns appeared, disappeared, and modified elements.
+Must call sdk_snapshot at least once before using this.
+If agent_mode was used, includes refs in the output.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_annotated_screenshot",
+        description="""Capture a screenshot of the runner's UI with element labels overlaid.
+
+Each visible element gets a numbered overlay (@e1, @e2) matching agent mode refs.
+Returns an annotated image. Useful for understanding element positions visually.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index (0-based). Defaults to primary monitor.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_annotated_screenshot",
+        description="""Capture a screenshot of the SDK app's monitor with element labels overlaid.
+
+Each visible element gets a numbered overlay (@e1, @e2) matching agent mode refs.
+Returns an annotated image. Useful for understanding element positions visually.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index (0-based). Defaults to primary monitor.",
+                },
+            },
+            "required": [],
+        },
+    ),
 ]
 
 
@@ -1199,7 +1533,9 @@ async def list_tools() -> list[types.Tool]:
 
 
 @server.call_tool()  # type: ignore
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+async def call_tool(
+    name: str, arguments: dict[str, Any]
+) -> list[types.TextContent | types.ImageContent]:
     """Handle tool calls."""
     ui_client = get_client()
 
@@ -1222,6 +1558,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
         # Control Mode Tools
         elif name == "ui_snapshot":
+            agent_mode = arguments.get("agent_mode", False)
+            interactive_only = arguments.get("interactive_only", False)
+            max_elements = arguments.get("max_elements")
+            max_content_length = arguments.get("max_content_length")
+
             response = await ui_client.control_snapshot()
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1229,21 +1570,70 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             data = response.data or {}
             elements = data.get("elements", [])
 
-            lines = [f"UI Snapshot ({len(elements)} elements):", ""]
+            # Feature 2: Interactive-only filtering
+            if interactive_only:
+                elements = [el for el in elements if el.get("category") != "content"]
 
-            # Group by type
-            by_type: dict[str, list[dict[str, Any]]] = {}
-            for el in elements:
-                el_type = el.get("type", "unknown")
-                if el_type not in by_type:
-                    by_type[el_type] = []
-                by_type[el_type].append(el)
+            # Update diff tracker (control mode)
+            control_diff_tracker.update_and_diff(elements)
 
-            for el_type, els in sorted(by_type.items()):
-                lines.append(f"## {el_type} ({len(els)})")
-                for el in els:
-                    lines.append(format_element_summary(el))
-                lines.append("")
+            # Feature 3: Truncate content fields
+            if max_content_length:
+                for el in elements:
+                    el["label"] = truncate_field(el.get("label"), max_content_length)
+                    state = el.get("state", {})
+                    for field in ("textContent", "value"):
+                        if field in state:
+                            state[field] = truncate_field(
+                                state.get(field), max_content_length
+                            )
+
+            # Feature 3: Limit element count
+            overflow = 0
+            if max_elements and len(elements) > max_elements:
+                overflow = len(elements) - max_elements
+                elements = elements[:max_elements]
+
+            total_count = len(elements) + overflow
+
+            if agent_mode:
+                # Feature 1: Compact refs
+                ref_manager.reset()
+                mode_label = "agent mode"
+                if interactive_only:
+                    mode_label += ", interactive only"
+                lines = [f"UI Snapshot ({total_count} elements, {mode_label})", ""]
+
+                by_type: dict[str, list[dict[str, Any]]] = {}
+                for el in elements:
+                    el_type = el.get("type", "unknown")
+                    if el_type not in by_type:
+                        by_type[el_type] = []
+                    by_type[el_type].append(el)
+
+                for el_type, els in sorted(by_type.items()):
+                    lines.append(f"## {el_type} ({len(els)})")
+                    for el in els:
+                        ref = ref_manager.assign(el.get("id", "?"))
+                        lines.append(format_element_compact(el, ref))
+                    lines.append("")
+            else:
+                lines = [f"UI Snapshot ({total_count} elements):", ""]
+                by_type = {}
+                for el in elements:
+                    el_type = el.get("type", "unknown")
+                    if el_type not in by_type:
+                        by_type[el_type] = []
+                    by_type[el_type].append(el)
+
+                for el_type, els in sorted(by_type.items()):
+                    lines.append(f"## {el_type} ({len(els)})")
+                    for el in els:
+                        lines.append(format_element_summary(el))
+                    lines.append("")
+
+            if overflow:
+                lines.append(f"+{overflow} more elements not shown")
 
             return [types.TextContent(type="text", text="\n".join(lines))]
 
@@ -1260,16 +1650,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_get_element":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
+            max_content_length = arguments.get("max_content_length")
             response = await ui_client.control_get_element(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            result_data = response.data or {}
+            # Feature 5: Content boundary markers
+            sanitize_element_content(result_data)
+            # Feature 3: Truncate content fields
+            if max_content_length:
+                state = result_data.get("state", {})
+                for field in ("textContent", "innerHTML", "value"):
+                    if field in state:
+                        state[field] = truncate_field(
+                            state.get(field), max_content_length
+                        )
             return [
-                types.TextContent(type="text", text=json.dumps(response.data, indent=2))
+                types.TextContent(type="text", text=json.dumps(result_data, indent=2))
             ]
 
         elif name == "ui_click":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_click(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1278,7 +1680,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_type":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             text = arguments["text"]
             response = await ui_client.control_type(element_id, text)
             if not response.success:
@@ -1290,7 +1692,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_focus":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_focus(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1299,7 +1701,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_blur":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "blur")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1308,7 +1710,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_hover":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_hover(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1317,7 +1719,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_double_click":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "doubleClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1328,7 +1730,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_right_click":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "rightClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1339,7 +1741,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_clear":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "clear")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1348,7 +1750,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_select":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             value = arguments["value"]
             params = {"value": value}
             if arguments.get("by_label"):
@@ -1363,7 +1765,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_scroll":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             scroll_params: dict[str, Any] = {}
             if "direction" in arguments:
                 scroll_params["direction"] = arguments["direction"]
@@ -1379,7 +1781,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_check":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "check")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1388,7 +1790,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_uncheck":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "uncheck")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1397,7 +1799,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_toggle":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "toggle")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1406,7 +1808,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_set_value":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             value = arguments["value"]
             response = await ui_client.control_action(
                 element_id, "setValue", {"value": value}
@@ -1420,8 +1822,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_drag":
-            element_id = arguments["element_id"]
-            target_id = arguments["target_element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
+            target_id = ref_manager.resolve(arguments["target_element_id"])
             params = {"target": {"elementId": target_id}}
             if "steps" in arguments:
                 params["steps"] = arguments["steps"]
@@ -1437,7 +1839,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_submit":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "submit")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1448,7 +1850,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "ui_reset":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "reset")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1494,6 +1896,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
         elif name == "sdk_snapshot":
             include_content = arguments.get("include_content", True)
+            agent_mode = arguments.get("agent_mode", False)
+            interactive_only = arguments.get("interactive_only", False)
+            max_elements = arguments.get("max_elements")
+            max_content_length = arguments.get("max_content_length")
+
             response = await ui_client.sdk_snapshot(
                 include_content=include_content,
             )
@@ -1502,28 +1909,84 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             data = response.data or {}
             elements = data.get("elements", [])
 
-            # Client-side content filtering as fallback until SDK handlers
-            # support the includeContent parameter natively
-            if not include_content:
+            # Feature 2: Interactive-only filtering (overrides include_content)
+            if interactive_only:
+                elements = [el for el in elements if el.get("category") != "content"]
+            elif not include_content:
                 elements = [el for el in elements if el.get("category") != "content"]
 
-            lines = [f"SDK Snapshot ({len(elements)} elements):", ""]
-            sdk_by_type: dict[str, list[dict[str, Any]]] = {}
-            for el in elements:
-                el_type = el.get("type", "unknown")
-                if el_type not in sdk_by_type:
-                    sdk_by_type[el_type] = []
-                sdk_by_type[el_type].append(el)
-            for el_type, els in sorted(sdk_by_type.items()):
-                lines.append(f"## {el_type} ({len(els)})")
-                for el in els:
-                    lines.append(format_element_summary(el))
-                lines.append("")
+            # Update diff tracker (SDK mode)
+            sdk_diff_tracker.update_and_diff(elements)
+
+            # Feature 3: Truncate content fields
+            if max_content_length:
+                for el in elements:
+                    el["label"] = truncate_field(el.get("label"), max_content_length)
+                    state = el.get("state", {})
+                    for field in ("textContent", "value"):
+                        if field in state:
+                            state[field] = truncate_field(
+                                state.get(field), max_content_length
+                            )
+
+            # Feature 3: Limit element count
+            overflow = 0
+            if max_elements and len(elements) > max_elements:
+                overflow = len(elements) - max_elements
+                elements = elements[:max_elements]
+
+            total_count = len(elements) + overflow
+
+            if agent_mode:
+                # Feature 1: Compact refs
+                ref_manager.reset()
+                mode_label = "agent mode"
+                if interactive_only:
+                    mode_label += ", interactive only"
+                lines = [
+                    f"SDK Snapshot ({total_count} elements, {mode_label})",
+                    "",
+                ]
+
+                sdk_by_type: dict[str, list[dict[str, Any]]] = {}
+                for el in elements:
+                    el_type = el.get("type", "unknown")
+                    if el_type not in sdk_by_type:
+                        sdk_by_type[el_type] = []
+                    sdk_by_type[el_type].append(el)
+
+                for el_type, els in sorted(sdk_by_type.items()):
+                    lines.append(f"## {el_type} ({len(els)})")
+                    for el in els:
+                        ref = ref_manager.assign(el.get("id", "?"))
+                        lines.append(format_element_compact(el, ref))
+                    lines.append("")
+            else:
+                lines = [f"SDK Snapshot ({total_count} elements):", ""]
+                sdk_by_type = {}
+                for el in elements:
+                    el_type = el.get("type", "unknown")
+                    if el_type not in sdk_by_type:
+                        sdk_by_type[el_type] = []
+                    sdk_by_type[el_type].append(el)
+                for el_type, els in sorted(sdk_by_type.items()):
+                    lines.append(f"## {el_type} ({len(els)})")
+                    for el in els:
+                        lines.append(format_element_summary(el))
+                    lines.append("")
+
+            if overflow:
+                lines.append(f"+{overflow} more elements not shown")
+
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_elements":
             content_only = arguments.get("content_only", False)
             content_types = arguments.get("content_types")
+            agent_mode = arguments.get("agent_mode", False)
+            max_elements = arguments.get("max_elements")
+            max_content_length = arguments.get("max_content_length")
+
             response = await ui_client.sdk_elements(
                 content_only=content_only,
                 content_types=content_types,
@@ -1546,14 +2009,46 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
                     or el.get("type") in ct_set
                 ]
 
+            # Truncate content fields
+            if max_content_length:
+                for el in elements:
+                    el["label"] = truncate_field(el.get("label"), max_content_length)
+                    state = el.get("state", {})
+                    for field in ("textContent", "value"):
+                        if field in state:
+                            state[field] = truncate_field(
+                                state.get(field), max_content_length
+                            )
+
+            # Limit element count
+            overflow = 0
+            if max_elements and len(elements) > max_elements:
+                overflow = len(elements) - max_elements
+                elements = elements[:max_elements]
+
+            total_count = len(elements) + overflow
             filter_desc = ""
             if content_only:
                 filter_desc = " (content only)"
             elif content_types:
                 filter_desc = f" (filtered: {', '.join(content_types)})"
-            lines = [f"SDK Elements ({len(elements)}){filter_desc}:", ""]
-            for el in elements:
-                lines.append(format_element_summary(el))
+
+            if agent_mode:
+                ref_manager.reset()
+                lines = [
+                    f"SDK Elements ({total_count}){filter_desc} [agent mode]:",
+                    "",
+                ]
+                for el in elements:
+                    ref = ref_manager.assign(el.get("id", "?"))
+                    lines.append(format_element_compact(el, ref))
+            else:
+                lines = [f"SDK Elements ({total_count}){filter_desc}:", ""]
+                for el in elements:
+                    lines.append(format_element_summary(el))
+
+            if overflow:
+                lines.append(f"\n+{overflow} more elements not shown")
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_discover":
@@ -1587,16 +2082,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_get_element":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
+            max_content_length = arguments.get("max_content_length")
             response = await ui_client.sdk_element(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            result_data = response.data or {}
+            # Feature 5: Content boundary markers
+            sanitize_element_content(result_data)
+            # Feature 3: Truncate content fields
+            if max_content_length:
+                state = result_data.get("state", {})
+                for field in ("textContent", "innerHTML", "value"):
+                    if field in state:
+                        state[field] = truncate_field(
+                            state.get(field), max_content_length
+                        )
             return [
-                types.TextContent(type="text", text=json.dumps(response.data, indent=2))
+                types.TextContent(type="text", text=json.dumps(result_data, indent=2))
             ]
 
         elif name == "sdk_click":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "click")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1605,7 +2112,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_type":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             text = arguments["text"]
             response = await ui_client.sdk_element_action(
                 element_id, "type", {"text": text}
@@ -1619,7 +2126,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_clear":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "clear")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1628,7 +2135,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_select":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             value = arguments["value"]
             response = await ui_client.sdk_element_action(
                 element_id, "select", {"value": value}
@@ -1642,7 +2149,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_focus":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "focus")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1651,7 +2158,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_blur":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "blur")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1660,7 +2167,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_hover":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "hover")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1669,7 +2176,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_double_click":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "doubleClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1680,7 +2187,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_right_click":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "rightClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1691,7 +2198,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_scroll":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             sdk_scroll_params: dict[str, Any] = {}
             if "direction" in arguments:
                 sdk_scroll_params["direction"] = arguments["direction"]
@@ -1707,7 +2214,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_check":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "check")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1716,7 +2223,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_uncheck":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "uncheck")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1725,7 +2232,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_toggle":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "toggle")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1734,7 +2241,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_set_value":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             value = arguments["value"]
             response = await ui_client.sdk_element_action(
                 element_id, "setValue", {"value": value}
@@ -1748,8 +2255,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_drag":
-            element_id = arguments["element_id"]
-            target_id = arguments["target_element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
+            target_id = ref_manager.resolve(arguments["target_element_id"])
             params = {"target": {"elementId": target_id}}
             if "steps" in arguments:
                 params["steps"] = arguments["steps"]
@@ -1763,7 +2270,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_submit":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "submit")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -1774,7 +2281,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             ]
 
         elif name == "sdk_reset":
-            element_id = arguments["element_id"]
+            element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "reset")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
@@ -2253,12 +2760,234 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
             return [types.TextContent(type="text", text="\n".join(lines))]
 
+        # Agent Mode: Diff Tools
+        elif name == "ui_diff":
+            response = await ui_client.control_snapshot()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            elements = data.get("elements", [])
+            diff = control_diff_tracker.update_and_diff(elements)
+            if diff is None:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="No previous snapshot to diff against. Call ui_snapshot first.",
+                    )
+                ]
+            return [
+                types.TextContent(type="text", text=_format_diff(diff, ref_manager))
+            ]
+
+        elif name == "sdk_diff":
+            response = await ui_client.sdk_snapshot()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            elements = data.get("elements", [])
+            diff = sdk_diff_tracker.update_and_diff(elements)
+            if diff is None:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="No previous snapshot to diff against. Call sdk_snapshot first.",
+                    )
+                ]
+            return [
+                types.TextContent(type="text", text=_format_diff(diff, ref_manager))
+            ]
+
+        # Agent Mode: Annotated Screenshots
+        elif name == "ui_annotated_screenshot":
+            monitor = arguments.get("monitor")
+            # Get snapshot for element positions
+            snap_resp = await ui_client.control_snapshot()
+            if not snap_resp.success:
+                return [
+                    types.TextContent(
+                        type="text", text=f"Error getting snapshot: {snap_resp.error}"
+                    )
+                ]
+            snap_elements = (snap_resp.data or {}).get("elements", [])
+            # Get screenshot
+            screenshot_resp = await ui_client.control_annotated_screenshot(
+                monitor=monitor
+            )
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            ss_width = ss_data.get("width", 0)
+            ss_height = ss_data.get("height", 0)
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+            annotated_b64 = _annotate_screenshot(
+                screenshot_b64, snap_elements, ss_width, ss_height, ref_manager
+            )
+            return [
+                types.ImageContent(
+                    type="image", data=annotated_b64, mimeType="image/png"
+                )
+            ]
+
+        elif name == "sdk_annotated_screenshot":
+            monitor = arguments.get("monitor")
+            # Get snapshot for element positions
+            snap_resp = await ui_client.sdk_snapshot()
+            if not snap_resp.success:
+                return [
+                    types.TextContent(
+                        type="text", text=f"Error getting snapshot: {snap_resp.error}"
+                    )
+                ]
+            snap_elements = (snap_resp.data or {}).get("elements", [])
+            # Get screenshot
+            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            ss_width = ss_data.get("width", 0)
+            ss_height = ss_data.get("height", 0)
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+            annotated_b64 = _annotate_screenshot(
+                screenshot_b64, snap_elements, ss_width, ss_height, ref_manager
+            )
+            return [
+                types.ImageContent(
+                    type="image", data=annotated_b64, mimeType="image/png"
+                )
+            ]
+
         else:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
 
     except Exception as e:
         logger.exception(f"Error calling tool {name}")
         return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+
+
+# =============================================================================
+# Agent Mode Helper Functions
+# =============================================================================
+
+
+def _format_diff(diff: dict[str, Any], rm: RefManager) -> str:
+    """Format a snapshot diff for display."""
+    appeared = diff.get("appeared", [])
+    disappeared = diff.get("disappeared", [])
+    modified = diff.get("modified", [])
+
+    if not appeared and not disappeared and not modified:
+        return "No changes detected."
+
+    lines = ["UI Diff:"]
+
+    if appeared:
+        refs = []
+        for eid in appeared:
+            ref = rm._id_to_ref.get(eid)
+            refs.append(f"{ref} ({eid})" if ref else eid)
+        lines.append(f"Appeared ({len(appeared)}): {', '.join(refs)}")
+
+    if disappeared:
+        refs = []
+        for eid in disappeared:
+            ref = rm._id_to_ref.get(eid)
+            refs.append(f"{ref} ({eid})" if ref else eid)
+        lines.append(f"Disappeared ({len(disappeared)}): {', '.join(refs)}")
+
+    if modified:
+        lines.append(f"Modified ({len(modified)}):")
+        for m in modified:
+            eid = m["id"]
+            ref = rm._id_to_ref.get(eid)
+            label = f"  {ref} ({eid})" if ref else f"  {eid}"
+            changes = m["changes"]
+            change_parts = []
+            for prop, vals in changes.items():
+                from_val = repr(vals["from"])
+                to_val = repr(vals["to"])
+                change_parts.append(f"{prop} {from_val} -> {to_val}")
+            lines.append(f"{label}: {', '.join(change_parts)}")
+
+    return "\n".join(lines)
+
+
+def _annotate_screenshot(
+    screenshot_b64: str,
+    elements: list[dict[str, Any]],
+    width: int,
+    height: int,
+    rm: RefManager,
+) -> str:
+    """Annotate a screenshot with element ref labels. Returns base64 PNG."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning("Pillow not installed. Returning unannotated screenshot.")
+        return screenshot_b64
+
+    img = Image.open(io.BytesIO(base64.b64decode(screenshot_b64)))
+    draw = ImageDraw.Draw(img)
+
+    # Account for DPI scaling: screenshot is physical pixels, rects are CSS pixels
+    scale_x = img.width / width if width else 1
+    scale_y = img.height / height if height else 1
+
+    # Try to load a small font; fall back to default
+    try:
+        font = ImageFont.truetype("arial.ttf", 12)
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+
+    for el in elements:
+        state = el.get("state", {})
+        rect = state.get("rect", {})
+        if not rect or not state.get("visible", True):
+            continue
+
+        elem_id = el.get("id", "?")
+        ref = rm.assign(elem_id)
+
+        x = rect.get("x", 0) * scale_x
+        y = rect.get("y", 0) * scale_y
+        w = rect.get("width", 0) * scale_x
+        h = rect.get("height", 0) * scale_y
+
+        # Draw rectangle outline
+        draw.rectangle([x, y, x + w, y + h], outline="red", width=2)
+
+        # Draw ref label background + text
+        text_bbox = draw.textbbox((0, 0), ref, font=font)
+        tw = text_bbox[2] - text_bbox[0]
+        th = text_bbox[3] - text_bbox[1]
+        label_y = max(y - th - 4, 0)
+        draw.rectangle([x, label_y, x + tw + 4, label_y + th + 2], fill="red")
+        draw.text((x + 2, label_y), ref, fill="white", font=font)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 async def main() -> None:

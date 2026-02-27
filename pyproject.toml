@@ -25,6 +25,7 @@ ui-bridge-mcp = "ui_bridge_mcp.server:run"
 python = "^3.12"
 mcp = "^1.0.0"
 httpx = "^0.28.0"
+Pillow = "^11.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.10"

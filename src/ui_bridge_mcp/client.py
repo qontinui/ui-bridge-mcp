@@ -492,3 +492,44 @@ class UIBridgeClient:
     async def sdk_page_go_forward(self) -> UIBridgeResponse:
         """Go forward in browser history in the connected SDK app."""
         return await self._request("POST", "/ui-bridge/sdk/page/forward")
+
+    # -------------------------------------------------------------------------
+    # Agent Mode - Annotated Screenshots
+    # -------------------------------------------------------------------------
+
+    async def control_annotated_screenshot(
+        self, monitor: int | None = None
+    ) -> UIBridgeResponse:
+        """Get a screenshot of the runner's monitor for annotation.
+
+        Returns screenshot base64, width, and height in one response.
+
+        Args:
+            monitor: Monitor index (0-based). Defaults to primary.
+        """
+        params: dict[str, str] | None = None
+        if monitor is not None:
+            params = {"monitor": str(monitor)}
+        return await self._get("/ui-bridge/control/annotated-screenshot", params=params)
+
+    async def sdk_screenshot_raw(self, monitor: int | None = None) -> UIBridgeResponse:
+        """Get raw screenshot data from the SDK app's monitor.
+
+        Returns screenshot base64, width, and height for annotation.
+
+        Args:
+            monitor: Monitor index (0-based). Defaults to primary.
+        """
+        params: dict[str, str] | None = None
+        if monitor is not None:
+            params = {"monitor": str(monitor)}
+        return await self._request("GET", "/ui-bridge/sdk/screenshot", params=params)
+
+    async def _get(
+        self,
+        endpoint: str,
+        params: dict[str, str] | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> UIBridgeResponse:
+        """Make a GET request (convenience wrapper)."""
+        return await self._request("GET", endpoint, params=params, timeout=timeout)
