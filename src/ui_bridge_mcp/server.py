@@ -190,8 +190,8 @@ def format_element_compact(element: dict[str, Any], ref: str) -> str:
         parts.append(f'"{label}"')
     if rect:
         parts.append(
-            f'[{rect.get("x", 0):.0f},{rect.get("y", 0):.0f} '
-            f'{rect.get("width", 0):.0f}x{rect.get("height", 0):.0f}]'
+            f"[{rect.get('x', 0):.0f},{rect.get('y', 0):.0f} "
+            f"{rect.get('width', 0):.0f}x{rect.get('height', 0):.0f}]"
         )
 
     # Content role for content elements
@@ -3223,19 +3223,26 @@ async def call_tool(
             for snap in snapshots:
                 vw = snap.get("viewportWidth", "?")
                 label = snap.get("viewportLabel", "")
-                elements = snap.get("elements", [])
-                result_lines.append(
-                    f"\n  === {label} ({vw}px) — {len(elements)} elements ==="
+                raw_elems = snap.get("elements", [])
+                vp_elements: list[dict[str, object]] = (
+                    raw_elems if isinstance(raw_elems, list) else []
                 )
-                for el in elements[:20]:
-                    eid = el.get("elementId", "?")
-                    rect = el.get("rect", {})
-                    w = rect.get("width", "?")
-                    h = rect.get("height", "?")
-                    display = el.get("styles", {}).get("display", "?")
+                result_lines.append(
+                    f"\n  === {label} ({vw}px) — {len(vp_elements)} elements ==="
+                )
+                for el in vp_elements[:20]:
+                    eid = el.get("elementId", "?") if isinstance(el, dict) else "?"
+                    rect = el.get("rect", {}) if isinstance(el, dict) else {}
+                    w = rect.get("width", "?") if isinstance(rect, dict) else "?"
+                    h = rect.get("height", "?") if isinstance(rect, dict) else "?"
+                    display = (
+                        el.get("styles", {}).get("display", "?")
+                        if isinstance(el, dict)
+                        else "?"
+                    )
                     result_lines.append(f"    {eid}: {w}×{h} display={display}")
-                if len(elements) > 20:
-                    result_lines.append(f"    ... and {len(elements) - 20} more")
+                if len(vp_elements) > 20:
+                    result_lines.append(f"    ... and {len(vp_elements) - 20} more")
             return [types.TextContent(type="text", text="\n".join(result_lines))]
 
         elif name == "sdk_design_audit":
