@@ -102,6 +102,8 @@ class UIBridgeClient:
                 response = await client.get(url, params=params, timeout=timeout)
             elif method == "POST":
                 response = await client.post(url, json=json_data, timeout=timeout)
+            elif method == "DELETE":
+                response = await client.delete(url, timeout=timeout)
             else:
                 return UIBridgeResponse(
                     success=False, error=f"Unsupported method: {method}"
@@ -492,6 +494,182 @@ class UIBridgeClient:
     async def sdk_page_go_forward(self) -> UIBridgeResponse:
         """Go forward in browser history in the connected SDK app."""
         return await self._request("POST", "/ui-bridge/sdk/page/forward")
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Design Review (/ui-bridge/sdk/design/*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_design_element_styles(self, element_id: str) -> UIBridgeResponse:
+        """Get extended computed styles for a specific element.
+
+        Args:
+            element_id: The element ID to inspect.
+        """
+        return await self._request(
+            "GET", f"/ui-bridge/sdk/design/element/{element_id}/styles"
+        )
+
+    async def sdk_design_state_styles(
+        self,
+        element_id: str,
+        states: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Get styles across interaction states (hover, focus, active, disabled).
+
+        Args:
+            element_id: The element ID to inspect.
+            states: Interaction states to capture. Defaults to all.
+        """
+        body: dict[str, Any] = {}
+        if states:
+            body["states"] = states
+        return await self._request(
+            "POST",
+            f"/ui-bridge/sdk/design/element/{element_id}/state-styles",
+            body or None,
+        )
+
+    async def sdk_design_snapshot(
+        self,
+        element_ids: list[str] | None = None,
+        include_pseudo_elements: bool = False,
+    ) -> UIBridgeResponse:
+        """Get design data for all or filtered elements.
+
+        Args:
+            element_ids: Optional list of element IDs to include.
+            include_pseudo_elements: Whether to include ::before/::after styles.
+        """
+        body: dict[str, Any] = {}
+        if element_ids:
+            body["elementIds"] = element_ids
+        if include_pseudo_elements:
+            body["includePseudoElements"] = True
+        return await self._request(
+            "POST", "/ui-bridge/sdk/design/snapshot", body or None
+        )
+
+    async def sdk_design_responsive(
+        self,
+        viewports: dict[str, int] | None = None,
+        element_ids: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Capture design snapshots at multiple viewport widths.
+
+        Args:
+            viewports: Map of label to width in px. Defaults to standard breakpoints.
+            element_ids: Optional list of element IDs to include.
+        """
+        body: dict[str, Any] = {}
+        if viewports:
+            body["viewports"] = viewports
+        if element_ids:
+            body["elementIds"] = element_ids
+        return await self._request("POST", "/ui-bridge/sdk/design/responsive", body)
+
+    async def sdk_design_audit(
+        self,
+        guide: dict[str, Any] | None = None,
+        element_ids: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Run a style audit against a loaded or provided style guide.
+
+        Args:
+            guide: Inline style guide config. Uses loaded guide if not provided.
+            element_ids: Optional list of element IDs to audit.
+        """
+        body: dict[str, Any] = {}
+        if guide:
+            body["guide"] = guide
+        if element_ids:
+            body["elementIds"] = element_ids
+        return await self._request("POST", "/ui-bridge/sdk/design/audit", body or None)
+
+    async def sdk_design_load_guide(self, guide: dict[str, Any]) -> UIBridgeResponse:
+        """Load a style guide for subsequent audits.
+
+        Args:
+            guide: The style guide configuration (StyleGuideConfig).
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/design/style-guide/load", {"guide": guide}
+        )
+
+    async def sdk_design_get_guide(self) -> UIBridgeResponse:
+        """Get the currently loaded style guide."""
+        return await self._request("GET", "/ui-bridge/sdk/design/style-guide")
+
+    async def sdk_design_clear_guide(self) -> UIBridgeResponse:
+        """Clear the currently loaded style guide."""
+        return await self._request("DELETE", "/ui-bridge/sdk/design/style-guide")
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Quality Evaluation
+    # -------------------------------------------------------------------------
+
+    async def sdk_design_evaluate(
+        self,
+        context: str | None = None,
+        custom_context: dict[str, Any] | None = None,
+        element_ids: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Run holistic UI quality evaluation.
+
+        Args:
+            context: Built-in context name (general, minimal, data-dense, mobile, accessibility).
+            custom_context: Custom context object with metric weights/thresholds.
+            element_ids: Optional list of element IDs to evaluate.
+        """
+        body: dict[str, Any] = {}
+        if context:
+            body["context"] = context
+        if custom_context:
+            body["customContext"] = custom_context
+        if element_ids:
+            body["elementIds"] = element_ids
+        return await self._request(
+            "POST", "/ui-bridge/sdk/design/evaluate", body or None
+        )
+
+    async def sdk_design_evaluate_contexts(self) -> UIBridgeResponse:
+        """Get available quality evaluation contexts."""
+        return await self._request("GET", "/ui-bridge/sdk/design/evaluate/contexts")
+
+    async def sdk_design_save_baseline(
+        self,
+        label: str | None = None,
+        element_ids: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Save current element state as a baseline for diff comparison.
+
+        Args:
+            label: Optional label for the baseline.
+            element_ids: Optional list of element IDs to include.
+        """
+        body: dict[str, Any] = {}
+        if label:
+            body["label"] = label
+        if element_ids:
+            body["elementIds"] = element_ids
+        return await self._request(
+            "POST", "/ui-bridge/sdk/design/evaluate/baseline", body or None
+        )
+
+    async def sdk_design_diff_baseline(
+        self,
+        element_ids: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Diff current elements against saved baseline.
+
+        Args:
+            element_ids: Optional list of element IDs to diff.
+        """
+        body: dict[str, Any] = {}
+        if element_ids:
+            body["elementIds"] = element_ids
+        return await self._request(
+            "POST", "/ui-bridge/sdk/design/evaluate/diff", body or None
+        )
 
     # -------------------------------------------------------------------------
     # Agent Mode - Annotated Screenshots

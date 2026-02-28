@@ -1523,6 +1523,248 @@ Returns an annotated image. Useful for understanding element positions visually.
             "required": [],
         },
     ),
+    # =========================================================================
+    # SDK Design Review Tools
+    # =========================================================================
+    types.Tool(
+        name="sdk_design_styles",
+        description="""Get extended computed styles (~40 CSS properties) for element(s) in the connected SDK app.
+
+Returns layout, typography, visual, and effect properties. Optionally includes
+interaction state variations (hover, focus, active, disabled) showing style diffs.
+
+Use this to inspect how an element is actually styled.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID to inspect. If omitted, returns styles for all elements.",
+                },
+                "include_state_variations": {
+                    "type": "boolean",
+                    "description": "Also capture hover/focus/active/disabled style variations.",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_state_styles",
+        description="""Get styles across interaction states for an element.
+
+On web: dispatches synthetic events to trigger hover, focus, active, disabled states.
+On native (React Native): returns pressed, focused, disabled state variations from
+declarative style overrides. Hover and active are not applicable on mobile.
+
+Returns a diff showing which properties change in each state.
+Useful for verifying hover effects, focus rings, pressed feedback, etc.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID to inspect.",
+                },
+                "states": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["hover", "focus", "active", "disabled", "pressed"],
+                    },
+                    "description": "Which states to capture. Defaults to all.",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_responsive",
+        description="""Capture design snapshots at multiple viewport widths.
+
+On web: constrains the document width to simulate responsive breakpoints.
+On native (React Native): returns a single snapshot at the current device
+screen dimensions (RN cannot constrain screen width at runtime).
+
+Preset viewports (web only): mobile (375px), tablet (768px), desktop (1280px), wide (1920px).
+Or provide custom viewports as a label→width mapping.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "viewports": {
+                    "type": "object",
+                    "description": 'Custom viewports as {"label": width_px}. Defaults to mobile/tablet/desktop/wide.',
+                    "additionalProperties": {"type": "integer"},
+                },
+                "element_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only include these elements. Defaults to all.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_audit",
+        description="""Run a style audit against a loaded or provided style guide.
+
+Validates element computed styles against design tokens and rules defined
+in a StyleGuideConfig. Returns pass/fail results grouped by severity.
+
+Load a guide first with sdk_design_load_guide, or provide one inline.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "guide": {
+                    "type": "object",
+                    "description": "Inline StyleGuideConfig. Uses the loaded guide if omitted.",
+                },
+                "element_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only audit these elements. Defaults to all.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_load_guide",
+        description="""Load a style guide for subsequent design audits.
+
+The guide defines design tokens (colors, typography, spacing, etc.) and
+validation rules that constrain how elements should be styled.
+
+The guide persists in memory until cleared or replaced.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "guide": {
+                    "type": "object",
+                    "description": "StyleGuideConfig JSON with version, name, tokens, and rules.",
+                },
+            },
+            "required": ["guide"],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_review",
+        description="""Compound design review: snapshot + state variations + audit + quality evaluation in one call.
+
+Works with both web SDK and React Native SDK apps. On native, state variations
+use pressed/focused/disabled instead of hover/focus/active/disabled, responsive
+snapshots return only the current device dimensions, and pseudo-elements are empty.
+
+Captures a full design snapshot, optionally captures state variations for
+interactive elements, runs a style audit if a guide is loaded, and evaluates
+overall UI quality with scores and actionable recommendations.
+
+This is the primary tool for design review — use it instead of calling
+individual design tools separately.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only review these elements. Defaults to all.",
+                },
+                "include_responsive": {
+                    "type": "boolean",
+                    "description": "Also capture responsive snapshots at standard breakpoints.",
+                    "default": False,
+                },
+                "include_state_variations": {
+                    "type": "boolean",
+                    "description": "Capture hover/focus/active/disabled variations for interactive elements.",
+                    "default": True,
+                },
+                "quality_context": {
+                    "type": "string",
+                    "description": "Quality evaluation context (general, minimal, data-dense, mobile, accessibility, or a custom name from loaded style guide). Defaults to 'general'.",
+                },
+                "include_quality_evaluation": {
+                    "type": "boolean",
+                    "description": "Run holistic quality evaluation and include score/findings.",
+                    "default": True,
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_evaluate",
+        description="""Run holistic UI quality evaluation. Returns 0-100 score, letter grade,
+per-metric scores across density/spacing/color/typography/consistency,
+and actionable recommendations.
+
+Contexts adjust what's measured and how strictly:
+- general: Balanced evaluation for most web apps
+- minimal: Emphasizes whitespace and simplicity
+- data-dense: Lenient on density, strict on alignment and consistency
+- mobile: Prioritizes touch targets and readability
+- accessibility: Focused on WCAG compliance (contrast, heading hierarchy, touch targets)
+
+Use this as the primary tool for assessing overall UI quality.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "context": {
+                    "type": "string",
+                    "enum": [
+                        "general",
+                        "minimal",
+                        "data-dense",
+                        "mobile",
+                        "accessibility",
+                    ],
+                    "description": "Evaluation context. Defaults to 'general'.",
+                },
+                "custom_context": {
+                    "type": "object",
+                    "description": "Custom context with metric weights/thresholds (overrides context).",
+                },
+                "element_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only evaluate these elements. Defaults to all.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_design_diff",
+        description="""Save a UI baseline or diff against a saved baseline for regression detection.
+
+Two modes:
+1. save_baseline=true: Save current element state as baseline
+2. save_baseline=false (default): Diff current state against saved baseline
+
+Returns added/removed/modified elements and cumulative layout shift score.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "save_baseline": {
+                    "type": "boolean",
+                    "description": "If true, save current state as baseline instead of diffing.",
+                    "default": False,
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Label for the baseline (only used when save_baseline=true).",
+                },
+                "element_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only include these elements. Defaults to all.",
+                },
+            },
+            "required": [],
+        },
+    ),
 ]
 
 
@@ -2877,6 +3119,497 @@ async def call_tool(
                     type="image", data=annotated_b64, mimeType="image/png"
                 )
             ]
+
+        # =====================================================================
+        # SDK Design Review Tools
+        # =====================================================================
+        elif name == "sdk_design_styles":
+            element_id = arguments.get("element_id", "")
+            include_state_variations = arguments.get("include_state_variations", False)
+
+            if element_id:
+                # Resolve ref if needed
+                element_id = ref_manager.resolve(element_id)
+                response = await ui_client.sdk_design_element_styles(element_id)
+                if not response.success:
+                    return [
+                        types.TextContent(type="text", text=f"Error: {response.error}")
+                    ]
+                result_lines = [f"Design styles for {element_id}:"]
+                data = response.data or {}
+                styles = data.get("styles", {})
+                for prop, val in styles.items():
+                    if val and val != "none" and val != "normal" and val != "0px":
+                        result_lines.append(f"  {prop}: {val}")
+
+                if include_state_variations:
+                    sv_resp = await ui_client.sdk_design_state_styles(element_id)
+                    if sv_resp.success:
+                        sv_data = sv_resp.data or {}
+                        for state_info in sv_data.get("stateStyles", []):
+                            state_name = state_info.get("state", "?")
+                            diffs = state_info.get("diffFromDefault", [])
+                            if diffs:
+                                result_lines.append(f"\n  [{state_name}] changes:")
+                                for d in diffs:
+                                    result_lines.append(
+                                        f"    {d['property']}: {d['defaultValue']} → {d['stateValue']}"
+                                    )
+
+                return [types.TextContent(type="text", text="\n".join(result_lines))]
+            else:
+                # Get snapshot of all elements
+                response = await ui_client.sdk_design_snapshot()
+                if not response.success:
+                    return [
+                        types.TextContent(type="text", text=f"Error: {response.error}")
+                    ]
+                data = response.data or {}
+                elements = data.get("elements", [])
+                result_lines = [f"Design snapshot ({len(elements)} elements):"]
+                for el in elements[:50]:  # Limit output
+                    eid = el.get("elementId", "?")
+                    etype = el.get("type", "?")
+                    styles = el.get("styles", {})
+                    font_size = styles.get("fontSize", "?")
+                    color = styles.get("color", "?")
+                    bg = styles.get("backgroundColor", "?")
+                    result_lines.append(
+                        f"  {eid} ({etype}): font={font_size} color={color} bg={bg}"
+                    )
+                if len(elements) > 50:
+                    result_lines.append(f"  ... and {len(elements) - 50} more")
+                return [types.TextContent(type="text", text="\n".join(result_lines))]
+
+        elif name == "sdk_design_state_styles":
+            element_id = ref_manager.resolve(arguments["element_id"])
+            states = arguments.get("states")
+            response = await ui_client.sdk_design_state_styles(element_id, states)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            result_lines = [f"State styles for {element_id}:"]
+            for state_info in data.get("stateStyles", []):
+                state_name = state_info.get("state", "?")
+                diffs = state_info.get("diffFromDefault", [])
+                if state_name == "default":
+                    result_lines.append("\n  [default] (base styles)")
+                elif diffs:
+                    result_lines.append(f"\n  [{state_name}] ({len(diffs)} changes):")
+                    for d in diffs:
+                        result_lines.append(
+                            f"    {d['property']}: {d['defaultValue']} → {d['stateValue']}"
+                        )
+                else:
+                    result_lines.append(f"\n  [{state_name}] no changes")
+            return [types.TextContent(type="text", text="\n".join(result_lines))]
+
+        elif name == "sdk_design_responsive":
+            viewports = arguments.get("viewports")
+            element_ids = arguments.get("element_ids")
+            response = await ui_client.sdk_design_responsive(viewports, element_ids)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            snapshots: list[dict[str, object]] = (
+                response.data if isinstance(response.data, list) else []
+            )
+            if isinstance(response.data, dict):
+                snapshots = (
+                    response.data.get("data", [])
+                    if "data" in response.data
+                    else [response.data]
+                )
+            result_lines = [f"Responsive snapshots ({len(snapshots)} viewports):"]
+            for snap in snapshots:
+                vw = snap.get("viewportWidth", "?")
+                label = snap.get("viewportLabel", "")
+                elements = snap.get("elements", [])
+                result_lines.append(
+                    f"\n  === {label} ({vw}px) — {len(elements)} elements ==="
+                )
+                for el in elements[:20]:
+                    eid = el.get("elementId", "?")
+                    rect = el.get("rect", {})
+                    w = rect.get("width", "?")
+                    h = rect.get("height", "?")
+                    display = el.get("styles", {}).get("display", "?")
+                    result_lines.append(f"    {eid}: {w}×{h} display={display}")
+                if len(elements) > 20:
+                    result_lines.append(f"    ... and {len(elements) - 20} more")
+            return [types.TextContent(type="text", text="\n".join(result_lines))]
+
+        elif name == "sdk_design_audit":
+            guide = arguments.get("guide")
+            element_ids = arguments.get("element_ids")
+            response = await ui_client.sdk_design_audit(guide, element_ids)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            report = response.data or {}
+            result_lines = [
+                f"Style Audit: {report.get('guideName', '?')}",
+                f"Elements: {report.get('totalElements', 0)} | Rules: {report.get('totalRules', 0)}",
+                f"Passed: {report.get('passedCount', 0)} | Failed: {report.get('failedCount', 0)}",
+            ]
+            summary = report.get("summary", {})
+            errors = summary.get("errors", [])
+            warnings = summary.get("warnings", [])
+            if errors:
+                result_lines.append(f"\nErrors ({len(errors)}):")
+                for r in errors[:20]:
+                    eid = r.get("elementId", "?")
+                    rule_id = r.get("ruleId", "?")
+                    for cr in r.get("constraintResults", []):
+                        if not cr.get("passed"):
+                            result_lines.append(
+                                f"  [{eid}] {rule_id}: {cr.get('message', '?')}"
+                            )
+            if warnings:
+                result_lines.append(f"\nWarnings ({len(warnings)}):")
+                for r in warnings[:20]:
+                    eid = r.get("elementId", "?")
+                    rule_id = r.get("ruleId", "?")
+                    for cr in r.get("constraintResults", []):
+                        if not cr.get("passed"):
+                            result_lines.append(
+                                f"  [{eid}] {rule_id}: {cr.get('message', '?')}"
+                            )
+            return [types.TextContent(type="text", text="\n".join(result_lines))]
+
+        elif name == "sdk_design_load_guide":
+            guide = arguments["guide"]
+            response = await ui_client.sdk_design_load_guide(guide)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Style guide loaded: {guide.get('name', '?')} ({len(guide.get('rules', []))} rules)",
+                )
+            ]
+
+        elif name == "sdk_design_review":
+            element_ids = arguments.get("element_ids")
+            include_responsive = arguments.get("include_responsive", False)
+            include_state_variations = arguments.get("include_state_variations", True)
+            quality_context = arguments.get("quality_context", "general")
+            include_quality_evaluation = arguments.get(
+                "include_quality_evaluation", True
+            )
+            result_lines = ["=== Design Review ==="]
+
+            # 1. Get design snapshot
+            snap_resp = await ui_client.sdk_design_snapshot(element_ids)
+            if not snap_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting design snapshot: {snap_resp.error}",
+                    )
+                ]
+            snap_data = snap_resp.data or {}
+            elements = snap_data.get("elements", [])
+            result_lines.append(f"\nSnapshot: {len(elements)} elements")
+            for el in elements[:30]:
+                eid = el.get("elementId", "?")
+                etype = el.get("type", "?")
+                styles = el.get("styles", {})
+                result_lines.append(
+                    f"  {eid} ({etype}): font={styles.get('fontSize', '?')} "
+                    f"color={styles.get('color', '?')} bg={styles.get('backgroundColor', '?')}"
+                )
+            if len(elements) > 30:
+                result_lines.append(f"  ... and {len(elements) - 30} more")
+
+            # 2. State variations for interactive elements
+            if include_state_variations:
+                interactive_ids = [
+                    el.get("elementId")
+                    for el in elements
+                    if el.get("type")
+                    in (
+                        "button",
+                        "input",
+                        "select",
+                        "link",
+                        "checkbox",
+                        "radio",
+                        "textarea",
+                        "pressable",
+                        "touchable",
+                        "switch",
+                    )
+                ]
+                if interactive_ids:
+                    result_lines.append(
+                        f"\nState variations ({len(interactive_ids)} interactive elements):"
+                    )
+                    for eid in interactive_ids[:10]:
+                        sv_resp = await ui_client.sdk_design_state_styles(eid)
+                        if sv_resp.success:
+                            sv_data = sv_resp.data or {}
+                            for state_info in sv_data.get("stateStyles", []):
+                                diffs = state_info.get("diffFromDefault", [])
+                                if diffs:
+                                    state_name = state_info.get("state", "?")
+                                    result_lines.append(
+                                        f"  {eid} [{state_name}]: {len(diffs)} changes"
+                                    )
+                                    for d in diffs[:5]:
+                                        result_lines.append(
+                                            f"    {d['property']}: {d['defaultValue']} → {d['stateValue']}"
+                                        )
+                                    if len(diffs) > 5:
+                                        result_lines.append(
+                                            f"    ... and {len(diffs) - 5} more"
+                                        )
+
+            # 3. Responsive snapshots
+            if include_responsive:
+                resp_resp = await ui_client.sdk_design_responsive(
+                    element_ids=element_ids
+                )
+                if resp_resp.success:
+                    resp_snaps: list[dict[str, object]] = (
+                        resp_resp.data if isinstance(resp_resp.data, list) else []
+                    )
+                    if isinstance(resp_resp.data, dict):
+                        resp_snaps = (
+                            resp_resp.data.get("data", [])
+                            if "data" in resp_resp.data
+                            else [resp_resp.data]
+                        )
+                    result_lines.append(f"\nResponsive ({len(resp_snaps)} viewports):")
+                    for snap in resp_snaps:
+                        label = snap.get("viewportLabel", "?")
+                        vw = snap.get("viewportWidth", "?")
+                        elems = snap.get("elements", [])
+                        count = len(elems) if isinstance(elems, list) else 0
+                        result_lines.append(f"  {label} ({vw}px): {count} elements")
+
+            # 4. Style audit (if guide loaded)
+            audit_resp = await ui_client.sdk_design_audit(element_ids=element_ids)
+            if audit_resp.success:
+                report = audit_resp.data or {}
+                failed = report.get("failedCount", 0)
+                passed = report.get("passedCount", 0)
+                result_lines.append(f"\nStyle audit: {passed} passed, {failed} failed")
+                summary = report.get("summary", {})
+                for sev in ("errors", "warnings"):
+                    items = summary.get(sev, [])
+                    if items:
+                        result_lines.append(f"  {sev.title()} ({len(items)}):")
+                        for r in items[:10]:
+                            eid = r.get("elementId", "?")
+                            for cr in r.get("constraintResults", []):
+                                if not cr.get("passed"):
+                                    result_lines.append(
+                                        f"    [{eid}] {cr.get('message', '?')}"
+                                    )
+            elif "NO_STYLE_GUIDE" not in (audit_resp.error or ""):
+                result_lines.append(f"\nStyle audit: {audit_resp.error}")
+
+            # 5. Quality evaluation
+            if include_quality_evaluation:
+                try:
+                    eval_resp = await ui_client.sdk_design_evaluate(
+                        context=quality_context,
+                        element_ids=element_ids,
+                    )
+                    if eval_resp.success:
+                        report = eval_resp.data or {}
+                        score = report.get("overallScore", "?")
+                        grade = report.get("grade", "?")
+                        result_lines.append(f"\nQuality: {score}/100 (Grade {grade})")
+
+                        # Category averages
+                        metrics = report.get("metrics", [])
+                        categories: dict[str, list[int]] = {}
+                        for m in metrics:
+                            if m.get("enabled"):
+                                cat = m.get("category", "?")
+                                if cat not in categories:
+                                    categories[cat] = []
+                                categories[cat].append(m.get("score", 0))
+                        if categories:
+                            cat_parts = []
+                            for cat, scores in categories.items():
+                                avg = sum(scores) / len(scores) if scores else 0
+                                cat_parts.append(f"{cat}={avg:.0f}")
+                            result_lines.append(f"  Categories: {', '.join(cat_parts)}")
+
+                        # Top 5 issues
+                        top_issues = report.get("topIssues", [])
+                        if top_issues:
+                            result_lines.append("  Top issues:")
+                            for issue in top_issues[:5]:
+                                severity = issue.get("severity", "info").upper()
+                                message = issue.get("message", "?")
+                                result_lines.append(f"    [{severity}] {message}")
+                                rec = issue.get("recommendation")
+                                if rec:
+                                    result_lines.append(f"      → {rec}")
+                    else:
+                        result_lines.append(f"\nQuality evaluation: {eval_resp.error}")
+                except Exception as e:
+                    result_lines.append(f"\nQuality evaluation error: {e}")
+
+            return [types.TextContent(type="text", text="\n".join(result_lines))]
+
+        # =====================================================================
+        # Quality Evaluation
+        # =====================================================================
+
+        elif name == "sdk_design_evaluate":
+            context = arguments.get("context")
+            custom_context = arguments.get("custom_context")
+            element_ids = arguments.get("element_ids")
+
+            response = await ui_client.sdk_design_evaluate(
+                context=context,
+                custom_context=custom_context,
+                element_ids=element_ids,
+            )
+
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text", text=f"Quality evaluation error: {response.error}"
+                    )
+                ]
+
+            report = response.data or {}
+            lines = [
+                f"=== UI Quality Evaluation ({report.get('contextName', '?')}) ===",
+                f"Overall Score: {report.get('overallScore', '?')}/100  Grade: {report.get('grade', '?')}",
+                f"Elements: {report.get('totalElements', '?')}  Duration: {report.get('durationMs', '?')}ms",
+            ]
+
+            # Category averages
+            metrics = report.get("metrics", [])
+            eval_categories: dict[str, list[int]] = {}
+            for m in metrics:
+                if m.get("enabled"):
+                    cat = m.get("category", "?")
+                    if cat not in eval_categories:
+                        eval_categories[cat] = []
+                    eval_categories[cat].append(m.get("score", 0))
+
+            if eval_categories:
+                lines.append("\nCategory Scores:")
+                for cat, scores in eval_categories.items():
+                    avg = sum(scores) / len(scores) if scores else 0
+                    lines.append(f"  {cat.title()}: {avg:.0f}/100")
+
+            # Per-metric breakdown
+            lines.append("\nMetric Details:")
+            for m in metrics:
+                if not m.get("enabled"):
+                    continue
+                score = m.get("score", 0)
+                label = m.get("label", m.get("metricId", "?"))
+                weight = m.get("weight", 0)
+                indicator = "✓" if score >= 80 else "⚠" if score >= 50 else "✗"
+                lines.append(
+                    f"  {indicator} {label}: {score}/100 (weight: {weight:.2f})"
+                )
+
+            # Top issues
+            top_issues = report.get("topIssues", [])
+            if top_issues:
+                lines.append(f"\nTop Issues ({len(top_issues)}):")
+                for issue in top_issues[:10]:
+                    severity = issue.get("severity", "info").upper()
+                    message = issue.get("message", "?")
+                    lines.append(f"  [{severity}] {message}")
+                    rec = issue.get("recommendation")
+                    if rec:
+                        lines.append(f"    → {rec}")
+
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_design_diff":
+            save_baseline = arguments.get("save_baseline", False)
+            label = arguments.get("label")
+            element_ids = arguments.get("element_ids")
+
+            if save_baseline:
+                response = await ui_client.sdk_design_save_baseline(
+                    label=label, element_ids=element_ids
+                )
+                if not response.success:
+                    return [
+                        types.TextContent(
+                            type="text", text=f"Save baseline error: {response.error}"
+                        )
+                    ]
+                data = response.data or {}
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Baseline saved: {data.get('elementCount', '?')} elements"
+                        + (f" (label: {label})" if label else ""),
+                    )
+                ]
+            else:
+                response = await ui_client.sdk_design_diff_baseline(
+                    element_ids=element_ids
+                )
+                if not response.success:
+                    return [
+                        types.TextContent(
+                            type="text", text=f"Diff baseline error: {response.error}"
+                        )
+                    ]
+
+                diff_report = response.data or {}
+                added = diff_report.get("added", [])
+                removed = diff_report.get("removed", [])
+                modified = diff_report.get("modified", [])
+                cls = diff_report.get("cumulativeLayoutShift", 0)
+                significant = diff_report.get("hasSignificantChanges", False)
+
+                lines = ["=== Snapshot Diff ==="]
+                lines.append(
+                    f"Changes: {len(added)} added, {len(removed)} removed, {len(modified)} modified"
+                )
+                lines.append(f"Cumulative Layout Shift: {cls}")
+                lines.append(f"Significant Changes: {'Yes' if significant else 'No'}")
+
+                if added:
+                    lines.append(f"\nAdded ({len(added)}):")
+                    for d in added[:10]:
+                        lines.append(f"  + {d.get('elementId', '?')}")
+                    if len(added) > 10:
+                        lines.append(f"  ... and {len(added) - 10} more")
+
+                if removed:
+                    lines.append(f"\nRemoved ({len(removed)}):")
+                    for d in removed[:10]:
+                        lines.append(f"  - {d.get('elementId', '?')}")
+                    if len(removed) > 10:
+                        lines.append(f"  ... and {len(removed) - 10} more")
+
+                if modified:
+                    lines.append(f"\nModified ({len(modified)}):")
+                    for d in modified[:15]:
+                        eid = d.get("elementId", "?")
+                        style_changes = d.get("styleChanges", [])
+                        layout_shift = d.get("layoutShift")
+                        parts = []
+                        if style_changes:
+                            parts.append(f"{len(style_changes)} style changes")
+                        if layout_shift:
+                            parts.append(
+                                f"layout: dx={layout_shift.get('dx', 0):.0f} "
+                                f"dy={layout_shift.get('dy', 0):.0f}"
+                            )
+                        lines.append(
+                            f"  ~ {eid}: {', '.join(parts) if parts else 'modified'}"
+                        )
+                    if len(modified) > 15:
+                        lines.append(f"  ... and {len(modified) - 15} more")
+
+                return [types.TextContent(type="text", text="\n".join(lines))]
 
         else:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
