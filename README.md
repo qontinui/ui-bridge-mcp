@@ -135,7 +135,7 @@ AI: Let me check the login form on localhost:3000.
 
 ## Element IDs
 
-Elements in the runner's UI have `data-ui-id` attributes that follow patterns like:
+Elements in the runner's UI have registered IDs that follow patterns like:
 
 - `sidebar-nav-item-{name}` - Sidebar navigation items
 - `button-{action}` - Action buttons

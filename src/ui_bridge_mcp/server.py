@@ -375,7 +375,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id or agent ref (e.g., '@e1', 'sidebar-nav-item-settings')",
+                    "description": "The element's registered ID or agent ref (e.g., '@e1', 'sidebar-nav-item-settings')",
                 },
                 "max_content_length": {
                     "type": "integer",
@@ -396,7 +396,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id or agent ref (@e1)",
+                    "description": "The element's registered ID or agent ref (@e1)",
                 },
             },
             "required": ["element_id"],
@@ -413,7 +413,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id or agent ref (@e1)",
+                    "description": "The element's registered ID or agent ref (@e1)",
                 },
                 "text": {
                     "type": "string",
@@ -431,7 +431,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to focus",
+                    "description": "The element's registered ID to focus",
                 },
             },
             "required": ["element_id"],
@@ -445,7 +445,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -459,7 +459,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to hover over",
+                    "description": "The element's registered ID to hover over",
                 },
             },
             "required": ["element_id"],
@@ -473,7 +473,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to double-click",
+                    "description": "The element's registered ID to double-click",
                 },
             },
             "required": ["element_id"],
@@ -487,7 +487,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to right-click",
+                    "description": "The element's registered ID to right-click",
                 },
             },
             "required": ["element_id"],
@@ -501,7 +501,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to clear",
+                    "description": "The element's registered ID to clear",
                 },
             },
             "required": ["element_id"],
@@ -515,7 +515,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
                 "value": {
                     "type": "string",
@@ -538,7 +538,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to scroll",
+                    "description": "The element's registered ID to scroll",
                 },
                 "direction": {
                     "type": "string",
@@ -561,7 +561,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The checkbox element's data-ui-id",
+                    "description": "The checkbox element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -575,7 +575,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The checkbox element's data-ui-id",
+                    "description": "The checkbox element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -589,7 +589,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The checkbox element's data-ui-id",
+                    "description": "The checkbox element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -603,7 +603,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
                 "value": {
                     "type": "string",
@@ -623,11 +623,11 @@ Drag from source element to target element or position.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The source element's data-ui-id to drag",
+                    "description": "The source element's registered ID to drag",
                 },
                 "target_element_id": {
                     "type": "string",
-                    "description": "The target element's data-ui-id to drop on",
+                    "description": "The target element's registered ID to drop on",
                 },
                 "steps": {
                     "type": "number",
@@ -649,7 +649,7 @@ Drag from source element to target element or position.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id (element or its parent form)",
+                    "description": "The element's registered ID (element or its parent form)",
                 },
             },
             "required": ["element_id"],
@@ -663,7 +663,7 @@ Drag from source element to target element or position.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id (element or its parent form)",
+                    "description": "The element's registered ID (element or its parent form)",
                 },
             },
             "required": ["element_id"],
@@ -908,7 +908,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id or agent ref (e.g., '@e1')",
+                    "description": "The element's registered ID or agent ref (e.g., '@e1')",
                 },
                 "max_content_length": {
                     "type": "integer",
@@ -920,7 +920,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
     ),
     types.Tool(
         name="sdk_click",
-        description="""Click an element in the SDK app by its data-ui-id.
+        description="""Click an element in the SDK app by its registered ID.
 
 Use sdk_snapshot or sdk_elements first to find the element_id.
 Accepts refs like @e1 from agent_mode snapshots.""",
@@ -929,7 +929,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id or agent ref (@e1)",
+                    "description": "The element's registered ID or agent ref (@e1)",
                 },
             },
             "required": ["element_id"],
@@ -946,7 +946,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id or agent ref (@e1)",
+                    "description": "The element's registered ID or agent ref (@e1)",
                 },
                 "text": {
                     "type": "string",
@@ -964,7 +964,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id to clear",
+                    "description": "The element's registered ID to clear",
                 },
             },
             "required": ["element_id"],
@@ -978,7 +978,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
                 "value": {
                     "type": "string",
@@ -996,7 +996,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1010,7 +1010,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1024,7 +1024,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1038,7 +1038,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1052,7 +1052,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1066,7 +1066,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
                 "direction": {
                     "type": "string",
@@ -1089,7 +1089,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The checkbox element's data-ui-id",
+                    "description": "The checkbox element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1103,7 +1103,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The checkbox element's data-ui-id",
+                    "description": "The checkbox element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1117,7 +1117,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The checkbox element's data-ui-id",
+                    "description": "The checkbox element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1131,7 +1131,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
                 "value": {
                     "type": "string",
@@ -1149,11 +1149,11 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The source element's data-ui-id",
+                    "description": "The source element's registered ID",
                 },
                 "target_element_id": {
                     "type": "string",
-                    "description": "The target element's data-ui-id",
+                    "description": "The target element's registered ID",
                 },
                 "steps": {
                     "type": "number",
@@ -1171,7 +1171,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],
@@ -1185,7 +1185,7 @@ Accepts refs like @e1 from agent_mode snapshots.""",
             "properties": {
                 "element_id": {
                     "type": "string",
-                    "description": "The element's data-ui-id",
+                    "description": "The element's registered ID",
                 },
             },
             "required": ["element_id"],

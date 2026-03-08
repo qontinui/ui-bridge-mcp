@@ -176,7 +176,7 @@ class UIBridgeClient:
         """Get details for a specific element.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
 
         Returns:
             Element details including bounds, state, actions, etc.
@@ -187,7 +187,7 @@ class UIBridgeClient:
         """Click an element in the runner's webview.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
         """
         return await self._request(
             "POST",
@@ -199,7 +199,7 @@ class UIBridgeClient:
         """Type text into an element in the runner's webview.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
             text: Text to type.
         """
         return await self._request(
@@ -212,7 +212,7 @@ class UIBridgeClient:
         """Focus an element in the runner's webview.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
         """
         return await self._request(
             "POST",
@@ -224,7 +224,7 @@ class UIBridgeClient:
         """Hover over an element in the runner's webview.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
         """
         return await self._request(
             "POST",
@@ -243,7 +243,7 @@ class UIBridgeClient:
         Generic method for all UI Bridge actions.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
             action: Action name (click, type, focus, blur, hover, etc.).
             params: Optional action parameters.
         """
@@ -302,10 +302,10 @@ class UIBridgeClient:
         return await self._request("GET", "/ui-bridge/sdk/elements", params=params)
 
     async def sdk_element(self, element_id: str) -> UIBridgeResponse:
-        """Get details for a specific element by its data-ui-id.
+        """Get details for a specific element by its registered ID.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
         """
         return await self._request("GET", f"/ui-bridge/sdk/element/{element_id}")
 
@@ -315,7 +315,7 @@ class UIBridgeClient:
         """Execute an action on an element.
 
         Args:
-            element_id: The element's data-ui-id.
+            element_id: The element's registered ID.
             action: Action to perform (click, type, focus, hover).
             params: Optional params (e.g., {"text": "hello"} for type).
         """
