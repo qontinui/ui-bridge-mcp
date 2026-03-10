@@ -250,6 +250,132 @@ def format_element_summary(element: dict[str, Any]) -> str:
     return f"- {elem_id} ({elem_type}): {label}{bounds}{status_str}{content_str}"
 
 
+def _format_forms_response(data: dict[str, Any] | None) -> str:
+    """Format FormsResponse data into LLM-readable text."""
+    if not data:
+        return "No form data available."
+
+    forms = data.get("forms", [])
+    summary = data.get("summary", "")
+
+    if not forms:
+        return "No forms detected on the page."
+
+    lines = [f"Forms: {summary}", ""]
+
+    for form in forms:
+        form_id = form.get("id", "unknown")
+        purpose = form.get("purpose", "")
+        is_valid = form.get("isValid", True)
+        is_dirty = form.get("isDirty", False)
+        submit_btn = form.get("submitButton")
+
+        status_parts = []
+        if not is_valid:
+            status_parts.append("INVALID")
+        if is_dirty:
+            status_parts.append("dirty")
+        status = f" [{', '.join(status_parts)}]" if status_parts else ""
+
+        header = f"Form: {form_id}"
+        if purpose:
+            header += f" ({purpose})"
+        header += status
+        lines.append(header)
+
+        fields = form.get("fields", [])
+        for field in fields:
+            fid = field.get("id", "?")
+            label = field.get("label", fid)
+            ftype = field.get("type", "text")
+            value = field.get("value", "")
+            required = field.get("required", False)
+            valid = field.get("valid", True)
+            error = field.get("error")
+            checked = field.get("checked")
+            dirty = field.get("isDirty", False)
+            placeholder = field.get("placeholder")
+
+            # Build field line
+            parts = [f"  {label} ({ftype})"]
+
+            # Value display
+            if checked is not None:
+                parts.append(f"checked={checked}")
+            elif value:
+                display_val = value if len(value) <= 60 else value[:57] + "..."
+                parts.append(f'"{display_val}"')
+            elif placeholder:
+                parts.append(f"[placeholder: {placeholder}]")
+            else:
+                parts.append("[empty]")
+
+            # Flags
+            flags = []
+            if required:
+                flags.append("required")
+            if dirty:
+                flags.append("dirty")
+            if not valid:
+                flags.append("INVALID")
+            if flags:
+                parts.append(f"[{', '.join(flags)}]")
+
+            # Error message
+            if error:
+                parts.append(f"ERROR: {error}")
+
+            lines.append(" | ".join(parts))
+
+        if submit_btn:
+            lines.append(f"  Submit: {submit_btn}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_page_header(page: dict[str, Any]) -> list[str]:
+    """Format page/route context as a concise header block."""
+    lines: list[str] = []
+    title = page.get("title", "")
+    url = page.get("url", "")
+    if title and url:
+        lines.append(f'Page: "{title}" ({url})')
+    elif title:
+        lines.append(f'Page: "{title}"')
+    elif url:
+        lines.append(f"Page: {url}")
+
+    route = page.get("route")
+    if isinstance(route, dict):
+        pattern = route.get("pattern", "")
+        params = route.get("params", {})
+        if pattern:
+            if params:
+                param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+                lines.append(f"Route: {pattern} ({param_str})")
+            else:
+                lines.append(f"Route: {pattern}")
+        elif page.get("pathname"):
+            lines.append(f"Path: {page['pathname']}")
+    elif page.get("pathname"):
+        lines.append(f"Path: {page['pathname']}")
+
+    page_context = page.get("pageContext")
+    if isinstance(page_context, dict):
+        name = page_context.get("name", "")
+        section = page_context.get("section", "")
+        parts = []
+        if name:
+            parts.append(f"Name: {name}")
+        if section:
+            parts.append(f"Section: {section}")
+        if parts:
+            lines.append(", ".join(parts))
+
+    return lines
+
+
 def _normalize_components(raw: Any) -> list[dict[str, Any]]:
     """Normalize component data to ComponentInfo shape.
 
@@ -764,6 +890,38 @@ Use max_elements to limit output size.""",
                     ),
                 },
             },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_forms",
+        description="""Get form state from the connected SDK app.
+
+Returns structured data about all forms on the page:
+- Form fields with current values, labels, and types
+- Validation errors (detected via HTML5 API, ARIA, CSS heuristics)
+- Required fields and constraint attributes (pattern, min/max, length)
+- Dirty state (whether fields have been modified)
+- Submit button identification
+- Form purpose inference (Login, Registration, Search, etc.)
+
+Use this to understand form state before filling, to verify field values
+after typing, and to detect validation errors after submission.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_forms",
+        description="""Get form state from the runner's own UI (Control mode).
+
+Same as sdk_forms but for the runner's React frontend.
+Returns forms, fields, values, validation errors, and dirty state.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     ),
@@ -1765,6 +1923,198 @@ Returns added/removed/modified elements and cumulative layout shift score.""",
             "required": [],
         },
     ),
+    # =========================================================================
+    # Idle Detection Tools
+    # =========================================================================
+    types.Tool(
+        name="get_idle_status",
+        description="""Get the current idle status of the connected app.
+
+Returns whether the app is idle (no pending network requests, DOM mutations,
+or loading indicators) along with a per-signal breakdown showing each signal's
+state and how long it has been stable.
+
+Use this to check if the app has finished updating after an action (e.g.,
+clicking a button, navigating, or submitting a form) before taking a snapshot
+or making assertions. This is a non-blocking check — use wait_for_idle if you
+need to block until the app settles.
+
+Optionally pass a specific signal name to query just that signal.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "signal": {
+                    "type": "string",
+                    "enum": ["network", "dom", "loading-indicators"],
+                    "description": (
+                        "If provided, returns status for only this signal. "
+                        "Otherwise returns composite status with all signals."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="wait_for_idle",
+        description="""Block until the app is idle (all activity signals are stable).
+
+Waits for network requests to complete, DOM mutations to stop, and loading
+indicators to disappear. Returns once ALL signals have been simultaneously
+idle for min_stable_ms.
+
+Use this after triggering an action (click, navigation, form submit) to
+ensure the app has fully settled before inspecting the UI. This is the
+recommended way to handle async UI updates — prefer this over arbitrary
+delays.
+
+You can exclude specific signals if they are not relevant (e.g., exclude
+'network' if the app uses long-polling or WebSockets that never fully idle).
+
+Returns the final idle status on success, or an error if the timeout is
+reached before the app becomes idle.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "timeout": {
+                    "type": "number",
+                    "description": (
+                        "Max time to wait in milliseconds. "
+                        "Defaults to 30000 (30 seconds)."
+                    ),
+                    "default": 30000,
+                },
+                "min_stable_ms": {
+                    "type": "number",
+                    "description": (
+                        "How long all signals must remain idle before the app is "
+                        "considered stable, in milliseconds. Defaults to 500."
+                    ),
+                    "default": 500,
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["network", "dom", "loading-indicators"],
+                    },
+                    "description": (
+                        "Signal names to ignore when determining idle state. "
+                        "Useful when a signal never settles (e.g., long-polling)."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="wait_for_signal",
+        description="""Block until a specific idle signal is stable.
+
+Unlike wait_for_idle which waits for ALL signals, this waits for just one:
+- 'network': All fetch/XHR requests have completed
+- 'dom': No DOM mutations for min_stable_ms
+- 'loading-indicators': No visible spinners, progress bars, or skeleton screens
+
+Use this when you only care about a specific type of activity. For example,
+wait for 'network' after an API call, or wait for 'dom' after a client-side
+state update.
+
+Returns the signal's status on success, or an error if the timeout is reached.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "signal": {
+                    "type": "string",
+                    "enum": ["network", "dom", "loading-indicators"],
+                    "description": "The signal to wait for.",
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": (
+                        "Max time to wait in milliseconds. "
+                        "Defaults to 30000 (30 seconds)."
+                    ),
+                    "default": 30000,
+                },
+                "min_stable_ms": {
+                    "type": "number",
+                    "description": (
+                        "How long the signal must remain idle before considered "
+                        "stable, in milliseconds. Defaults to 500."
+                    ),
+                    "default": 500,
+                },
+            },
+            "required": ["signal"],
+        },
+    ),
+    types.Tool(
+        name="wait_for_targets",
+        description="""Wait for specific targets (signals or CSS selectors) to become idle.
+
+Accepts an array of targets, where each target is either:
+- A signal name string: 'network', 'dom', or 'loading-indicators'
+- An indicator object: {"indicator": ".my-spinner"} — waits for the CSS
+  selector to become hidden/removed
+
+This is useful when you know exactly what to wait for. For example, wait
+for a specific loading spinner to disappear, or wait for both network and
+a custom loading indicator simultaneously.
+
+Returns when ALL specified targets are idle, or an error if the timeout is
+reached.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "string",
+                                "enum": ["network", "dom", "loading-indicators"],
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "indicator": {
+                                        "type": "string",
+                                        "description": (
+                                            "CSS selector of a loading indicator "
+                                            "to watch (e.g., '.spinner', '#loading')."
+                                        ),
+                                    },
+                                },
+                                "required": ["indicator"],
+                            },
+                        ],
+                    },
+                    "description": (
+                        "Array of targets to wait for. Each target is either a "
+                        "signal name string or an object with an 'indicator' CSS selector."
+                    ),
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": (
+                        "Max time to wait in milliseconds. "
+                        "Defaults to 30000 (30 seconds)."
+                    ),
+                    "default": 30000,
+                },
+                "min_stable_ms": {
+                    "type": "number",
+                    "description": (
+                        "How long targets must remain idle before considered "
+                        "stable, in milliseconds. Defaults to 500."
+                    ),
+                    "default": 500,
+                },
+            },
+            "required": ["targets"],
+        },
+    ),
 ]
 
 
@@ -1811,6 +2161,12 @@ async def call_tool(
 
             data = response.data or {}
             elements = data.get("elements", [])
+
+            # Extract page context if present
+            page_header_lines: list[str] = []
+            page_data = data.get("page")
+            if isinstance(page_data, dict):
+                page_header_lines = format_page_header(page_data)
 
             # Feature 2: Interactive-only filtering
             if interactive_only:
@@ -1873,6 +2229,10 @@ async def call_tool(
                     for el in els:
                         lines.append(format_element_summary(el))
                     lines.append("")
+
+            # Prepend page context header if available
+            if page_header_lines:
+                lines = page_header_lines + [""] + lines
 
             if overflow:
                 lines.append(f"+{overflow} more elements not shown")
@@ -2151,6 +2511,12 @@ async def call_tool(
             data = response.data or {}
             elements = data.get("elements", [])
 
+            # Extract page context if present
+            sdk_page_header_lines: list[str] = []
+            sdk_page_data = data.get("page")
+            if isinstance(sdk_page_data, dict):
+                sdk_page_header_lines = format_page_header(sdk_page_data)
+
             # Feature 2: Interactive-only filtering (overrides include_content)
             if interactive_only:
                 elements = [el for el in elements if el.get("category") != "content"]
@@ -2217,10 +2583,34 @@ async def call_tool(
                         lines.append(format_element_summary(el))
                     lines.append("")
 
+            # Prepend page context header if available
+            if sdk_page_header_lines:
+                lines = sdk_page_header_lines + [""] + lines
+
             if overflow:
                 lines.append(f"+{overflow} more elements not shown")
 
             return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_forms":
+            response = await ui_client.sdk_forms()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=_format_forms_response(response.data)
+                )
+            ]
+
+        elif name == "ui_forms":
+            response = await ui_client.control_forms()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=_format_forms_response(response.data)
+                )
+            ]
 
         elif name == "sdk_elements":
             content_only = arguments.get("content_only", False)
@@ -3617,6 +4007,131 @@ async def call_tool(
                         lines.append(f"  ... and {len(modified) - 15} more")
 
                 return [types.TextContent(type="text", text="\n".join(lines))]
+
+        # =====================================================================
+        # Idle Detection Tools
+        # =====================================================================
+
+        elif name == "get_idle_status":
+            signal = arguments.get("signal")
+            response = await ui_client.control_idle_status(signal=signal)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            if signal:
+                # Single signal response
+                idle = data.get("idle", False)
+                stable_ms = data.get("stableForMs", 0)
+                lines = [
+                    f"Signal: {signal}",
+                    f"Idle: {idle}",
+                    f"Stable for: {stable_ms}ms",
+                ]
+                details = data.get("details")
+                if details:
+                    lines.append(f"Details: {json.dumps(details)}")
+            else:
+                # Composite response
+                idle = data.get("idle", False)
+                lines = [f"App Idle: {idle}", ""]
+                signals = data.get("signals", {})
+                if signals:
+                    lines.append("Signals:")
+                    for sig_name, sig_info in signals.items():
+                        if isinstance(sig_info, dict):
+                            sig_idle = sig_info.get("idle", False)
+                            sig_stable = sig_info.get("stableForMs", 0)
+                            status = "idle" if sig_idle else "busy"
+                            lines.append(
+                                f"  {sig_name}: {status} (stable {sig_stable}ms)"
+                            )
+                        else:
+                            lines.append(f"  {sig_name}: {sig_info}")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "wait_for_idle":
+            timeout = arguments.get("timeout", 30000)
+            min_stable_ms = arguments.get("min_stable_ms", 500)
+            exclude = arguments.get("exclude")
+            response = await ui_client.control_wait_for_idle(
+                timeout=timeout,
+                min_stable_ms=min_stable_ms,
+                exclude=exclude,
+            )
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Idle wait failed: {response.error}",
+                    )
+                ]
+            data = response.data or {}
+            waited_ms = data.get("waitedMs", 0)
+            lines = [f"App is idle (waited {waited_ms}ms)"]
+            signals = data.get("signals", {})
+            if signals:
+                for sig_name, sig_info in signals.items():
+                    if isinstance(sig_info, dict):
+                        sig_stable = sig_info.get("stableForMs", 0)
+                        lines.append(f"  {sig_name}: stable {sig_stable}ms")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "wait_for_signal":
+            signal = arguments["signal"]
+            timeout = arguments.get("timeout", 30000)
+            min_stable_ms = arguments.get("min_stable_ms", 500)
+            response = await ui_client.control_wait_for_signal(
+                signal=signal,
+                timeout=timeout,
+                min_stable_ms=min_stable_ms,
+            )
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Signal wait failed ({signal}): {response.error}",
+                    )
+                ]
+            data = response.data or {}
+            waited_ms = data.get("waitedMs", 0)
+            stable_ms = data.get("stableForMs", 0)
+            return [
+                types.TextContent(
+                    type="text",
+                    text=(
+                        f"Signal '{signal}' is idle "
+                        f"(waited {waited_ms}ms, stable {stable_ms}ms)"
+                    ),
+                )
+            ]
+
+        elif name == "wait_for_targets":
+            targets = arguments["targets"]
+            timeout = arguments.get("timeout", 30000)
+            min_stable_ms = arguments.get("min_stable_ms", 500)
+            response = await ui_client.control_wait_for_targets(
+                targets=targets,
+                timeout=timeout,
+                min_stable_ms=min_stable_ms,
+            )
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Targets wait failed: {response.error}",
+                    )
+                ]
+            data = response.data or {}
+            waited_ms = data.get("waitedMs", 0)
+            target_results = data.get("targets", [])
+            lines = [f"All targets idle (waited {waited_ms}ms)"]
+            if target_results:
+                for t in target_results:
+                    if isinstance(t, dict):
+                        t_name = t.get("target", t.get("name", "?"))
+                        t_stable = t.get("stableForMs", 0)
+                        lines.append(f"  {t_name}: stable {t_stable}ms")
+            return [types.TextContent(type="text", text="\n".join(lines))]
 
         else:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
