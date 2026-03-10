@@ -1934,6 +1934,9 @@ Returns whether the app is idle (no pending network requests, DOM mutations,
 or loading indicators) along with a per-signal breakdown showing each signal's
 state and how long it has been stable.
 
+Automatically detects the connection mode: if an SDK app is connected, queries
+the SDK app's idle state; otherwise queries the runner's own UI (control mode).
+
 Use this to check if the app has finished updating after an action (e.g.,
 clicking a button, navigating, or submitting a form) before taking a snapshot
 or making assertions. This is a non-blocking check — use wait_for_idle if you
@@ -1962,6 +1965,9 @@ Optionally pass a specific signal name to query just that signal.""",
 Waits for network requests to complete, DOM mutations to stop, and loading
 indicators to disappear. Returns once ALL signals have been simultaneously
 idle for min_stable_ms.
+
+Automatically detects the connection mode: if an SDK app is connected, waits
+for the SDK app to become idle; otherwise waits for the runner's own UI.
 
 Use this after triggering an action (click, navigation, form submit) to
 ensure the app has fully settled before inspecting the UI. This is the
@@ -2016,6 +2022,9 @@ Unlike wait_for_idle which waits for ALL signals, this waits for just one:
 - 'dom': No DOM mutations for min_stable_ms
 - 'loading-indicators': No visible spinners, progress bars, or skeleton screens
 
+Automatically detects the connection mode: if an SDK app is connected, waits
+on the SDK app; otherwise waits on the runner's own UI.
+
 Use this when you only care about a specific type of activity. For example,
 wait for 'network' after an API call, or wait for 'dom' after a client-side
 state update.
@@ -2057,6 +2066,9 @@ Accepts an array of targets, where each target is either:
 - A signal name string: 'network', 'dom', or 'loading-indicators'
 - An indicator object: {"indicator": ".my-spinner"} — waits for the CSS
   selector to become hidden/removed
+
+Automatically detects the connection mode: if an SDK app is connected, waits
+on the SDK app; otherwise waits on the runner's own UI.
 
 This is useful when you know exactly what to wait for. For example, wait
 for a specific loading spinner to disappear, or wait for both network and
@@ -4014,15 +4026,27 @@ async def call_tool(
 
         elif name == "get_idle_status":
             signal = arguments.get("signal")
-            response = await ui_client.control_idle_status(signal=signal)
+            # Auto-detect mode: use SDK if connected, otherwise control
+            sdk_check = await ui_client.sdk_status()
+            use_sdk = (
+                sdk_check.success
+                and sdk_check.data
+                and sdk_check.data.get("connected", False)
+            )
+            if use_sdk:
+                response = await ui_client.sdk_idle_status(signal=signal)
+            else:
+                response = await ui_client.control_idle_status(signal=signal)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
             data = response.data or {}
+            mode_label = "SDK app" if use_sdk else "Runner"
             if signal:
                 # Single signal response
                 idle = data.get("idle", False)
                 stable_ms = data.get("stableForMs", 0)
                 lines = [
+                    f"Target: {mode_label}",
                     f"Signal: {signal}",
                     f"Idle: {idle}",
                     f"Stable for: {stable_ms}ms",
@@ -4033,7 +4057,7 @@ async def call_tool(
             else:
                 # Composite response
                 idle = data.get("idle", False)
-                lines = [f"App Idle: {idle}", ""]
+                lines = [f"{mode_label} Idle: {idle}", ""]
                 signals = data.get("signals", {})
                 if signals:
                     lines.append("Signals:")
@@ -4053,11 +4077,25 @@ async def call_tool(
             timeout = arguments.get("timeout", 30000)
             min_stable_ms = arguments.get("min_stable_ms", 500)
             exclude = arguments.get("exclude")
-            response = await ui_client.control_wait_for_idle(
-                timeout=timeout,
-                min_stable_ms=min_stable_ms,
-                exclude=exclude,
+            # Auto-detect mode: use SDK if connected, otherwise control
+            sdk_check = await ui_client.sdk_status()
+            use_sdk = (
+                sdk_check.success
+                and sdk_check.data
+                and sdk_check.data.get("connected", False)
             )
+            if use_sdk:
+                response = await ui_client.sdk_wait_for_idle(
+                    timeout=timeout,
+                    min_stable_ms=min_stable_ms,
+                    exclude=exclude,
+                )
+            else:
+                response = await ui_client.control_wait_for_idle(
+                    timeout=timeout,
+                    min_stable_ms=min_stable_ms,
+                    exclude=exclude,
+                )
             if not response.success:
                 return [
                     types.TextContent(
@@ -4067,7 +4105,8 @@ async def call_tool(
                 ]
             data = response.data or {}
             waited_ms = data.get("waitedMs", 0)
-            lines = [f"App is idle (waited {waited_ms}ms)"]
+            mode_label = "SDK app" if use_sdk else "App"
+            lines = [f"{mode_label} is idle (waited {waited_ms}ms)"]
             signals = data.get("signals", {})
             if signals:
                 for sig_name, sig_info in signals.items():
@@ -4080,11 +4119,25 @@ async def call_tool(
             signal = arguments["signal"]
             timeout = arguments.get("timeout", 30000)
             min_stable_ms = arguments.get("min_stable_ms", 500)
-            response = await ui_client.control_wait_for_signal(
-                signal=signal,
-                timeout=timeout,
-                min_stable_ms=min_stable_ms,
+            # Auto-detect mode: use SDK if connected, otherwise control
+            sdk_check = await ui_client.sdk_status()
+            use_sdk = (
+                sdk_check.success
+                and sdk_check.data
+                and sdk_check.data.get("connected", False)
             )
+            if use_sdk:
+                response = await ui_client.sdk_wait_for_signal(
+                    signal=signal,
+                    timeout=timeout,
+                    min_stable_ms=min_stable_ms,
+                )
+            else:
+                response = await ui_client.control_wait_for_signal(
+                    signal=signal,
+                    timeout=timeout,
+                    min_stable_ms=min_stable_ms,
+                )
             if not response.success:
                 return [
                     types.TextContent(
@@ -4095,11 +4148,12 @@ async def call_tool(
             data = response.data or {}
             waited_ms = data.get("waitedMs", 0)
             stable_ms = data.get("stableForMs", 0)
+            mode_label = " (SDK)" if use_sdk else ""
             return [
                 types.TextContent(
                     type="text",
                     text=(
-                        f"Signal '{signal}' is idle "
+                        f"Signal '{signal}' is idle{mode_label} "
                         f"(waited {waited_ms}ms, stable {stable_ms}ms)"
                     ),
                 )
@@ -4109,11 +4163,25 @@ async def call_tool(
             targets = arguments["targets"]
             timeout = arguments.get("timeout", 30000)
             min_stable_ms = arguments.get("min_stable_ms", 500)
-            response = await ui_client.control_wait_for_targets(
-                targets=targets,
-                timeout=timeout,
-                min_stable_ms=min_stable_ms,
+            # Auto-detect mode: use SDK if connected, otherwise control
+            sdk_check = await ui_client.sdk_status()
+            use_sdk = (
+                sdk_check.success
+                and sdk_check.data
+                and sdk_check.data.get("connected", False)
             )
+            if use_sdk:
+                response = await ui_client.sdk_wait_for_targets(
+                    targets=targets,
+                    timeout=timeout,
+                    min_stable_ms=min_stable_ms,
+                )
+            else:
+                response = await ui_client.control_wait_for_targets(
+                    targets=targets,
+                    timeout=timeout,
+                    min_stable_ms=min_stable_ms,
+                )
             if not response.success:
                 return [
                     types.TextContent(
@@ -4124,7 +4192,8 @@ async def call_tool(
             data = response.data or {}
             waited_ms = data.get("waitedMs", 0)
             target_results = data.get("targets", [])
-            lines = [f"All targets idle (waited {waited_ms}ms)"]
+            mode_label = " (SDK)" if use_sdk else ""
+            lines = [f"All targets idle{mode_label} (waited {waited_ms}ms)"]
             if target_results:
                 for t in target_results:
                     if isinstance(t, dict):

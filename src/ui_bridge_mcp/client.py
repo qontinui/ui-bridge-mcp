@@ -608,6 +608,99 @@ class UIBridgeClient:
         )
 
     # -------------------------------------------------------------------------
+    # SDK Mode - Idle Detection (/ui-bridge/sdk/idle-*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_idle_status(self, signal: str | None = None) -> UIBridgeResponse:
+        """Get current idle status from connected SDK app.
+
+        Args:
+            signal: Optional specific signal to query (e.g., 'network', 'dom',
+                'loading-indicators'). If None, returns composite status with
+                all signals.
+        """
+        if signal:
+            return await self._request("GET", f"/ui-bridge/sdk/idle-status/{signal}")
+        return await self._request("GET", "/ui-bridge/sdk/idle-status")
+
+    async def sdk_wait_for_idle(
+        self,
+        timeout: int = 30000,
+        min_stable_ms: int = 500,
+        exclude: list[str] | None = None,
+    ) -> UIBridgeResponse:
+        """Block until the SDK app is idle (all signals stable).
+
+        Args:
+            timeout: Max time to wait in ms. Defaults to 30000.
+            min_stable_ms: How long signals must remain idle before considered
+                stable. Defaults to 500.
+            exclude: Signal names to ignore (e.g., ['network']).
+        """
+        body: dict[str, Any] = {
+            "timeout": timeout,
+            "minStableMs": min_stable_ms,
+        }
+        if exclude:
+            body["exclude"] = exclude
+        http_timeout = (timeout / 1000) + 10.0
+        return await self._request(
+            "POST", "/ui-bridge/sdk/wait-for-idle", body, timeout=http_timeout
+        )
+
+    async def sdk_wait_for_signal(
+        self,
+        signal: str,
+        timeout: int = 30000,
+        min_stable_ms: int = 500,
+    ) -> UIBridgeResponse:
+        """Block until a specific signal is idle in the SDK app.
+
+        Args:
+            signal: Signal name ('network', 'dom', or 'loading-indicators').
+            timeout: Max time to wait in ms. Defaults to 30000.
+            min_stable_ms: How long the signal must remain idle. Defaults to 500.
+        """
+        body: dict[str, Any] = {
+            "timeout": timeout,
+            "minStableMs": min_stable_ms,
+        }
+        http_timeout = (timeout / 1000) + 10.0
+        return await self._request(
+            "POST",
+            f"/ui-bridge/sdk/wait-for-idle/{signal}",
+            body,
+            timeout=http_timeout,
+        )
+
+    async def sdk_wait_for_targets(
+        self,
+        targets: list[str | dict[str, str]],
+        timeout: int = 30000,
+        min_stable_ms: int = 500,
+    ) -> UIBridgeResponse:
+        """Wait for specific targets to become idle in the SDK app.
+
+        Args:
+            targets: Array of signal names (strings) or indicator objects
+                (e.g., {"indicator": ".loading-spinner"}).
+            timeout: Max time to wait in ms. Defaults to 30000.
+            min_stable_ms: How long targets must remain idle. Defaults to 500.
+        """
+        body: dict[str, Any] = {
+            "targets": targets,
+            "timeout": timeout,
+            "minStableMs": min_stable_ms,
+        }
+        http_timeout = (timeout / 1000) + 10.0
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/wait-for-targets",
+            body,
+            timeout=http_timeout,
+        )
+
+    # -------------------------------------------------------------------------
     # SDK Mode - Design Review (/ui-bridge/sdk/design/*)
     # -------------------------------------------------------------------------
 
