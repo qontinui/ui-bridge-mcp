@@ -154,6 +154,17 @@ class UIBridgeClient:
         """
         return await self._request("GET", "/ui-bridge/control/snapshot")
 
+    async def control_clipboard_read(self) -> UIBridgeResponse:
+        """Read the current system clipboard content."""
+        return await self._request("GET", "/ui-bridge/control/clipboard")
+
+    async def control_clipboard_write(self, text: str, html: str | None = None) -> UIBridgeResponse:
+        """Write text to the system clipboard."""
+        data: dict[str, Any] = {"text": text}
+        if html is not None:
+            data["html"] = html
+        return await self._request("POST", "/ui-bridge/control/clipboard", data)
+
     async def control_forms(self) -> UIBridgeResponse:
         """Get form state data from the runner's webview.
 
@@ -161,6 +172,54 @@ class UIBridgeClient:
         dirty state, required fields, and constraint information.
         """
         return await self._request("GET", "/ui-bridge/control/forms")
+
+    async def control_fill_form(
+        self,
+        fields: dict[str, Any],
+        trigger_validation: bool = True,
+        clear_first: bool = True,
+    ) -> UIBridgeResponse:
+        """Fill multiple form fields atomically in the runner's webview.
+
+        Args:
+            fields: Map of element ID to value (string, boolean, or string[]).
+            trigger_validation: Whether to trigger validation after filling.
+            clear_first: Whether to clear existing values first.
+        """
+        return await self._request(
+            "POST",
+            "/ui-bridge/control/fill",
+            {
+                "fields": fields,
+                "triggerValidation": trigger_validation,
+                "clearFirst": clear_first,
+            },
+        )
+
+    async def control_form_snapshot(self) -> UIBridgeResponse:
+        """Capture a snapshot of all form state in the runner's webview.
+
+        Returns a FormSnapshot with all forms and their field states.
+        Use before and after an action to track form changes via control_form_diff.
+        """
+        return await self._request("POST", "/ui-bridge/control/forms/snapshot")
+
+    async def control_form_diff(
+        self,
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> UIBridgeResponse:
+        """Compare two form snapshots from the runner's webview.
+
+        Args:
+            before: The before snapshot from control_form_snapshot.
+            after: The after snapshot from control_form_snapshot.
+        """
+        return await self._request(
+            "POST",
+            "/ui-bridge/control/forms/diff",
+            {"before": before, "after": after},
+        )
 
     async def control_discover(
         self, interactive_only: bool = False
@@ -265,6 +324,34 @@ class UIBridgeClient:
         )
 
     # -------------------------------------------------------------------------
+    # Control Mode - Undo/Redo Awareness
+    # -------------------------------------------------------------------------
+
+    async def control_undo_state(self) -> UIBridgeResponse:
+        """Get undo/redo availability and state from the runner's webview.
+
+        Returns whether undo/redo is available, what it would reverse,
+        stack depth, and detection sources.
+        """
+        return await self._request("GET", "/ui-bridge/control/undo-state")
+
+    async def control_undo(self) -> UIBridgeResponse:
+        """Execute undo in the runner's webview.
+
+        Uses the developer-declared handler if available, otherwise
+        dispatches Ctrl+Z (Cmd+Z on Mac) keyboard event.
+        """
+        return await self._request("POST", "/ui-bridge/control/undo")
+
+    async def control_redo(self) -> UIBridgeResponse:
+        """Execute redo in the runner's webview.
+
+        Uses the developer-declared handler if available, otherwise
+        dispatches Ctrl+Shift+Z (Cmd+Shift+Z on Mac) keyboard event.
+        """
+        return await self._request("POST", "/ui-bridge/control/redo")
+
+    # -------------------------------------------------------------------------
     # SDK Mode - External SDK-Integrated Apps (/ui-bridge/sdk/*)
     # -------------------------------------------------------------------------
 
@@ -354,6 +441,29 @@ class UIBridgeClient:
             params = {"includeContent": "false"}
         return await self._request("GET", "/ui-bridge/sdk/snapshot", params=params)
 
+    async def sdk_clipboard_read(self) -> UIBridgeResponse:
+        """Read the current system clipboard content via SDK endpoint."""
+        return await self._request("GET", "/ui-bridge/sdk/clipboard")
+
+    async def sdk_clipboard_write(self, text: str, html: str | None = None) -> UIBridgeResponse:
+        """Write text to the system clipboard via SDK endpoint."""
+        data: dict[str, Any] = {"text": text}
+        if html is not None:
+            data["html"] = html
+        return await self._request("POST", "/ui-bridge/sdk/clipboard", data)
+
+    async def sdk_undo_state(self) -> UIBridgeResponse:
+        """Get undo/redo availability and state from the connected SDK app."""
+        return await self._request("GET", "/ui-bridge/sdk/undo-state")
+
+    async def sdk_undo(self) -> UIBridgeResponse:
+        """Execute undo in the connected SDK app."""
+        return await self._request("POST", "/ui-bridge/sdk/undo")
+
+    async def sdk_redo(self) -> UIBridgeResponse:
+        """Execute redo in the connected SDK app."""
+        return await self._request("POST", "/ui-bridge/sdk/redo")
+
     async def sdk_forms(self) -> UIBridgeResponse:
         """Get form state data from the connected SDK app.
 
@@ -361,6 +471,54 @@ class UIBridgeClient:
         dirty state, required fields, and constraint information.
         """
         return await self._request("GET", "/ui-bridge/sdk/forms")
+
+    async def sdk_fill_form(
+        self,
+        fields: dict[str, Any],
+        trigger_validation: bool = True,
+        clear_first: bool = True,
+    ) -> UIBridgeResponse:
+        """Fill multiple form fields atomically in the connected SDK app.
+
+        Args:
+            fields: Map of element ID to value (string, boolean, or string[]).
+            trigger_validation: Whether to trigger validation after filling.
+            clear_first: Whether to clear existing values first.
+        """
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/fill",
+            {
+                "fields": fields,
+                "triggerValidation": trigger_validation,
+                "clearFirst": clear_first,
+            },
+        )
+
+    async def sdk_form_snapshot(self) -> UIBridgeResponse:
+        """Capture a snapshot of all form state in the connected SDK app.
+
+        Returns a FormSnapshot with all forms and their field states.
+        Use before and after an action to track form changes via sdk_form_diff.
+        """
+        return await self._request("POST", "/ui-bridge/sdk/forms/snapshot")
+
+    async def sdk_form_diff(
+        self,
+        before: dict[str, Any],
+        after: dict[str, Any],
+    ) -> UIBridgeResponse:
+        """Compare two form snapshots from the connected SDK app.
+
+        Args:
+            before: The before snapshot from sdk_form_snapshot.
+            after: The after snapshot from sdk_form_snapshot.
+        """
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/forms/diff",
+            {"before": before, "after": after},
+        )
 
     async def sdk_discover(
         self,
@@ -410,6 +568,31 @@ class UIBridgeClient:
         if content_types:
             body["contentTypes"] = content_types
         return await self._request("POST", "/ui-bridge/sdk/ai/search", body)
+
+    async def sdk_ai_find(
+        self,
+        query: str,
+        context: str | None = None,
+        confidence_threshold: float | None = None,
+    ) -> UIBridgeResponse:
+        """Find an element by natural language description with spatial/relational context.
+
+        Supports queries like "close button near Terminal 1 tab" or
+        "email input in the login form". More capable than sdk_ai_search
+        because it handles spatial references, container scoping, ordinals,
+        and state filters.
+
+        Args:
+            query: Natural language element description.
+            context: Optional context hint (e.g., 'in the dialog').
+            confidence_threshold: Minimum confidence threshold (0-1).
+        """
+        body: dict[str, Any] = {"query": query}
+        if context:
+            body["context"] = {"sectionHint": context}
+        if confidence_threshold is not None:
+            body["confidenceThreshold"] = confidence_threshold
+        return await self._request("POST", "/ui-bridge/sdk/ai/find", body)
 
     async def sdk_ai_execute(self, instruction: str) -> UIBridgeResponse:
         """Execute an action by natural language instruction.
@@ -701,6 +884,174 @@ class UIBridgeClient:
         )
 
     # -------------------------------------------------------------------------
+    # Control Mode - Network Request Monitoring (/ui-bridge/control/network-*)
+    # -------------------------------------------------------------------------
+
+    async def control_network_requests(
+        self,
+        status: str | None = None,
+        method: str | None = None,
+        url_pattern: str | None = None,
+        failures_only: bool = False,
+        limit: int = 50,
+    ) -> UIBridgeResponse:
+        """List recent network requests from the runner's webview.
+
+        Args:
+            status: Filter by status: in-flight, completed, failed, cancelled.
+            method: Filter by HTTP method (GET, POST, etc.).
+            url_pattern: Filter by URL substring match.
+            failures_only: Only show failed requests (4xx/5xx/network errors).
+            limit: Max number of results. Defaults to 50.
+        """
+        params: dict[str, str] = {}
+        if status:
+            params["status"] = status
+        if method:
+            params["method"] = method
+        if url_pattern:
+            params["url_pattern"] = url_pattern
+        if failures_only:
+            params["failures_only"] = "true"
+        if limit != 50:
+            params["limit"] = str(limit)
+        return await self._request(
+            "GET",
+            "/ui-bridge/control/network-requests",
+            params=params or None,
+        )
+
+    async def control_network_requests_in_flight(self) -> UIBridgeResponse:
+        """Show currently in-flight network requests from the runner's webview."""
+        return await self._request(
+            "GET", "/ui-bridge/control/network-requests/in-flight"
+        )
+
+    async def control_wait_for_network_request(
+        self,
+        url_pattern: str | None = None,
+        method: str | None = None,
+        timeout: int = 30000,
+    ) -> UIBridgeResponse:
+        """Wait for a network request matching the given criteria to complete.
+
+        Args:
+            url_pattern: URL substring to match.
+            method: HTTP method to match.
+            timeout: Timeout in milliseconds. Defaults to 30000.
+        """
+        body: dict[str, Any] = {}
+        if url_pattern:
+            body["url_pattern"] = url_pattern
+        if method:
+            body["method"] = method
+        if timeout != 30000:
+            body["timeout"] = timeout
+        http_timeout = (timeout / 1000) + 10.0
+        return await self._request(
+            "POST",
+            "/ui-bridge/control/network-requests/wait",
+            body or None,
+            timeout=http_timeout,
+        )
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Network Request Monitoring (/ui-bridge/sdk/network-*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_network_requests(
+        self,
+        status: str | None = None,
+        method: str | None = None,
+        url_pattern: str | None = None,
+        failures_only: bool = False,
+        limit: int = 50,
+    ) -> UIBridgeResponse:
+        """List recent network requests from the connected SDK app.
+
+        Args:
+            status: Filter by status: in-flight, completed, failed, cancelled.
+            method: Filter by HTTP method (GET, POST, etc.).
+            url_pattern: Filter by URL substring match.
+            failures_only: Only show failed requests (4xx/5xx/network errors).
+            limit: Max number of results. Defaults to 50.
+        """
+        params: dict[str, str] = {}
+        if status:
+            params["status"] = status
+        if method:
+            params["method"] = method
+        if url_pattern:
+            params["url_pattern"] = url_pattern
+        if failures_only:
+            params["failures_only"] = "true"
+        if limit != 50:
+            params["limit"] = str(limit)
+        return await self._request(
+            "GET",
+            "/ui-bridge/sdk/network-requests",
+            params=params or None,
+        )
+
+    async def sdk_network_requests_in_flight(self) -> UIBridgeResponse:
+        """Show currently in-flight network requests from the connected SDK app."""
+        return await self._request(
+            "GET", "/ui-bridge/sdk/network-requests/in-flight"
+        )
+
+    async def sdk_wait_for_network_request(
+        self,
+        url_pattern: str | None = None,
+        method: str | None = None,
+        timeout: int = 30000,
+    ) -> UIBridgeResponse:
+        """Wait for a network request matching the given criteria to complete.
+
+        Args:
+            url_pattern: URL substring to match.
+            method: HTTP method to match.
+            timeout: Timeout in milliseconds. Defaults to 30000.
+        """
+        body: dict[str, Any] = {}
+        if url_pattern:
+            body["url_pattern"] = url_pattern
+        if method:
+            body["method"] = method
+        if timeout != 30000:
+            body["timeout"] = timeout
+        http_timeout = (timeout / 1000) + 10.0
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/network-requests/wait",
+            body or None,
+            timeout=http_timeout,
+        )
+
+    # -------------------------------------------------------------------------
+    # Control Mode - Design Review (/ui-bridge/control/design/*)
+    # -------------------------------------------------------------------------
+
+    async def control_design_snapshot(
+        self,
+        element_ids: list[str] | None = None,
+        include_pseudo_elements: bool = False,
+    ) -> UIBridgeResponse:
+        """Get design data for all or filtered elements (control/runner path).
+
+        Args:
+            element_ids: Optional list of element IDs to include.
+            include_pseudo_elements: Whether to include ::before/::after styles.
+        """
+        body: dict[str, Any] = {}
+        if element_ids:
+            body["elementIds"] = element_ids
+        if include_pseudo_elements:
+            body["includePseudoElements"] = True
+        return await self._request(
+            "POST", "/ui-bridge/control/design/snapshot", body or None
+        )
+
+    # -------------------------------------------------------------------------
     # SDK Mode - Design Review (/ui-bridge/sdk/design/*)
     # -------------------------------------------------------------------------
 
@@ -874,6 +1225,298 @@ class UIBridgeClient:
             body["elementIds"] = element_ids
         return await self._request(
             "POST", "/ui-bridge/sdk/design/evaluate/diff", body or None
+        )
+
+    # -------------------------------------------------------------------------
+    # Control Mode - Change Tracking (/ui-bridge/control/ai/*)
+    # -------------------------------------------------------------------------
+
+    async def control_save_bookmark(self, name: str) -> UIBridgeResponse:
+        """Save a snapshot bookmark for later diffing (control mode).
+
+        Args:
+            name: Unique bookmark name.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/bookmarks", {"name": name}
+        )
+
+    async def control_list_bookmarks(self) -> UIBridgeResponse:
+        """List all saved snapshot bookmarks (control mode)."""
+        return await self._request("GET", "/ui-bridge/control/ai/bookmarks")
+
+    async def control_get_bookmark(self, name: str) -> UIBridgeResponse:
+        """Get a specific bookmark by name (control mode).
+
+        Args:
+            name: Bookmark name.
+        """
+        return await self._request("GET", f"/ui-bridge/control/ai/bookmark/{name}")
+
+    async def control_delete_bookmark(self, name: str) -> UIBridgeResponse:
+        """Delete a saved bookmark (control mode).
+
+        Args:
+            name: Bookmark name to delete.
+        """
+        return await self._request(
+            "DELETE", f"/ui-bridge/control/ai/bookmark/{name}"
+        )
+
+    async def control_diff_from_bookmark(self, name: str) -> UIBridgeResponse:
+        """Diff current UI state against a saved bookmark (control mode).
+
+        Args:
+            name: Bookmark name to diff against.
+        """
+        return await self._request(
+            "GET", f"/ui-bridge/control/ai/bookmark/{name}/diff"
+        )
+
+    async def control_execute_with_diff(
+        self, request: dict[str, Any]
+    ) -> UIBridgeResponse:
+        """Execute an element action and capture what changed (control mode).
+
+        Args:
+            request: Request body with elementAction, settleTimeout, etc.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/execute-with-diff", request
+        )
+
+    async def control_wait_for_change(
+        self, predicate: dict[str, Any], options: dict[str, Any] | None = None
+    ) -> UIBridgeResponse:
+        """Wait for a change matching a predicate (control mode).
+
+        Args:
+            predicate: Change predicate (e.g. {"type": "anyChange"}).
+            options: Optional wait options (timeout, pollInterval, etc.).
+        """
+        body: dict[str, Any] = {"predicate": predicate}
+        if options:
+            body["options"] = options
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/wait-for-change", body
+        )
+
+    async def control_categorize_last_diff(self) -> UIBridgeResponse:
+        """Categorize the last computed diff (control mode)."""
+        return await self._request(
+            "GET", "/ui-bridge/control/ai/categorize-last-diff"
+        )
+
+    async def control_scoped_diff(
+        self,
+        scope: str,
+        from_bookmark: str | None = None,
+    ) -> UIBridgeResponse:
+        """Get a scoped diff (control mode).
+
+        Args:
+            scope: Scope for the diff.
+            from_bookmark: Optional bookmark name to diff against.
+        """
+        body: dict[str, Any] = {"scope": scope}
+        if from_bookmark:
+            body["fromBookmark"] = from_bookmark
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/scoped-diff", body
+        )
+
+    async def control_summarize_diff(
+        self, body: dict[str, Any]
+    ) -> UIBridgeResponse:
+        """Get a budget-aware summary of UI changes (control mode).
+
+        Args:
+            body: Request body with budget, fromBookmark, includeCategory.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/summarize-diff", body
+        )
+
+    async def control_structured_changes(
+        self, body: dict[str, Any] | None = None
+    ) -> UIBridgeResponse:
+        """Analyze table and list changes (control mode).
+
+        Args:
+            body: Optional request body with fromBookmark.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/structured-changes", body
+        )
+
+    async def control_enable_change_buffer(self) -> UIBridgeResponse:
+        """Enable change buffering (control mode)."""
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/change-buffer/enable"
+        )
+
+    async def control_disable_change_buffer(self) -> UIBridgeResponse:
+        """Disable change buffering (control mode)."""
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/change-buffer/disable"
+        )
+
+    async def control_drain_change_buffer(self) -> UIBridgeResponse:
+        """Drain the change buffer (control mode)."""
+        return await self._request(
+            "POST", "/ui-bridge/control/ai/change-buffer/drain"
+        )
+
+    async def control_change_buffer_size(self) -> UIBridgeResponse:
+        """Get change buffer size and enabled status (control mode)."""
+        return await self._request(
+            "GET", "/ui-bridge/control/ai/change-buffer/size"
+        )
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Change Tracking (/ui-bridge/sdk/ai/*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_save_bookmark(self, name: str) -> UIBridgeResponse:
+        """Save a snapshot bookmark for later diffing (SDK mode).
+
+        Args:
+            name: Unique bookmark name.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/bookmarks", {"name": name}
+        )
+
+    async def sdk_list_bookmarks(self) -> UIBridgeResponse:
+        """List all saved snapshot bookmarks (SDK mode)."""
+        return await self._request("GET", "/ui-bridge/sdk/ai/bookmarks")
+
+    async def sdk_get_bookmark(self, name: str) -> UIBridgeResponse:
+        """Get a specific bookmark by name (SDK mode).
+
+        Args:
+            name: Bookmark name.
+        """
+        return await self._request("GET", f"/ui-bridge/sdk/ai/bookmark/{name}")
+
+    async def sdk_delete_bookmark(self, name: str) -> UIBridgeResponse:
+        """Delete a saved bookmark (SDK mode).
+
+        Args:
+            name: Bookmark name to delete.
+        """
+        return await self._request(
+            "DELETE", f"/ui-bridge/sdk/ai/bookmark/{name}"
+        )
+
+    async def sdk_diff_from_bookmark(self, name: str) -> UIBridgeResponse:
+        """Diff current UI state against a saved bookmark (SDK mode).
+
+        Args:
+            name: Bookmark name to diff against.
+        """
+        return await self._request(
+            "GET", f"/ui-bridge/sdk/ai/bookmark/{name}/diff"
+        )
+
+    async def sdk_execute_with_diff(
+        self, request: dict[str, Any]
+    ) -> UIBridgeResponse:
+        """Execute an element action and capture what changed (SDK mode).
+
+        Args:
+            request: Request body with elementAction, settleTimeout, etc.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/execute-with-diff", request
+        )
+
+    async def sdk_wait_for_change(
+        self, predicate: dict[str, Any], options: dict[str, Any] | None = None
+    ) -> UIBridgeResponse:
+        """Wait for a change matching a predicate (SDK mode).
+
+        Args:
+            predicate: Change predicate (e.g. {"type": "anyChange"}).
+            options: Optional wait options (timeout, pollInterval, etc.).
+        """
+        body: dict[str, Any] = {"predicate": predicate}
+        if options:
+            body["options"] = options
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/wait-for-change", body
+        )
+
+    async def sdk_categorize_last_diff(self) -> UIBridgeResponse:
+        """Categorize the last computed diff (SDK mode)."""
+        return await self._request(
+            "GET", "/ui-bridge/sdk/ai/categorize-last-diff"
+        )
+
+    async def sdk_scoped_diff(
+        self,
+        scope: str,
+        from_bookmark: str | None = None,
+    ) -> UIBridgeResponse:
+        """Get a scoped diff (SDK mode).
+
+        Args:
+            scope: Scope for the diff.
+            from_bookmark: Optional bookmark name to diff against.
+        """
+        body: dict[str, Any] = {"scope": scope}
+        if from_bookmark:
+            body["fromBookmark"] = from_bookmark
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/scoped-diff", body
+        )
+
+    async def sdk_summarize_diff(
+        self, body: dict[str, Any]
+    ) -> UIBridgeResponse:
+        """Get a budget-aware summary of UI changes (SDK mode).
+
+        Args:
+            body: Request body with budget, fromBookmark, includeCategory.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/summarize-diff", body
+        )
+
+    async def sdk_structured_changes(
+        self, body: dict[str, Any] | None = None
+    ) -> UIBridgeResponse:
+        """Analyze table and list changes (SDK mode).
+
+        Args:
+            body: Optional request body with fromBookmark.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/structured-changes", body
+        )
+
+    async def sdk_enable_change_buffer(self) -> UIBridgeResponse:
+        """Enable change buffering (SDK mode)."""
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/change-buffer/enable"
+        )
+
+    async def sdk_disable_change_buffer(self) -> UIBridgeResponse:
+        """Disable change buffering (SDK mode)."""
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/change-buffer/disable"
+        )
+
+    async def sdk_drain_change_buffer(self) -> UIBridgeResponse:
+        """Drain the change buffer (SDK mode)."""
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/change-buffer/drain"
+        )
+
+    async def sdk_change_buffer_size(self) -> UIBridgeResponse:
+        """Get change buffer size and enabled status (SDK mode)."""
+        return await self._request(
+            "GET", "/ui-bridge/sdk/ai/change-buffer/size"
         )
 
     # -------------------------------------------------------------------------

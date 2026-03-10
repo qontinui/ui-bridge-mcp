@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
 import json
 import logging
 from typing import Any
@@ -20,6 +19,17 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .client import UIBridgeClient
+from .screenshot import (
+    AnnotationOptions,
+    BaselineStore,
+    DeltaEncoder,
+    annotate_screenshot,
+    create_before_after,
+    crop_to_element,
+    diff_screenshots,
+    generate_visual_description,
+    mime_type_for_format,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +41,8 @@ logger = logging.getLogger(__name__)
 # MCP Server instance
 server = Server("ui-bridge-mcp")
 client: UIBridgeClient | None = None
+baseline_store = BaselineStore()
+delta_encoder = DeltaEncoder()
 
 
 def get_client() -> UIBridgeClient:
@@ -170,6 +182,90 @@ def truncate_field(text: str | None, max_len: int) -> str | None:
     return f"{text[:max_len]}... [{len(text)} chars total]"
 
 
+def format_action_error_info(response_data: dict[str, Any] | None) -> str:
+    """Extract errorDiff and errorImpact from an action response and format for AI.
+
+    Returns an empty string if no error information is present, or a formatted
+    summary of new/resolved errors and UI consequences.
+    """
+    if not response_data:
+        return ""
+
+    parts: list[str] = []
+
+    # Error diff: new vs resolved errors
+    error_diff = response_data.get("errorDiff")
+    if error_diff:
+        new_errors = error_diff.get("newErrors", [])
+        resolved = error_diff.get("resolvedErrors", [])
+        delta = error_diff.get("errorDelta", 0)
+
+        if new_errors or resolved:
+            diff_lines: list[str] = []
+            if new_errors:
+                diff_lines.append(f"  NEW ({len(new_errors)}):")
+                for err in new_errors[:5]:  # Cap at 5 to avoid flooding
+                    severity = err.get("severity", "unknown")
+                    reason = err.get("reason", "")
+                    event = err.get("event", {})
+                    msg = event.get("message", event.get("args", [""])[0] if isinstance(event.get("args"), list) else "")
+                    if isinstance(msg, str) and len(msg) > 200:
+                        msg = msg[:200] + "..."
+                    diff_lines.append(f"    [{severity}] {msg}")
+                    if reason:
+                        diff_lines.append(f"           reason: {reason}")
+                if len(new_errors) > 5:
+                    diff_lines.append(f"    ... and {len(new_errors) - 5} more")
+            if resolved:
+                diff_lines.append(f"  RESOLVED ({len(resolved)}):")
+                for err in resolved[:3]:
+                    event = err.get("event", {})
+                    msg = event.get("message", event.get("args", [""])[0] if isinstance(event.get("args"), list) else "")
+                    if isinstance(msg, str) and len(msg) > 200:
+                        msg = msg[:200] + "..."
+                    diff_lines.append(f"    {msg}")
+            if delta != 0:
+                diff_lines.append(f"  errorDelta: {'+' if delta > 0 else ''}{delta}")
+            parts.append("Error Diff:\n" + "\n".join(diff_lines))
+
+    # Error impact: UI consequences assessment
+    error_impact = response_data.get("errorImpact")
+    if error_impact:
+        impact_lines: list[str] = []
+        error_info = error_impact.get("error", {})
+        if error_info:
+            impact_lines.append(
+                f"  error: [{error_info.get('severity', '?')}] {error_info.get('message', '?')}"
+            )
+        recovery = error_impact.get("recoveryStatus")
+        if recovery:
+            impact_lines.append(f"  recoveryStatus: {recovery}")
+        consequences = error_impact.get("uiConsequences", {})
+        if consequences:
+            if consequences.get("renderBlocked"):
+                impact_lines.append("  RENDER BLOCKED (component tree crashed)")
+            if consequences.get("errorBoundaryTriggered"):
+                impact_lines.append("  Error boundary triggered")
+            removed = consequences.get("elementsRemoved", [])
+            if removed:
+                impact_lines.append(f"  elementsRemoved: {removed[:10]}")
+            added = consequences.get("elementsAdded", [])
+            if added:
+                impact_lines.append(f"  elementsAdded: {added[:10]}")
+            disabled = consequences.get("elementsDisabled", [])
+            if disabled:
+                impact_lines.append(f"  elementsDisabled: {disabled[:10]}")
+            nav = consequences.get("navigationTriggered")
+            if nav:
+                impact_lines.append(f"  navigationTriggered: {nav}")
+        if impact_lines:
+            parts.append("Error Impact:\n" + "\n".join(impact_lines))
+
+    if not parts:
+        return ""
+    return "\n\n" + "\n\n".join(parts)
+
+
 # =============================================================================
 # Formatting
 # =============================================================================
@@ -248,6 +344,55 @@ def format_element_summary(element: dict[str, Any]) -> str:
             content_str = f" [content:{content_role}]"
 
     return f"- {elem_id} ({elem_type}): {label}{bounds}{status_str}{content_str}"
+
+
+def _format_undo_state(data: dict[str, Any] | None) -> str:
+    """Format UndoRedoState data into LLM-readable text."""
+    if not data:
+        return "Undo/redo state not available."
+    lines: list[str] = ["Undo/Redo State:"]
+    undo_available = data.get("undoAvailable", False)
+    redo_available = data.get("redoAvailable", False)
+    if undo_available:
+        desc = data.get("undoDescription")
+        depth = data.get("undoDepth")
+        line = "  Undo: available"
+        if desc:
+            line += f" — {desc}"
+        if depth is not None:
+            line += f" ({depth} steps)"
+        lines.append(line)
+        undo_stack = data.get("undoStack", [])
+        if undo_stack:
+            lines.append("  Undo stack (most recent first):")
+            for entry in undo_stack[:10]:
+                entry_desc = entry.get("description", "?")
+                confidence = entry.get("confidence", 0)
+                source = entry.get("source", "?")
+                lines.append(f"    - {entry_desc} (confidence: {confidence:.1f}, source: {source})")
+    else:
+        lines.append("  Undo: not available")
+    if redo_available:
+        desc = data.get("redoDescription")
+        depth = data.get("redoDepth")
+        line = "  Redo: available"
+        if desc:
+            line += f" — {desc}"
+        if depth is not None:
+            line += f" ({depth} steps)"
+        lines.append(line)
+    else:
+        lines.append("  Redo: not available")
+    shortcut = data.get("undoShortcut")
+    if shortcut:
+        lines.append(f"  Undo shortcut: {shortcut}")
+    redo_shortcut = data.get("redoShortcut")
+    if redo_shortcut:
+        lines.append(f"  Redo shortcut: {redo_shortcut}")
+    sources = data.get("detectionSources", [])
+    if sources:
+        lines.append(f"  Detection: {', '.join(sources)}")
+    return "\n".join(lines)
 
 
 def _format_forms_response(data: dict[str, Any] | None) -> str:
@@ -334,6 +479,191 @@ def _format_forms_response(data: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def _format_fill_form_response(data: dict[str, Any] | None) -> str:
+    """Format fill form response into LLM-readable text."""
+    if not data:
+        return "No fill result data available."
+
+    results = data.get("results", {})
+    errors = data.get("errors", {})
+    total = len(results)
+    succeeded = sum(1 for v in results.values() if v)
+    failed = total - succeeded
+
+    lines = [f"Fill result: {succeeded}/{total} fields set successfully"]
+
+    if failed > 0:
+        lines.append("")
+        lines.append("Failed fields:")
+        for field_id, success in results.items():
+            if not success:
+                error_msg = errors.get(field_id, "unknown error")
+                lines.append(f"  {field_id}: {error_msg}")
+
+    validation_errors = data.get("validationErrors", {})
+    if validation_errors:
+        lines.append("")
+        lines.append("Validation errors:")
+        for field_id, error in validation_errors.items():
+            lines.append(f"  {field_id}: {error}")
+
+    return "\n".join(lines)
+
+
+def _format_form_diff_response(data: dict[str, Any] | None) -> str:
+    """Format form diff response into LLM-readable text."""
+    if not data:
+        return "No diff data available."
+
+    summary = data.get("summary", "")
+    changed = data.get("changed", [])
+    added = data.get("added", [])
+    removed = data.get("removed", [])
+
+    lines: list[str] = []
+
+    if summary:
+        lines.append(summary)
+        lines.append("")
+
+    if not changed and not added and not removed:
+        lines.append("No form changes detected.")
+        return "\n".join(lines)
+
+    if changed:
+        lines.append("Changed fields:")
+        for field in changed:
+            field_id = field.get("id", field.get("fieldId", "?"))
+            label = field.get("label", field_id)
+            before_val = field.get("before", "")
+            after_val = field.get("after", "")
+            lines.append(f'  {label}: "{before_val}" -> "{after_val}"')
+        lines.append("")
+
+    if added:
+        lines.append("Added fields:")
+        for field in added:
+            if isinstance(field, dict):
+                field_id = field.get("id", field.get("fieldId", "?"))
+                label = field.get("label", field_id)
+                lines.append(f"  {label}")
+            else:
+                lines.append(f"  {field}")
+        lines.append("")
+
+    if removed:
+        lines.append("Removed fields:")
+        for field in removed:
+            if isinstance(field, dict):
+                field_id = field.get("id", field.get("fieldId", "?"))
+                label = field.get("label", field_id)
+                lines.append(f"  {label}")
+            else:
+                lines.append(f"  {field}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _format_network_requests_response(data: dict[str, Any] | None) -> str:
+    """Format network requests response into LLM-readable text."""
+    if not data:
+        return "No network request data available."
+
+    requests = data.get("requests", [])
+    if not requests:
+        return "No network requests recorded."
+
+    in_flight = [r for r in requests if r.get("status") == "in-flight"]
+    completed = [r for r in requests if r.get("status") != "in-flight"]
+
+    lines: list[str] = [f"Network Requests: {len(requests)} total"]
+    if in_flight:
+        lines.append(f"  In-flight: {len(in_flight)}")
+    if completed:
+        lines.append(f"  Completed: {len(completed)}")
+    lines.append("")
+
+    if in_flight:
+        lines.append("IN-FLIGHT:")
+        for req in in_flight:
+            method = req.get("method", "?")
+            url = req.get("url", "?")
+            lines.append(f"  [IN-FLIGHT] {method} {url}")
+            req_id = req.get("requestId") or req.get("id")
+            if req_id:
+                lines.append(f"    Request ID: {req_id}")
+        lines.append("")
+
+    if completed:
+        lines.append("COMPLETED:")
+        for req in completed:
+            status = req.get("status", "?").upper()
+            method = req.get("method", "?")
+            url = req.get("url", "?")
+            status_code = req.get("statusCode") or req.get("status_code")
+            duration = req.get("durationMs") or req.get("duration_ms")
+
+            status_parts = [f"[{status}]", method, url]
+            if status_code is not None:
+                status_parts.append(f"\u2192 {status_code}")
+            if duration is not None:
+                status_parts.append(f"({duration}ms)")
+            lines.append(f"  {' '.join(status_parts)}")
+
+            req_id = req.get("requestId") or req.get("id")
+            if req_id:
+                lines.append(f"    Request ID: {req_id}")
+            error = req.get("error")
+            if error:
+                lines.append(f"    Error: {error}")
+
+    return "\n".join(lines)
+
+
+def _format_wait_result(data: dict[str, Any] | None) -> str:
+    """Format wait-for-network-request result into LLM-readable text."""
+    if not data:
+        return "No wait result data available."
+
+    timed_out = data.get("timedOut", data.get("timed_out", False))
+    matched = data.get("request") or data.get("matched")
+
+    if timed_out:
+        lines = ["Wait timed out - no matching request completed in time."]
+        if matched:
+            method = matched.get("method", "?")
+            url = matched.get("url", "?")
+            lines.append(f"  Closest match: {method} {url}")
+        return "\n".join(lines)
+
+    if not matched:
+        return "Wait completed but no request details available."
+
+    status = matched.get("status", "?").upper()
+    method = matched.get("method", "?")
+    url = matched.get("url", "?")
+    status_code = matched.get("statusCode") or matched.get("status_code")
+    duration = matched.get("durationMs") or matched.get("duration_ms")
+
+    parts = [f"[{status}]", method, url]
+    if status_code is not None:
+        parts.append(f"\u2192 {status_code}")
+    if duration is not None:
+        parts.append(f"({duration}ms)")
+
+    lines = [f"Matched request: {' '.join(parts)}"]
+
+    req_id = matched.get("requestId") or matched.get("id")
+    if req_id:
+        lines.append(f"  Request ID: {req_id}")
+    error = matched.get("error")
+    if error:
+        lines.append(f"  Error: {error}")
+
+    return "\n".join(lines)
+
+
 def format_page_header(page: dict[str, Any]) -> list[str]:
     """Format page/route context as a concise header block."""
     lines: list[str] = []
@@ -373,6 +703,180 @@ def format_page_header(page: dict[str, Any]) -> list[str]:
         if parts:
             lines.append(", ".join(parts))
 
+    return lines
+
+
+def format_modal_header(modal_stack: dict[str, Any]) -> list[str]:
+    """Format modal/dialog stack as a concise header block."""
+    modals = modal_stack.get("modals", [])
+    if not modals:
+        return []
+    lines: list[str] = []
+    count = modal_stack.get("count", len(modals))
+    blocking = modal_stack.get("hasBlockingModal", False)
+    status = "BLOCKING" if blocking else "non-blocking"
+    lines.append(f"Modals: {count} active ({status})")
+    top = modal_stack.get("topModal")
+    if isinstance(top, dict):
+        title = top.get("title", top.get("ariaLabel", ""))
+        modal_type = top.get("type", "dialog")
+        parts = [f"  Top: [{modal_type}]"]
+        if title:
+            parts.append(f'"{title}"')
+        if top.get("escDismiss"):
+            parts.append("(ESC to dismiss)")
+        if top.get("primaryAction"):
+            parts.append(f'action="{top["primaryAction"]}"')
+        lines.append(" ".join(parts))
+    return lines
+
+
+def format_toast_header(toasts: dict[str, Any]) -> list[str]:
+    """Format toast/notification snapshot as a concise header block."""
+    active = toasts.get("active", [])
+    recent = toasts.get("recent", [])
+    if not active and not recent:
+        return []
+    lines: list[str] = []
+    if active:
+        lines.append(f"Toasts: {len(active)} active")
+        for t in active[:5]:  # Show at most 5
+            level = t.get("level", "unknown")
+            msg = t.get("message", "")
+            if len(msg) > 80:
+                msg = msg[:77] + "..."
+            lines.append(f"  [{level}] {msg}")
+    if recent:
+        lines.append(f"Recent toasts: {len(recent)} dismissed")
+        for t in recent[:3]:  # Show at most 3 recent
+            level = t.get("level", "unknown")
+            msg = t.get("message", "")
+            if len(msg) > 80:
+                msg = msg[:77] + "..."
+            lines.append(f"  [{level}] {msg} (dismissed)")
+    return lines
+
+
+def format_relationship_header(relationships: dict[str, Any]) -> list[str]:
+    """Format element relationships as a concise header block."""
+    rels = relationships.get("relationships", [])
+    count = relationships.get("count", len(rels))
+    if not rels:
+        return []
+    lines: list[str] = []
+    by_origin = relationships.get("byOrigin", {})
+    origin_parts = []
+    for origin in ("declared", "aria", "html"):
+        n = by_origin.get(origin, 0)
+        if n:
+            origin_parts.append(f"{n} {origin}")
+    origin_str = ", ".join(origin_parts) if origin_parts else str(count)
+    lines.append(f"Relationships: {count} ({origin_str})")
+    for r in rels[:10]:  # Show at most 10
+        source = r.get("sourceId", "?")
+        target = r.get("targetId", "?")
+        rel_type = r.get("type", "?")
+        origin = r.get("origin", "")
+        origin_tag = f" [{origin}]" if origin else ""
+        lines.append(f"  {source} --{rel_type}--> {target}{origin_tag}")
+    if count > 10:
+        lines.append(f"  +{count - 10} more relationships")
+    return lines
+
+
+def format_drag_drop_header(drag_drop: dict[str, Any]) -> list[str]:
+    """Format drag source & drop zone discovery as a concise header block."""
+    sources = drag_drop.get("dragSources", [])
+    zones = drag_drop.get("dropZones", [])
+    counts = drag_drop.get("count", {})
+    source_count = counts.get("dragSources", len(sources))
+    zone_count = counts.get("dropZones", len(zones))
+    if not sources and not zones:
+        return []
+    lines: list[str] = []
+    by_origin = drag_drop.get("byOrigin", {})
+    origin_parts = []
+    for origin in ("declared", "aria", "dom"):
+        n = by_origin.get(origin, 0)
+        if n:
+            origin_parts.append(f"{n} {origin}")
+    origin_str = f" ({', '.join(origin_parts)})" if origin_parts else ""
+    lines.append(
+        f"Drag-Drop: {source_count} sources, {zone_count} zones{origin_str}"
+    )
+    if sources:
+        for s in sources[:8]:
+            sid = s.get("id", "?")
+            label = s.get("label", "")
+            data_type = s.get("dataType", "")
+            parts = [f"  drag: {sid}"]
+            if data_type:
+                parts.append(f"[{data_type}]")
+            if label and label != sid:
+                label_str = label if len(label) <= 40 else label[:37] + "..."
+                parts.append(f'"{label_str}"')
+            origin = s.get("origin", "")
+            if origin:
+                parts.append(f"({origin})")
+            lines.append(" ".join(parts))
+        if source_count > 8:
+            lines.append(f"  +{source_count - 8} more drag sources")
+    if zones:
+        for z in zones[:8]:
+            zid = z.get("id", "?")
+            label = z.get("label", "")
+            effect = z.get("effect", "")
+            is_sortable = z.get("isSortable", False)
+            contained = z.get("containedDragSources", [])
+            parts = [f"  zone: {zid}"]
+            if is_sortable:
+                parts.append("[sortable]")
+            if effect:
+                parts.append(f"effect={effect}")
+            accepts = z.get("accepts")
+            if isinstance(accepts, list) and accepts:
+                parts.append(f"accepts=[{', '.join(accepts)}]")
+            if contained:
+                parts.append(f"items={len(contained)}")
+            if label and label != zid:
+                label_str = label if len(label) <= 40 else label[:37] + "..."
+                parts.append(f'"{label_str}"')
+            origin = z.get("origin", "")
+            if origin:
+                parts.append(f"({origin})")
+            lines.append(" ".join(parts))
+        if zone_count > 8:
+            lines.append(f"  +{zone_count - 8} more drop zones")
+    return lines
+
+
+def format_undo_redo_header(undo_redo: dict[str, Any]) -> list[str]:
+    """Format undo/redo awareness as a concise header block."""
+    undo_available = undo_redo.get("undoAvailable", False)
+    redo_available = undo_redo.get("redoAvailable", False)
+    if not undo_available and not redo_available:
+        return []
+    lines: list[str] = []
+    parts: list[str] = []
+    if undo_available:
+        undo_desc = undo_redo.get("undoDescription")
+        depth = undo_redo.get("undoDepth")
+        undo_str = "Undo: available"
+        if undo_desc:
+            undo_str += f" ({undo_desc})"
+        if depth is not None:
+            undo_str += f" [{depth} steps]"
+        parts.append(undo_str)
+    if redo_available:
+        redo_desc = undo_redo.get("redoDescription")
+        depth = undo_redo.get("redoDepth")
+        redo_str = "Redo: available"
+        if redo_desc:
+            redo_str += f" ({redo_desc})"
+        if depth is not None:
+            redo_str += f" [{depth} steps]"
+        parts.append(redo_str)
+    lines.append(" | ".join(parts))
     return lines
 
 
@@ -894,6 +1398,52 @@ Use max_elements to limit output size.""",
         },
     ),
     types.Tool(
+        name="ui_clipboard_read",
+        description="Read the current system clipboard text content (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_clipboard_write",
+        description="Write text to the system clipboard (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to write to the clipboard.",
+                },
+            },
+            "required": ["text"],
+        },
+    ),
+    types.Tool(
+        name="sdk_clipboard_read",
+        description="Read the current system clipboard text content (SDK mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_clipboard_write",
+        description="Write text to the system clipboard (SDK mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Text to write to the clipboard.",
+                },
+            },
+            "required": ["text"],
+        },
+    ),
+    types.Tool(
         name="sdk_forms",
         description="""Get form state from the connected SDK app.
 
@@ -923,6 +1473,149 @@ Returns forms, fields, values, validation errors, and dirty state.""",
             "type": "object",
             "properties": {},
             "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_fill_form",
+        description="""Fill multiple form fields atomically in the connected SDK app.
+
+Accepts a map of field IDs to values and sets each field with proper event
+dispatching (change, input events). Use sdk_forms first to discover field IDs.
+
+Returns per-field success/failure results with any validation errors.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "fields": {
+                    "type": "object",
+                    "description": (
+                        "Map of element ID to value. Values can be strings, "
+                        "booleans (for checkboxes), or string arrays (for multi-select)."
+                    ),
+                },
+                "triggerValidation": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to trigger validation after filling. "
+                        "Defaults to true."
+                    ),
+                    "default": True,
+                },
+                "clearFirst": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to clear existing values before filling. "
+                        "Defaults to true."
+                    ),
+                    "default": True,
+                },
+            },
+            "required": ["fields"],
+        },
+    ),
+    types.Tool(
+        name="ui_fill_form",
+        description="""Fill multiple form fields atomically in the runner's own UI (Control mode).
+
+Same as sdk_fill_form but for the runner's React frontend.
+Accepts a map of field IDs to values and sets each field with proper event dispatching.
+Returns per-field success/failure results.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "fields": {
+                    "type": "object",
+                    "description": (
+                        "Map of element ID to value. Values can be strings, "
+                        "booleans (for checkboxes), or string arrays (for multi-select)."
+                    ),
+                },
+                "triggerValidation": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to trigger validation after filling. "
+                        "Defaults to true."
+                    ),
+                    "default": True,
+                },
+                "clearFirst": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to clear existing values before filling. "
+                        "Defaults to true."
+                    ),
+                    "default": True,
+                },
+            },
+            "required": ["fields"],
+        },
+    ),
+    types.Tool(
+        name="sdk_form_snapshot",
+        description="""Capture a snapshot of all form state in the connected SDK app.
+
+Returns a FormSnapshot with all forms and their field states (values,
+validation, dirty flags). Use before and after an action, then pass both
+snapshots to sdk_form_diff to see what changed.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_form_snapshot",
+        description="""Capture a snapshot of all form state in the runner's own UI (Control mode).
+
+Same as sdk_form_snapshot but for the runner's React frontend.
+Returns a FormSnapshot to use with ui_form_diff.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_form_diff",
+        description="""Compare two form snapshots to see what changed in the connected SDK app.
+
+Pass the 'before' and 'after' snapshots from sdk_form_snapshot. Returns a
+diff showing changed fields with before/after values, added/removed fields,
+and a human-readable summary.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "before": {
+                    "type": "object",
+                    "description": "The before snapshot from sdk_form_snapshot.",
+                },
+                "after": {
+                    "type": "object",
+                    "description": "The after snapshot from sdk_form_snapshot.",
+                },
+            },
+            "required": ["before", "after"],
+        },
+    ),
+    types.Tool(
+        name="ui_form_diff",
+        description="""Compare two form snapshots to see what changed in the runner's own UI.
+
+Same as sdk_form_diff but for the runner's React frontend.
+Pass the 'before' and 'after' snapshots from ui_form_snapshot.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "before": {
+                    "type": "object",
+                    "description": "The before snapshot from ui_form_snapshot.",
+                },
+                "after": {
+                    "type": "object",
+                    "description": "The after snapshot from ui_form_snapshot.",
+                },
+            },
+            "required": ["before", "after"],
         },
     ),
     types.Tool(
@@ -1420,6 +2113,45 @@ Supports optional content filters to narrow results to specific content types.""
         },
     ),
     types.Tool(
+        name="sdk_find",
+        description="""Find an element by natural language description with spatial and relational context.
+
+More powerful than sdk_ai_search — handles spatial references, container scoping,
+ordinals, state filters, and auto-detects active modals.
+
+Examples:
+- "close button near Terminal 1 tab"
+- "email input in the login form"
+- "the third row in the table"
+- "disabled save button"
+- "save button" (when a modal is open, auto-prefers the modal's save button)
+
+Returns: element ID, confidence, match reasons, and alternatives for disambiguation.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Natural language element description. "
+                        "Supports spatial refs ('near X', 'above Y'), "
+                        "containers ('in the form'), ordinals ('third item'), "
+                        "and state filters ('disabled button')."
+                    ),
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional context hint (e.g., 'in the dialog', 'sidebar')",
+                },
+                "confidence_threshold": {
+                    "type": "number",
+                    "description": "Minimum confidence threshold 0-1 (default: 0.5)",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    types.Tool(
         name="sdk_ai_execute",
         description="""Execute an action by natural language instruction.
 
@@ -1652,13 +2384,56 @@ If agent_mode was used, includes refs in the output.""",
         description="""Capture a screenshot of the runner's UI with element labels overlaid.
 
 Each visible element gets a numbered overlay (@e1, @e2) matching agent mode refs.
-Returns an annotated image. Useful for understanding element positions visually.""",
+Supports annotation modes for different visualization styles:
+- "interactive" (default): Only interactive elements (buttons, inputs, links)
+- "all": All elements including content
+- "validation": Color-code by validation state (red=error, green=valid, orange=required)
+- "modal": Dim background, highlight only elements inside the topmost modal
+- "state": Color-code by element state (blue=focused, gray=disabled, red=error, green=valid)
+- "relationships": Draw connector lines between related elements (aria-controls, labels, etc.)
+- "accessibility": Accessibility audit overlay (focus order, touch targets, missing labels)
+- "boxmodel": DevTools-style box model overlay (margin/border/padding/content boxes)
+
+Includes viewport indicators (scroll arrows, off-screen count, minimap) when viewport data available.
+
+Supports smart cropping:
+- "full" (default): Entire screenshot
+- "viewport": Crop to visible viewport area
+- "modal": Crop to modal bounds (with padding)""",
         inputSchema={
             "type": "object",
             "properties": {
                 "monitor": {
                     "type": "integer",
                     "description": "Monitor index (0-based). Defaults to primary monitor.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["interactive", "all", "validation", "modal", "state", "relationships", "accessibility", "boxmodel"],
+                    "description": "Annotation mode. Default: interactive.",
+                },
+                "crop": {
+                    "type": "string",
+                    "enum": ["full", "viewport", "modal"],
+                    "description": "Crop mode. Default: full.",
+                },
+                "scale": {
+                    "type": "number",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": "Output format. Default: png.",
+                },
+                "quality": {
+                    "type": "integer",
+                    "description": "JPEG/WebP quality (1-100). Default: 85.",
+                },
+                "highlight_elements": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only annotate these element IDs/refs. Overrides mode filtering.",
                 },
             },
             "required": [],
@@ -1669,13 +2444,265 @@ Returns an annotated image. Useful for understanding element positions visually.
         description="""Capture a screenshot of the SDK app's monitor with element labels overlaid.
 
 Each visible element gets a numbered overlay (@e1, @e2) matching agent mode refs.
-Returns an annotated image. Useful for understanding element positions visually.""",
+Supports annotation modes for different visualization styles:
+- "interactive" (default): Only interactive elements (buttons, inputs, links)
+- "all": All elements including content
+- "validation": Color-code by validation state (red=error, green=valid, orange=required)
+- "modal": Dim background, highlight only elements inside the topmost modal
+- "state": Color-code by element state (blue=focused, gray=disabled, red=error, green=valid)
+- "relationships": Draw connector lines between related elements (aria-controls, labels, etc.)
+- "accessibility": Accessibility audit overlay (focus order, touch targets, missing labels)
+- "boxmodel": DevTools-style box model overlay (margin/border/padding/content boxes)
+
+Includes viewport indicators (scroll arrows, off-screen count, minimap) when viewport data available.
+
+Supports smart cropping:
+- "full" (default): Entire screenshot
+- "viewport": Crop to visible viewport area
+- "modal": Crop to modal bounds (with padding)""",
         inputSchema={
             "type": "object",
             "properties": {
                 "monitor": {
                     "type": "integer",
                     "description": "Monitor index (0-based). Defaults to primary monitor.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["interactive", "all", "validation", "modal", "state", "relationships", "accessibility", "boxmodel"],
+                    "description": "Annotation mode. Default: interactive.",
+                },
+                "crop": {
+                    "type": "string",
+                    "enum": ["full", "viewport", "modal"],
+                    "description": "Crop mode. Default: full.",
+                },
+                "scale": {
+                    "type": "number",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": "Output format. Default: png.",
+                },
+                "quality": {
+                    "type": "integer",
+                    "description": "JPEG/WebP quality (1-100). Default: 85.",
+                },
+                "highlight_elements": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Only annotate these element IDs/refs. Overrides mode filtering.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    # Element Screenshot Tools
+    types.Tool(
+        name="ui_element_screenshot",
+        description="""Capture a cropped screenshot of a specific element in the runner's UI.
+
+Returns an image cropped to the element's bounding rectangle with configurable padding.
+Useful for inspecting individual components without full-page noise.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID or @ref to capture.",
+                },
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index (0-based). Defaults to primary.",
+                },
+                "padding": {
+                    "type": "integer",
+                    "description": "Pixels of padding around element. Default: 16.",
+                },
+                "scale": {
+                    "type": "number",
+                    "description": "Scale factor. Default: 1.0.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": "Output format. Default: png.",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_element_screenshot",
+        description="""Capture a cropped screenshot of a specific element in the SDK app.
+
+Returns an image cropped to the element's bounding rectangle with configurable padding.
+Useful for inspecting individual components without full-page noise.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID or @ref to capture.",
+                },
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index (0-based). Defaults to primary.",
+                },
+                "padding": {
+                    "type": "integer",
+                    "description": "Pixels of padding around element. Default: 16.",
+                },
+                "scale": {
+                    "type": "number",
+                    "description": "Scale factor. Default: 1.0.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": "Output format. Default: png.",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    # Screenshot Diffing Tools
+    types.Tool(
+        name="sdk_screenshot_diff",
+        description="""Compare the current SDK app screenshot against a saved baseline.
+
+Returns a diff image highlighting changed regions in red, plus change percentage
+and pass/fail result. Save a baseline first with sdk_screenshot_baseline_save.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "baseline_key": {
+                    "type": "string",
+                    "description": "Baseline key to compare against (typically a route/page name).",
+                },
+                "threshold": {
+                    "type": "number",
+                    "description": "Max allowed change percentage (0.0-1.0). Default: 0.01 (1%).",
+                },
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index. Defaults to primary.",
+                },
+            },
+            "required": ["baseline_key"],
+        },
+    ),
+    types.Tool(
+        name="sdk_screenshot_baseline_save",
+        description="""Save the current SDK app screenshot as a baseline for future comparisons.
+
+Use a descriptive key like the route name (e.g., 'dashboard', 'settings-page').
+The baseline persists for the duration of this MCP session.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "baseline_key": {
+                    "type": "string",
+                    "description": "Key to save the baseline under (e.g., route name).",
+                },
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index. Defaults to primary.",
+                },
+            },
+            "required": ["baseline_key"],
+        },
+    ),
+    types.Tool(
+        name="sdk_screenshot_baseline_list",
+        description="""List all saved screenshot baselines.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    # Before/After Comparison Tools
+    types.Tool(
+        name="sdk_screenshot_before",
+        description="""Capture the current SDK app screenshot as the 'before' state.
+
+Call this before performing an action, then use sdk_screenshot_after to
+capture the result and get a side-by-side comparison.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index. Defaults to primary.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_screenshot_after",
+        description="""Capture the current state and compare with the saved 'before' screenshot.
+
+Returns a side-by-side comparison image showing before and after states,
+plus a diff overlay highlighting changes. Must call sdk_screenshot_before first.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index. Defaults to primary.",
+                },
+                "layout": {
+                    "type": "string",
+                    "enum": ["side-by-side", "vertical"],
+                    "description": "Comparison layout. Default: side-by-side.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    # Visual Description Tool
+    types.Tool(
+        name="sdk_visual_description",
+        description="""Get a structured text description of the SDK app's visual layout.
+
+Returns a verbal summary: page info, viewport size, layout regions (header/sidebar/main/footer),
+element type breakdown, interactive vs content count, modal/toast/error status, scroll position.
+Useful as a lightweight alternative to screenshots for understanding page layout.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index. Defaults to primary.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    # Delta/Incremental Screenshot Tool
+    types.Tool(
+        name="sdk_screenshot_delta",
+        description="""Get an incremental screenshot of the SDK app, sending only changed regions.
+
+On first call, returns the full image. On subsequent calls, returns only the tile
+patches that changed since the last call. Dramatically reduces bandwidth for agents
+taking many sequential screenshots (e.g., monitoring for visual changes).
+
+Returns: text summary of changes + changed tile data as JSON.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index. Defaults to primary.",
+                },
+                "reset": {
+                    "type": "boolean",
+                    "description": "Reset delta state, forcing a full capture. Default: false.",
                 },
             },
             "required": [],
@@ -2127,6 +3154,630 @@ reached.""",
             "required": ["targets"],
         },
     ),
+    # -------------------------------------------------------------------------
+    # Network Request Monitoring
+    # -------------------------------------------------------------------------
+    types.Tool(
+        name="sdk_network_requests",
+        description="""List recent network requests from the connected SDK app.
+
+Shows API calls made by the app with their status, response codes, and timing.
+Use this to debug API issues, verify that the correct endpoints are being called,
+or check for failed requests after an action.
+
+Supports filtering by status (in-flight, completed, failed, cancelled),
+HTTP method, URL substring, and failures-only mode.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "Filter by status: in-flight, completed, failed, cancelled."
+                    ),
+                },
+                "method": {
+                    "type": "string",
+                    "description": (
+                        "Filter by HTTP method (GET, POST, etc.)."
+                    ),
+                },
+                "url_pattern": {
+                    "type": "string",
+                    "description": "Filter by URL substring match.",
+                },
+                "failures_only": {
+                    "type": "boolean",
+                    "description": (
+                        "Only show failed requests (4xx/5xx/network errors)."
+                    ),
+                    "default": False,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of results.",
+                    "default": 50,
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_network_requests",
+        description="""List recent network requests from the runner's own UI (Control mode).
+
+Same as sdk_network_requests but for the runner's React frontend.
+Shows API calls with status, response codes, and timing.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "Filter by status: in-flight, completed, failed, cancelled."
+                    ),
+                },
+                "method": {
+                    "type": "string",
+                    "description": (
+                        "Filter by HTTP method (GET, POST, etc.)."
+                    ),
+                },
+                "url_pattern": {
+                    "type": "string",
+                    "description": "Filter by URL substring match.",
+                },
+                "failures_only": {
+                    "type": "boolean",
+                    "description": (
+                        "Only show failed requests (4xx/5xx/network errors)."
+                    ),
+                    "default": False,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max number of results.",
+                    "default": 50,
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_network_requests_in_flight",
+        description="""Show currently in-flight network requests in the connected SDK app.
+
+Returns only requests that are currently pending (not yet completed).
+Useful for seeing what API calls are still waiting for a response.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_network_requests_in_flight",
+        description="""Show currently in-flight network requests in the runner's own UI (Control mode).
+
+Same as sdk_network_requests_in_flight but for the runner's React frontend.
+Returns only requests that are currently pending.""",
+        inputSchema={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="sdk_wait_for_network_request",
+        description="""Wait for a network request matching the given criteria to complete in the SDK app.
+
+Useful after clicking a button to wait for the resulting API call to finish.
+You can match by URL substring and/or HTTP method. Returns the matched request
+details once it completes, or an error if the timeout is reached.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "url_pattern": {
+                    "type": "string",
+                    "description": "URL substring to match.",
+                },
+                "method": {
+                    "type": "string",
+                    "description": "HTTP method to match.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in milliseconds.",
+                    "default": 30000,
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
+        name="ui_wait_for_network_request",
+        description="""Wait for a network request matching the given criteria to complete in the runner's own UI.
+
+Same as sdk_wait_for_network_request but for the runner's React frontend (Control mode).
+Returns the matched request details once it completes, or an error on timeout.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "url_pattern": {
+                    "type": "string",
+                    "description": "URL substring to match.",
+                },
+                "method": {
+                    "type": "string",
+                    "description": "HTTP method to match.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in milliseconds.",
+                    "default": 30000,
+                },
+            },
+            "required": [],
+        },
+    ),
+    # =========================================================================
+    # Change Tracking - SDK Mode
+    # =========================================================================
+    types.Tool(
+        name="sdk_save_bookmark",
+        description="Save a snapshot bookmark for later diffing. Captures current UI state.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name (unique identifier)",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="sdk_list_bookmarks",
+        description="List all saved snapshot bookmarks.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_delete_bookmark",
+        description="Delete a saved bookmark.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name to delete",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="sdk_diff_from_bookmark",
+        description="Compare current UI state against a saved bookmark. Returns appeared, disappeared, and modified elements.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name to diff against",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="sdk_execute_with_diff",
+        description="Execute an element action and capture what changed in the UI. Returns before/after diff with categorization.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID (or @ref) to interact with",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Action: click, type, focus, etc.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Value for type/setValue actions",
+                },
+                "settle_timeout": {
+                    "type": "integer",
+                    "description": "Max ms to wait for UI to settle (default: 3000)",
+                },
+                "categorize": {
+                    "type": "boolean",
+                    "description": "Whether to categorize the diff (default: true)",
+                },
+                "summary_budget": {
+                    "type": "integer",
+                    "description": "Max chars for budget summary (default: 300)",
+                },
+            },
+            "required": ["element_id", "action"],
+        },
+    ),
+    types.Tool(
+        name="sdk_wait_for_change",
+        description="Wait for the UI to change matching a predicate. Polls until a matching change is detected or timeout.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "predicate_type": {
+                    "type": "string",
+                    "enum": ["anyChange", "elementAppeared", "elementDisappeared", "elementChanged", "countChanged"],
+                    "description": "Type of change to wait for",
+                },
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID for elementAppeared/Disappeared/Changed predicates",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Property to watch for elementChanged predicate",
+                },
+                "min_count": {
+                    "type": "integer",
+                    "description": "Minimum element count change for countChanged predicate",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Max ms to wait (default: 5000)",
+                },
+                "poll_interval": {
+                    "type": "integer",
+                    "description": "Poll interval in ms (default: 200)",
+                },
+            },
+            "required": ["predicate_type"],
+        },
+    ),
+    types.Tool(
+        name="sdk_scoped_diff",
+        description="Get a diff scoped to a CSS selector region. Optionally diff from a bookmark.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": "CSS selector to scope the diff to",
+                },
+                "from_bookmark": {
+                    "type": "string",
+                    "description": "Bookmark name to diff against (optional)",
+                },
+            },
+            "required": ["scope"],
+        },
+    ),
+    types.Tool(
+        name="sdk_get_bookmark",
+        description="Get a specific bookmark's snapshot data by name.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name to retrieve",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="sdk_categorize_last_diff",
+        description=(
+            "Categorize the last computed diff. Returns category "
+            "(no-op, navigation, content-update, data-refresh, error, "
+            "modal-dialog, form-validation, state-toggle, loading) and confidence."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_summarize_diff",
+        description="Get a budget-aware text summary of UI changes. Summarizes appeared/disappeared/modified elements within a character budget.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "budget": {
+                    "type": "integer",
+                    "description": "Max characters for summary (default: 300)",
+                },
+                "from_bookmark": {
+                    "type": "string",
+                    "description": "Compare against this bookmark (optional)",
+                },
+                "include_category": {
+                    "type": "boolean",
+                    "description": "Include change category header (default: true)",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="sdk_structured_changes",
+        description="Analyze table and list changes between snapshots. Detects added/removed rows and list items.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "from_bookmark": {
+                    "type": "string",
+                    "description": "Compare against this bookmark (optional)",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="sdk_change_buffer_enable",
+        description="Enable change buffering. All diffs are accumulated until drained.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_change_buffer_disable",
+        description="Disable change buffering.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_change_buffer_drain",
+        description="Drain the change buffer, returning all accumulated changes since last drain.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_change_buffer_size",
+        description="Get the current change buffer size and enabled status.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    # =========================================================================
+    # Change Tracking - Control Mode (Runner's Own UI)
+    # =========================================================================
+    types.Tool(
+        name="ui_save_bookmark",
+        description="Save a snapshot bookmark for later diffing in the runner's own UI (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name (unique identifier)",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="ui_list_bookmarks",
+        description="List all saved snapshot bookmarks in the runner's own UI (Control mode).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_delete_bookmark",
+        description="Delete a saved bookmark in the runner's own UI (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name to delete",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="ui_diff_from_bookmark",
+        description="Compare current runner UI state against a saved bookmark (Control mode). Returns appeared, disappeared, and modified elements.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name to diff against",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="ui_execute_with_diff",
+        description="Execute an element action in the runner's own UI and capture what changed (Control mode). Returns before/after diff with categorization.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID (or @ref) to interact with",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Action: click, type, focus, etc.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Value for type/setValue actions",
+                },
+                "settle_timeout": {
+                    "type": "integer",
+                    "description": "Max ms to wait for UI to settle (default: 3000)",
+                },
+                "categorize": {
+                    "type": "boolean",
+                    "description": "Whether to categorize the diff (default: true)",
+                },
+                "summary_budget": {
+                    "type": "integer",
+                    "description": "Max chars for budget summary (default: 300)",
+                },
+            },
+            "required": ["element_id", "action"],
+        },
+    ),
+    types.Tool(
+        name="ui_wait_for_change",
+        description="Wait for the runner's own UI to change matching a predicate (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "predicate_type": {
+                    "type": "string",
+                    "enum": ["anyChange", "elementAppeared", "elementDisappeared", "elementChanged", "countChanged"],
+                    "description": "Type of change to wait for",
+                },
+                "element_id": {
+                    "type": "string",
+                    "description": "Element ID for elementAppeared/Disappeared/Changed predicates",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Property to watch for elementChanged predicate",
+                },
+                "min_count": {
+                    "type": "integer",
+                    "description": "Minimum element count change for countChanged predicate",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Max ms to wait (default: 5000)",
+                },
+                "poll_interval": {
+                    "type": "integer",
+                    "description": "Poll interval in ms (default: 200)",
+                },
+            },
+            "required": ["predicate_type"],
+        },
+    ),
+    types.Tool(
+        name="ui_scoped_diff",
+        description="Get a diff scoped to a CSS selector region in the runner's own UI (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "description": "CSS selector to scope the diff to",
+                },
+                "from_bookmark": {
+                    "type": "string",
+                    "description": "Bookmark name to diff against (optional)",
+                },
+            },
+            "required": ["scope"],
+        },
+    ),
+    types.Tool(
+        name="ui_get_bookmark",
+        description="Get a specific bookmark's snapshot data by name in the runner's own UI (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Bookmark name to retrieve",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="ui_categorize_last_diff",
+        description=(
+            "Categorize the last computed diff in the runner's own UI (Control mode). "
+            "Returns category and confidence."
+        ),
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_summarize_diff",
+        description="Get a budget-aware text summary of runner UI changes (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "budget": {
+                    "type": "integer",
+                    "description": "Max characters for summary (default: 300)",
+                },
+                "from_bookmark": {
+                    "type": "string",
+                    "description": "Compare against this bookmark (optional)",
+                },
+                "include_category": {
+                    "type": "boolean",
+                    "description": "Include change category header (default: true)",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="ui_structured_changes",
+        description="Analyze table and list changes in the runner's own UI (Control mode).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "from_bookmark": {
+                    "type": "string",
+                    "description": "Compare against this bookmark (optional)",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="ui_change_buffer_enable",
+        description="Enable change buffering in the runner's own UI (Control mode).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_change_buffer_disable",
+        description="Disable change buffering in the runner's own UI (Control mode).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_change_buffer_drain",
+        description="Drain the change buffer in the runner's own UI (Control mode).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_change_buffer_size",
+        description="Get the change buffer size and enabled status in the runner's own UI (Control mode).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    # Undo/Redo awareness
+    types.Tool(
+        name="ui_undo_state",
+        description="Get undo/redo availability and state in the runner's own UI (Control mode). Shows whether undo/redo is available, what it would reverse, stack depth, and detection sources.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_undo",
+        description="Execute undo in the runner's own UI (Control mode). Uses the app's undo handler if available, otherwise dispatches Ctrl+Z.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="ui_redo",
+        description="Execute redo in the runner's own UI (Control mode). Uses the app's redo handler if available, otherwise dispatches Ctrl+Shift+Z.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_undo_state",
+        description="Get undo/redo availability and state from the connected SDK app. Shows whether undo/redo is available, what it would reverse, stack depth, and detection sources.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_undo",
+        description="Execute undo in the connected SDK app. Uses the app's undo handler if available, otherwise dispatches Ctrl+Z.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_redo",
+        description="Execute redo in the connected SDK app. Uses the app's redo handler if available, otherwise dispatches Ctrl+Shift+Z.",
+        inputSchema={"type": "object", "properties": {}},
+    ),
 ]
 
 
@@ -2179,6 +3830,36 @@ async def call_tool(
             page_data = data.get("page")
             if isinstance(page_data, dict):
                 page_header_lines = format_page_header(page_data)
+
+            # Extract modal stack if present
+            modal_header_lines: list[str] = []
+            modal_data = data.get("modalStack")
+            if isinstance(modal_data, dict):
+                modal_header_lines = format_modal_header(modal_data)
+
+            # Extract toast snapshot if present
+            toast_header_lines: list[str] = []
+            toast_data = data.get("toasts")
+            if isinstance(toast_data, dict):
+                toast_header_lines = format_toast_header(toast_data)
+
+            # Extract relationship context if present
+            rel_header_lines: list[str] = []
+            rel_data = data.get("relationships")
+            if isinstance(rel_data, dict):
+                rel_header_lines = format_relationship_header(rel_data)
+
+            # Extract drag-drop context if present
+            dnd_header_lines: list[str] = []
+            dnd_data = data.get("dragDrop")
+            if isinstance(dnd_data, dict):
+                dnd_header_lines = format_drag_drop_header(dnd_data)
+
+            # Extract undo/redo context if present
+            undo_header_lines: list[str] = []
+            undo_data = data.get("undoRedo")
+            if isinstance(undo_data, dict):
+                undo_header_lines = format_undo_redo_header(undo_data)
 
             # Feature 2: Interactive-only filtering
             if interactive_only:
@@ -2242,9 +3923,22 @@ async def call_tool(
                         lines.append(format_element_summary(el))
                     lines.append("")
 
-            # Prepend page context header if available
+            # Prepend context headers if available
+            header_lines: list[str] = []
             if page_header_lines:
-                lines = page_header_lines + [""] + lines
+                header_lines.extend(page_header_lines)
+            if modal_header_lines:
+                header_lines.extend(modal_header_lines)
+            if toast_header_lines:
+                header_lines.extend(toast_header_lines)
+            if rel_header_lines:
+                header_lines.extend(rel_header_lines)
+            if dnd_header_lines:
+                header_lines.extend(dnd_header_lines)
+            if undo_header_lines:
+                header_lines.extend(undo_header_lines)
+            if header_lines:
+                lines = header_lines + [""] + lines
 
             if overflow:
                 lines.append(f"+{overflow} more elements not shown")
@@ -2289,9 +3983,9 @@ async def call_tool(
             response = await ui_client.control_click(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Clicked element: {element_id}")
-            ]
+            msg = f"Clicked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_type":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2299,69 +3993,63 @@ async def call_tool(
             response = await ui_client.control_type(element_id, text)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Typed '{text}' into element: {element_id}"
-                )
-            ]
+            msg = f"Typed '{text}' into element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_focus":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_focus(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Focused element: {element_id}")
-            ]
+            msg = f"Focused element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_blur":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "blur")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Blurred element: {element_id}")
-            ]
+            msg = f"Blurred element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_hover":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_hover(element_id)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Hovered element: {element_id}")
-            ]
+            msg = f"Hovered element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_double_click":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "doubleClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Double-clicked element: {element_id}"
-                )
-            ]
+            msg = f"Double-clicked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_right_click":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "rightClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Right-clicked element: {element_id}"
-                )
-            ]
+            msg = f"Right-clicked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_clear":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "clear")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Cleared element: {element_id}")
-            ]
+            msg = f"Cleared element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_select":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2372,11 +4060,9 @@ async def call_tool(
             response = await ui_client.control_action(element_id, "select", params)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Selected '{value}' in element: {element_id}"
-                )
-            ]
+            msg = f"Selected '{value}' in element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_scroll":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2390,36 +4076,36 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Scrolled element: {element_id}")
-            ]
+            msg = f"Scrolled element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_check":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "check")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Checked element: {element_id}")
-            ]
+            msg = f"Checked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_uncheck":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "uncheck")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Unchecked element: {element_id}")
-            ]
+            msg = f"Unchecked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_toggle":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "toggle")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Toggled element: {element_id}")
-            ]
+            msg = f"Toggled element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_set_value":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2429,11 +4115,9 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Set value '{value}' on element: {element_id}"
-                )
-            ]
+            msg = f"Set value '{value}' on element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_drag":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2446,33 +4130,27 @@ async def call_tool(
             response = await ui_client.control_action(element_id, "drag", params)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Dragged {element_id} to {target_id}"
-                )
-            ]
+            msg = f"Dragged {element_id} to {target_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_submit":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "submit")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Submitted form for element: {element_id}"
-                )
-            ]
+            msg = f"Submitted form for element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "ui_reset":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "reset")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Reset form for element: {element_id}"
-                )
-            ]
+            msg = f"Reset form for element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         # SDK Mode Tools
         elif name == "sdk_connect":
@@ -2528,6 +4206,36 @@ async def call_tool(
             sdk_page_data = data.get("page")
             if isinstance(sdk_page_data, dict):
                 sdk_page_header_lines = format_page_header(sdk_page_data)
+
+            # Extract modal stack if present
+            sdk_modal_header_lines: list[str] = []
+            sdk_modal_data = data.get("modalStack")
+            if isinstance(sdk_modal_data, dict):
+                sdk_modal_header_lines = format_modal_header(sdk_modal_data)
+
+            # Extract toast snapshot if present
+            sdk_toast_header_lines: list[str] = []
+            sdk_toast_data = data.get("toasts")
+            if isinstance(sdk_toast_data, dict):
+                sdk_toast_header_lines = format_toast_header(sdk_toast_data)
+
+            # Extract relationship context if present
+            sdk_rel_header_lines: list[str] = []
+            sdk_rel_data = data.get("relationships")
+            if isinstance(sdk_rel_data, dict):
+                sdk_rel_header_lines = format_relationship_header(sdk_rel_data)
+
+            # Extract drag-drop context if present
+            sdk_dnd_header_lines: list[str] = []
+            sdk_dnd_data = data.get("dragDrop")
+            if isinstance(sdk_dnd_data, dict):
+                sdk_dnd_header_lines = format_drag_drop_header(sdk_dnd_data)
+
+            # Extract undo/redo context if present
+            sdk_undo_header_lines: list[str] = []
+            sdk_undo_data = data.get("undoRedo")
+            if isinstance(sdk_undo_data, dict):
+                sdk_undo_header_lines = format_undo_redo_header(sdk_undo_data)
 
             # Feature 2: Interactive-only filtering (overrides include_content)
             if interactive_only:
@@ -2595,14 +4303,63 @@ async def call_tool(
                         lines.append(format_element_summary(el))
                     lines.append("")
 
-            # Prepend page context header if available
+            # Prepend context headers if available
+            sdk_header_lines: list[str] = []
             if sdk_page_header_lines:
-                lines = sdk_page_header_lines + [""] + lines
+                sdk_header_lines.extend(sdk_page_header_lines)
+            if sdk_modal_header_lines:
+                sdk_header_lines.extend(sdk_modal_header_lines)
+            if sdk_toast_header_lines:
+                sdk_header_lines.extend(sdk_toast_header_lines)
+            if sdk_rel_header_lines:
+                sdk_header_lines.extend(sdk_rel_header_lines)
+            if sdk_dnd_header_lines:
+                sdk_header_lines.extend(sdk_dnd_header_lines)
+            if sdk_undo_header_lines:
+                sdk_header_lines.extend(sdk_undo_header_lines)
+            if sdk_header_lines:
+                lines = sdk_header_lines + [""] + lines
 
             if overflow:
                 lines.append(f"+{overflow} more elements not shown")
 
             return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "ui_clipboard_read":
+            response = await ui_client.control_clipboard_read()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            text = data.get("text")
+            if text is not None:
+                return [types.TextContent(type="text", text=f"Clipboard content:\n{text}")]
+            else:
+                return [types.TextContent(type="text", text="Clipboard is empty (no text content).")]
+
+        elif name == "ui_clipboard_write":
+            text = arguments.get("text", "")
+            response = await ui_client.control_clipboard_write(text)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text=f"Wrote {len(text)} chars to clipboard.")]
+
+        elif name == "sdk_clipboard_read":
+            response = await ui_client.sdk_clipboard_read()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            text = data.get("text")
+            if text is not None:
+                return [types.TextContent(type="text", text=f"Clipboard content:\n{text}")]
+            else:
+                return [types.TextContent(type="text", text="Clipboard is empty (no text content).")]
+
+        elif name == "sdk_clipboard_write":
+            text = arguments.get("text", "")
+            response = await ui_client.sdk_clipboard_write(text)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text=f"Wrote {len(text)} chars to clipboard.")]
 
         elif name == "sdk_forms":
             response = await ui_client.sdk_forms()
@@ -2621,6 +4378,86 @@ async def call_tool(
             return [
                 types.TextContent(
                     type="text", text=_format_forms_response(response.data)
+                )
+            ]
+
+        elif name == "sdk_fill_form":
+            fields = arguments.get("fields", {})
+            trigger_validation = arguments.get("triggerValidation", True)
+            clear_first = arguments.get("clearFirst", True)
+            response = await ui_client.sdk_fill_form(
+                fields=fields,
+                trigger_validation=trigger_validation,
+                clear_first=clear_first,
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=_format_fill_form_response(response.data)
+                )
+            ]
+
+        elif name == "ui_fill_form":
+            fields = arguments.get("fields", {})
+            trigger_validation = arguments.get("triggerValidation", True)
+            clear_first = arguments.get("clearFirst", True)
+            response = await ui_client.control_fill_form(
+                fields=fields,
+                trigger_validation=trigger_validation,
+                clear_first=clear_first,
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=_format_fill_form_response(response.data)
+                )
+            ]
+
+        elif name == "sdk_form_snapshot":
+            response = await ui_client.sdk_form_snapshot()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(response.data, indent=2),
+                )
+            ]
+
+        elif name == "ui_form_snapshot":
+            response = await ui_client.control_form_snapshot()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(response.data, indent=2),
+                )
+            ]
+
+        elif name == "sdk_form_diff":
+            before = arguments.get("before", {})
+            after = arguments.get("after", {})
+            response = await ui_client.sdk_form_diff(before=before, after=after)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=_format_form_diff_response(response.data)
+                )
+            ]
+
+        elif name == "ui_form_diff":
+            before = arguments.get("before", {})
+            after = arguments.get("after", {})
+            response = await ui_client.control_form_diff(before=before, after=after)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=_format_form_diff_response(response.data)
                 )
             ]
 
@@ -2751,9 +4588,9 @@ async def call_tool(
             response = await ui_client.sdk_element_action(element_id, "click")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Clicked element: {element_id}")
-            ]
+            msg = f"Clicked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_type":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2763,20 +4600,18 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Typed '{text}' into element: {element_id}"
-                )
-            ]
+            msg = f"Typed '{text}' into element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_clear":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "clear")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Cleared element: {element_id}")
-            ]
+            msg = f"Cleared element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_select":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2786,60 +4621,54 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Selected '{value}' in element: {element_id}"
-                )
-            ]
+            msg = f"Selected '{value}' in element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_focus":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "focus")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Focused element: {element_id}")
-            ]
+            msg = f"Focused element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_blur":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "blur")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Blurred element: {element_id}")
-            ]
+            msg = f"Blurred element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_hover":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "hover")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Hovered element: {element_id}")
-            ]
+            msg = f"Hovered element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_double_click":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "doubleClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Double-clicked element: {element_id}"
-                )
-            ]
+            msg = f"Double-clicked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_right_click":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "rightClick")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Right-clicked element: {element_id}"
-                )
-            ]
+            msg = f"Right-clicked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_scroll":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2853,36 +4682,36 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Scrolled element: {element_id}")
-            ]
+            msg = f"Scrolled element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_check":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "check")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Checked element: {element_id}")
-            ]
+            msg = f"Checked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_uncheck":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "uncheck")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Unchecked element: {element_id}")
-            ]
+            msg = f"Unchecked element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_toggle":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "toggle")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(type="text", text=f"Toggled element: {element_id}")
-            ]
+            msg = f"Toggled element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_set_value":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2892,11 +4721,9 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Set value '{value}' on element: {element_id}"
-                )
-            ]
+            msg = f"Set value '{value}' on element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_drag":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -2907,33 +4734,27 @@ async def call_tool(
             response = await ui_client.sdk_element_action(element_id, "drag", params)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Dragged {element_id} to {target_id}"
-                )
-            ]
+            msg = f"Dragged {element_id} to {target_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_submit":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "submit")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Submitted form for element: {element_id}"
-                )
-            ]
+            msg = f"Submitted form for element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_reset":
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "reset")
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [
-                types.TextContent(
-                    type="text", text=f"Reset form for element: {element_id}"
-                )
-            ]
+            msg = f"Reset form for element: {element_id}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_ai_search":
             text = arguments["text"]
@@ -2987,12 +4808,79 @@ async def call_tool(
                 lines.append(format_element_summary(m))
             return [types.TextContent(type="text", text="\n".join(lines))]
 
+        elif name == "sdk_find":
+            query = arguments["query"]
+            context = arguments.get("context")
+            confidence_threshold = arguments.get("confidence_threshold")
+            response = await ui_client.sdk_ai_find(
+                query,
+                context=context,
+                confidence_threshold=confidence_threshold,
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            found = data.get("found", False)
+
+            if not found:
+                reason = data.get("reason", "No matching element found")
+                partial = data.get("partialMatches", [])
+                lines = [f"Not found: {reason}"]
+                if partial:
+                    lines.append("")
+                    lines.append("Partial matches:")
+                    for p in partial[:3]:
+                        pid = p.get("elementId", "?")
+                        pconf = p.get("confidence", 0)
+                        pdiff = p.get("differentiator", "")
+                        lines.append(f"  - {pid} ({pconf:.0%}) {pdiff}")
+                return [types.TextContent(type="text", text="\n".join(lines))]
+
+            ambiguous = data.get("ambiguous", False)
+            if ambiguous:
+                suggestion = data.get("suggestion", "")
+                candidates = data.get("candidates", [])
+                lines = [f"Ambiguous match for '{query}':", ""]
+                for c in candidates:
+                    cid = c.get("elementId", "?")
+                    cconf = c.get("confidence", 0)
+                    cdiff = c.get("differentiator", "")
+                    lines.append(f"  - {cid} ({cconf:.0%}) {cdiff}")
+                if suggestion:
+                    lines.append("")
+                    lines.append(suggestion)
+                return [types.TextContent(type="text", text="\n".join(lines))]
+
+            # Successful unique match
+            element_id = data.get("elementId", "?")
+            confidence = data.get("confidence", 0)
+            reasons = data.get("matchReasons", [])
+            alternatives = data.get("alternatives", [])
+
+            lines = [f"Found: {element_id} ({confidence:.0%})"]
+            if reasons:
+                lines.append(f"  Matched by: {', '.join(reasons[:5])}")
+
+            # Show element details if available
+            element = data.get("element", {})
+            el_type = element.get("type", "")
+            el_label = element.get("label", "") or element.get("description", "")
+            if el_type or el_label:
+                lines.append(f"  [{el_type}] {el_label}")
+
+            if alternatives:
+                lines.append(f"  +{len(alternatives)} alternative(s)")
+
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
         elif name == "sdk_ai_execute":
             instruction = arguments["instruction"]
             response = await ui_client.sdk_ai_execute(instruction)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [types.TextContent(type="text", text=f"Executed: {instruction}")]
+            msg = f"Executed: {instruction}"
+            msg += format_action_error_info(response.data)
+            return [types.TextContent(type="text", text=msg)]
 
         elif name == "sdk_ai_assert":
             text = arguments["text"]
@@ -3444,7 +5332,8 @@ async def call_tool(
         # Agent Mode: Annotated Screenshots
         elif name == "ui_annotated_screenshot":
             monitor = arguments.get("monitor")
-            # Get snapshot for element positions
+            opts = _build_annotation_options(arguments, ref_manager)
+            # Get full snapshot for element positions + modal/viewport context
             snap_resp = await ui_client.control_snapshot()
             if not snap_resp.success:
                 return [
@@ -3452,7 +5341,16 @@ async def call_tool(
                         type="text", text=f"Error getting snapshot: {snap_resp.error}"
                     )
                 ]
-            snap_elements = (snap_resp.data or {}).get("elements", [])
+            snap_data = snap_resp.data or {}
+            snap_elements = snap_data.get("elements", [])
+
+            # Fetch design data for boxmodel mode
+            design_data: list[dict[str, Any]] | None = None
+            if opts.mode == "boxmodel":
+                design_resp = await ui_client.control_design_snapshot()
+                if design_resp.success:
+                    design_data = (design_resp.data or {}).get("elements", [])
+
             # Get screenshot
             screenshot_resp = await ui_client.control_annotated_screenshot(
                 monitor=monitor
@@ -3474,18 +5372,39 @@ async def call_tool(
                         type="text", text="Error: No screenshot data returned"
                     )
                 ]
-            annotated_b64 = _annotate_screenshot(
-                screenshot_b64, snap_elements, ss_width, ss_height, ref_manager
+            annotated_b64 = annotate_screenshot(
+                screenshot_b64,
+                snap_elements,
+                ss_width,
+                ss_height,
+                ref_manager,
+                options=opts,
+                snapshot=snap_data,
+                design_data=design_data,
             )
-            return [
+            result_content: list[types.TextContent | types.ImageContent] = [
                 types.ImageContent(
-                    type="image", data=annotated_b64, mimeType="image/png"
+                    type="image",
+                    data=annotated_b64,
+                    mimeType=mime_type_for_format(opts.format),
                 )
             ]
+            if opts.mode == "accessibility":
+                result_content.insert(
+                    0,
+                    types.TextContent(
+                        type="text",
+                        text="Accessibility overlay applied. Focus order numbers, "
+                        "touch target warnings (orange), and missing label indicators "
+                        "(pink) are drawn on the image.",
+                    ),
+                )
+            return result_content
 
         elif name == "sdk_annotated_screenshot":
             monitor = arguments.get("monitor")
-            # Get snapshot for element positions
+            opts = _build_annotation_options(arguments, ref_manager)
+            # Get full snapshot
             snap_resp = await ui_client.sdk_snapshot()
             if not snap_resp.success:
                 return [
@@ -3493,7 +5412,16 @@ async def call_tool(
                         type="text", text=f"Error getting snapshot: {snap_resp.error}"
                     )
                 ]
-            snap_elements = (snap_resp.data or {}).get("elements", [])
+            snap_data = snap_resp.data or {}
+            snap_elements = snap_data.get("elements", [])
+
+            # Fetch design data for boxmodel mode
+            design_data: list[dict[str, Any]] | None = None
+            if opts.mode == "boxmodel":
+                design_resp = await ui_client.sdk_design_snapshot()
+                if design_resp.success:
+                    design_data = (design_resp.data or {}).get("elements", [])
+
             # Get screenshot
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
@@ -3513,14 +5441,380 @@ async def call_tool(
                         type="text", text="Error: No screenshot data returned"
                     )
                 ]
-            annotated_b64 = _annotate_screenshot(
-                screenshot_b64, snap_elements, ss_width, ss_height, ref_manager
+            annotated_b64 = annotate_screenshot(
+                screenshot_b64,
+                snap_elements,
+                ss_width,
+                ss_height,
+                ref_manager,
+                options=opts,
+                snapshot=snap_data,
+                design_data=design_data,
             )
-            return [
+            result_content: list[types.TextContent | types.ImageContent] = [
                 types.ImageContent(
-                    type="image", data=annotated_b64, mimeType="image/png"
+                    type="image",
+                    data=annotated_b64,
+                    mimeType=mime_type_for_format(opts.format),
                 )
             ]
+            # For accessibility mode, also return text summary of issues
+            if opts.mode == "accessibility":
+                result_content.insert(
+                    0,
+                    types.TextContent(
+                        type="text",
+                        text="Accessibility overlay applied. Focus order numbers, "
+                        "touch target warnings (orange), and missing label indicators "
+                        "(pink) are drawn on the image.",
+                    ),
+                )
+            return result_content
+
+        # Element-level screenshots
+        elif name in ("ui_element_screenshot", "sdk_element_screenshot"):
+            element_id = ref_manager.resolve(arguments["element_id"])
+            monitor = arguments.get("monitor")
+            padding = arguments.get("padding", 16)
+            scale = arguments.get("scale", 1.0)
+            fmt = arguments.get("format", "png")
+
+            is_ui = name == "ui_element_screenshot"
+            snap_resp = (
+                await ui_client.control_snapshot()
+                if is_ui
+                else await ui_client.sdk_snapshot()
+            )
+            if not snap_resp.success:
+                return [
+                    types.TextContent(
+                        type="text", text=f"Error getting snapshot: {snap_resp.error}"
+                    )
+                ]
+            snap_elements = (snap_resp.data or {}).get("elements", [])
+            target_el = next(
+                (e for e in snap_elements if e.get("id") == element_id), None
+            )
+            if not target_el:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Element '{element_id}' not found in snapshot.",
+                    )
+                ]
+
+            screenshot_resp = (
+                await ui_client.control_annotated_screenshot(monitor=monitor)
+                if is_ui
+                else await ui_client.sdk_screenshot_raw(monitor=monitor)
+            )
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            ss_width = ss_data.get("width", 0)
+            ss_height = ss_data.get("height", 0)
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+
+            cropped = crop_to_element(
+                screenshot_b64,
+                target_el,
+                ss_width,
+                ss_height,
+                padding=padding,
+                scale=scale,
+                fmt=fmt,
+            )
+            if not cropped:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Element '{element_id}' has no bounding rect.",
+                    )
+                ]
+            return [
+                types.ImageContent(
+                    type="image",
+                    data=cropped,
+                    mimeType=mime_type_for_format(fmt),
+                )
+            ]
+
+        # Screenshot baseline management
+        elif name == "sdk_screenshot_baseline_save":
+            key = arguments["baseline_key"]
+            monitor = arguments.get("monitor")
+            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+            baseline_store.save_baseline(
+                key, base64.b64decode(screenshot_b64)
+            )
+            return [
+                types.TextContent(
+                    type="text", text=f"Baseline saved: '{key}'"
+                )
+            ]
+
+        elif name == "sdk_screenshot_baseline_list":
+            keys = baseline_store.list_baselines()
+            if not keys:
+                return [
+                    types.TextContent(
+                        type="text", text="No baselines saved."
+                    )
+                ]
+            lines = [f"Saved baselines ({len(keys)}):"]
+            for k in keys:
+                lines.append(f"  - {k}")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_screenshot_diff":
+            key = arguments["baseline_key"]
+            threshold = arguments.get("threshold", 0.01)
+            monitor = arguments.get("monitor")
+
+            baseline_bytes = baseline_store.get_baseline(key)
+            if baseline_bytes is None:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"No baseline found for '{key}'. Save one first with sdk_screenshot_baseline_save.",
+                    )
+                ]
+
+            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+
+            baseline_b64 = base64.b64encode(baseline_bytes).decode()
+            result = diff_screenshots(
+                baseline_b64, screenshot_b64, threshold=threshold
+            )
+
+            status = "PASSED" if result.passed else "FAILED"
+            summary = (
+                f"Visual diff: {status}\n"
+                f"Change: {result.change_percentage}% "
+                f"(threshold: {result.threshold_used * 100:.1f}%)\n"
+                f"Changed regions: {len(result.changed_regions)}"
+            )
+
+            return [
+                types.TextContent(type="text", text=summary),
+                types.ImageContent(
+                    type="image",
+                    data=result.diff_image_b64,
+                    mimeType="image/png",
+                ),
+            ]
+
+        # Before/After comparison
+        elif name == "sdk_screenshot_before":
+            monitor = arguments.get("monitor")
+            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+            baseline_store.save_before(base64.b64decode(screenshot_b64))
+            return [
+                types.TextContent(
+                    type="text",
+                    text="'Before' screenshot captured. Perform your action, then call sdk_screenshot_after.",
+                )
+            ]
+
+        elif name == "sdk_screenshot_after":
+            monitor = arguments.get("monitor")
+            layout = arguments.get("layout", "side-by-side")
+
+            before_bytes = baseline_store.get_before()
+            if before_bytes is None:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="No 'before' screenshot saved. Call sdk_screenshot_before first.",
+                    )
+                ]
+
+            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+
+            before_b64 = base64.b64encode(before_bytes).decode()
+
+            # Create side-by-side comparison
+            comparison_b64 = create_before_after(
+                before_b64, screenshot_b64, layout=layout
+            )
+
+            # Also compute diff
+            result = diff_screenshots(before_b64, screenshot_b64)
+            summary = (
+                f"Before/After comparison ({layout}):\n"
+                f"Change: {result.change_percentage}%\n"
+                f"Changed regions: {len(result.changed_regions)}"
+            )
+
+            baseline_store.clear_before()
+
+            return [
+                types.TextContent(type="text", text=summary),
+                types.ImageContent(
+                    type="image",
+                    data=comparison_b64,
+                    mimeType="image/png",
+                ),
+                types.ImageContent(
+                    type="image",
+                    data=result.diff_image_b64,
+                    mimeType="image/png",
+                ),
+            ]
+
+        # Visual Description (D2)
+        elif name == "sdk_visual_description":
+            snap_resp = await ui_client.sdk_snapshot()
+            if not snap_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting snapshot: {snap_resp.error}",
+                    )
+                ]
+            snap_data = snap_resp.data or {}
+            snap_elements = snap_data.get("elements", [])
+            description = generate_visual_description(snap_elements, snap_data)
+            return [types.TextContent(type="text", text=description)]
+
+        # Delta / Incremental Screenshot (D3)
+        elif name == "sdk_screenshot_delta":
+            monitor = arguments.get("monitor")
+            if arguments.get("reset", False):
+                delta_encoder.reset()
+
+            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
+            if not screenshot_resp.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                    )
+                ]
+            ss_data = screenshot_resp.data or {}
+            screenshot_b64 = ss_data.get("screenshot", "")
+            if not screenshot_b64:
+                return [
+                    types.TextContent(
+                        type="text", text="Error: No screenshot data returned"
+                    )
+                ]
+
+            delta = delta_encoder.encode_delta(screenshot_b64)
+
+            if delta["is_first"]:
+                summary = (
+                    f"First capture (full image): {delta['image_width']}x{delta['image_height']}px, "
+                    f"{delta['total_tiles']} tiles"
+                )
+                return [
+                    types.TextContent(type="text", text=summary),
+                    types.ImageContent(
+                        type="image",
+                        data=screenshot_b64,
+                        mimeType="image/png",
+                    ),
+                ]
+            else:
+                ratio_pct = round(delta["change_ratio"] * 100, 1)
+                summary = (
+                    f"Delta: {delta['changed_count']}/{delta['total_tiles']} tiles changed "
+                    f"({ratio_pct}%)"
+                )
+                if delta["changed_count"] == 0:
+                    return [
+                        types.TextContent(
+                            type="text", text=f"{summary}\nNo visual changes detected."
+                        )
+                    ]
+                else:
+                    # Return summary + changed tile details as JSON
+                    tile_summary = json.dumps(
+                        {
+                            "changed_count": delta["changed_count"],
+                            "total_tiles": delta["total_tiles"],
+                            "change_ratio": delta["change_ratio"],
+                            "tiles": [
+                                {"x": t["x"], "y": t["y"], "w": t["w"], "h": t["h"]}
+                                for t in delta["changed_tiles"]
+                            ],
+                        },
+                        indent=2,
+                    )
+                    return [
+                        types.TextContent(type="text", text=f"{summary}\n{tile_summary}")
+                    ]
 
         # =====================================================================
         # SDK Design Review Tools
@@ -4202,6 +6496,720 @@ async def call_tool(
                         lines.append(f"  {t_name}: stable {t_stable}ms")
             return [types.TextContent(type="text", text="\n".join(lines))]
 
+        # =====================================================================
+        # Network Request Monitoring Tools
+        # =====================================================================
+
+        elif name == "sdk_network_requests":
+            status = arguments.get("status")
+            method = arguments.get("method")
+            url_pattern = arguments.get("url_pattern")
+            failures_only = arguments.get("failures_only", False)
+            limit = arguments.get("limit", 50)
+            response = await ui_client.sdk_network_requests(
+                status=status,
+                method=method,
+                url_pattern=url_pattern,
+                failures_only=failures_only,
+                limit=limit,
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=_format_network_requests_response(response.data),
+                )
+            ]
+
+        elif name == "ui_network_requests":
+            status = arguments.get("status")
+            method = arguments.get("method")
+            url_pattern = arguments.get("url_pattern")
+            failures_only = arguments.get("failures_only", False)
+            limit = arguments.get("limit", 50)
+            response = await ui_client.control_network_requests(
+                status=status,
+                method=method,
+                url_pattern=url_pattern,
+                failures_only=failures_only,
+                limit=limit,
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=_format_network_requests_response(response.data),
+                )
+            ]
+
+        elif name == "sdk_network_requests_in_flight":
+            response = await ui_client.sdk_network_requests_in_flight()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=_format_network_requests_response(response.data),
+                )
+            ]
+
+        elif name == "ui_network_requests_in_flight":
+            response = await ui_client.control_network_requests_in_flight()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=_format_network_requests_response(response.data),
+                )
+            ]
+
+        elif name == "sdk_wait_for_network_request":
+            url_pattern = arguments.get("url_pattern")
+            method = arguments.get("method")
+            timeout = arguments.get("timeout", 30000)
+            response = await ui_client.sdk_wait_for_network_request(
+                url_pattern=url_pattern,
+                method=method,
+                timeout=timeout,
+            )
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Network request wait failed: {response.error}",
+                    )
+                ]
+            return [
+                types.TextContent(
+                    type="text", text=_format_wait_result(response.data)
+                )
+            ]
+
+        elif name == "ui_wait_for_network_request":
+            url_pattern = arguments.get("url_pattern")
+            method = arguments.get("method")
+            timeout = arguments.get("timeout", 30000)
+            response = await ui_client.control_wait_for_network_request(
+                url_pattern=url_pattern,
+                method=method,
+                timeout=timeout,
+            )
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Network request wait failed: {response.error}",
+                    )
+                ]
+            return [
+                types.TextContent(
+                    type="text", text=_format_wait_result(response.data)
+                )
+            ]
+
+        # =============================================================
+        # Change Tracking - SDK Mode
+        # =============================================================
+
+        elif name == "sdk_save_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.sdk_save_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Bookmark '{bookmark_name}' saved successfully."
+                )
+            ]
+
+        elif name == "sdk_list_bookmarks":
+            response = await ui_client.sdk_list_bookmarks()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            bookmarks = response.data or []
+            if not bookmarks:
+                return [types.TextContent(type="text", text="No bookmarks saved.")]
+            if isinstance(bookmarks, list):
+                return [
+                    types.TextContent(
+                        type="text", text=f"Bookmarks: {', '.join(str(b) for b in bookmarks)}"
+                    )
+                ]
+            return [types.TextContent(type="text", text=json.dumps(bookmarks, indent=2))]
+
+        elif name == "sdk_delete_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.sdk_delete_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Bookmark '{bookmark_name}' deleted."
+                )
+            ]
+
+        elif name == "sdk_diff_from_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.sdk_diff_from_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            changes = data.get("changes", {})
+            appeared = changes.get("appeared", [])
+            disappeared = changes.get("disappeared", [])
+            modified = changes.get("modified", [])
+            lines = [f"Diff from bookmark '{bookmark_name}':"]
+            lines.append(f"  Appeared: {len(appeared)} elements")
+            lines.append(f"  Disappeared: {len(disappeared)} elements")
+            lines.append(f"  Modified: {len(modified)} elements")
+            if appeared:
+                lines.append("  New elements:")
+                for el in appeared[:10]:
+                    if isinstance(el, dict):
+                        lines.append(
+                            f"    - {el.get('type', '?')} '{el.get('label', el.get('id', '?'))}'"
+                        )
+                    else:
+                        lines.append(f"    - {el}")
+                if len(appeared) > 10:
+                    lines.append(f"    ... and {len(appeared) - 10} more")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_execute_with_diff":
+            element_id = ref_manager.resolve(arguments["element_id"])
+            action_name = arguments["action"]
+            value = arguments.get("value")
+            settle_timeout = arguments.get("settle_timeout", 3000)
+            categorize = arguments.get("categorize", True)
+            summary_budget = arguments.get("summary_budget", 300)
+
+            request_body: dict[str, Any] = {
+                "elementAction": {
+                    "elementId": element_id,
+                    "action": action_name,
+                },
+                "settleTimeout": settle_timeout,
+                "categorize": categorize,
+                "summaryBudget": summary_budget,
+            }
+            if value:
+                request_body["elementAction"]["value"] = value
+
+            response = await ui_client.sdk_execute_with_diff(request_body)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+
+            data = response.data or {}
+            lines = [f"Execute with diff: {action_name} on {element_id}"]
+            lines.append(f"  Action success: {data.get('actionSuccess', False)}")
+            diff = data.get("diff", {})
+            changes = diff.get("changes", {})
+            lines.append(f"  Appeared: {len(changes.get('appeared', []))}")
+            lines.append(f"  Disappeared: {len(changes.get('disappeared', []))}")
+            lines.append(f"  Modified: {len(changes.get('modified', []))}")
+            if data.get("categorized"):
+                cat = data["categorized"]
+                lines.append(
+                    f"  Category: {cat.get('category')} ({cat.get('confidence', 0) * 100:.0f}%)"
+                )
+            if data.get("budgetSummary"):
+                lines.append(f"  Summary: {data['budgetSummary']}")
+            lines.append(f"  Duration: {data.get('durationMs', 0):.0f}ms")
+            # Include error info from the underlying action response
+            action_result = data.get("actionResult")
+            if isinstance(action_result, dict):
+                error_info = format_action_error_info(action_result)
+                if error_info:
+                    lines.append(error_info)
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_wait_for_change":
+            predicate: dict[str, Any] = {"type": arguments["predicate_type"]}
+            if "element_id" in arguments:
+                predicate["elementId"] = ref_manager.resolve(arguments["element_id"])
+            if "property" in arguments:
+                predicate["property"] = arguments["property"]
+            if "min_count" in arguments:
+                predicate["minCount"] = arguments["min_count"]
+            options: dict[str, Any] = {}
+            if "timeout" in arguments:
+                options["timeout"] = arguments["timeout"]
+            if "poll_interval" in arguments:
+                options["pollInterval"] = arguments["poll_interval"]
+            response = await ui_client.sdk_wait_for_change(predicate, options or None)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            if data.get("matched"):
+                diff = data.get("diff", {})
+                changes = diff.get("changes", {})
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Change detected! Appeared: {len(changes.get('appeared', []))}, "
+                        f"Disappeared: {len(changes.get('disappeared', []))}, "
+                        f"Modified: {len(changes.get('modified', []))}",
+                    )
+                ]
+            return [types.TextContent(type="text", text="Timed out waiting for change.")]
+
+        elif name == "sdk_scoped_diff":
+            scope = arguments["scope"]
+            body_req: dict[str, Any] = {"scope": scope}
+            if "from_bookmark" in arguments:
+                body_req["fromBookmark"] = arguments["from_bookmark"]
+            response = await ui_client.sdk_scoped_diff(scope, arguments.get("from_bookmark"))
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            changes = data.get("changes", {})
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Scoped diff ('{scope}'): "
+                    f"Appeared: {len(changes.get('appeared', []))}, "
+                    f"Disappeared: {len(changes.get('disappeared', []))}, "
+                    f"Modified: {len(changes.get('modified', []))}",
+                )
+            ]
+
+        elif name == "sdk_get_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.sdk_get_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data
+            if not data:
+                return [types.TextContent(type="text", text=f"Bookmark '{bookmark_name}' not found.")]
+            elements = data.get("snapshot", {}).get("elements", [])
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Bookmark '{bookmark_name}': {len(elements)} elements captured at {data.get('timestamp', '?')}",
+                )
+            ]
+
+        elif name == "sdk_categorize_last_diff":
+            response = await ui_client.sdk_categorize_last_diff()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data
+            if not data:
+                return [
+                    types.TextContent(
+                        type="text", text="No previous diff to categorize."
+                    )
+                ]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Category: {data.get('category', '?')} (confidence: {data.get('confidence', 0) * 100:.0f}%)",
+                )
+            ]
+
+        elif name == "sdk_summarize_diff":
+            budget = arguments.get("budget", 300)
+            body: dict[str, Any] = {"budget": budget}
+            if "from_bookmark" in arguments:
+                body["fromBookmark"] = arguments["from_bookmark"]
+            if arguments.get("include_category"):
+                body["includeCategory"] = True
+            response = await ui_client.sdk_summarize_diff(body)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            summary = (response.data or {}).get("summary", "No changes")
+            return [types.TextContent(type="text", text=summary)]
+
+        elif name == "sdk_structured_changes":
+            body = {}
+            if "from_bookmark" in arguments:
+                body["fromBookmark"] = arguments["from_bookmark"]
+            response = await ui_client.sdk_structured_changes(body or None)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            lines = ["Structured change analysis:"]
+            lines.append(f"  Has structured data: {data.get('hasStructuredData', False)}")
+            tables = data.get("tableChanges", [])
+            lists = data.get("listChanges", [])
+            if tables:
+                lines.append(f"  Table changes: {len(tables)}")
+                for t in tables[:5]:
+                    lines.append(
+                        f"    - {t.get('tableId', '?')}: "
+                        f"+{len(t.get('addedRows', []))} -{len(t.get('removedRows', []))} rows"
+                    )
+            if lists:
+                lines.append(f"  List changes: {len(lists)}")
+                for lst in lists[:5]:
+                    lines.append(
+                        f"    - {lst.get('listId', '?')}: "
+                        f"+{len(lst.get('addedItems', []))} -{len(lst.get('removedItems', []))} items"
+                    )
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_change_buffer_enable":
+            response = await ui_client.sdk_enable_change_buffer()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text="Change buffer enabled.")]
+
+        elif name == "sdk_change_buffer_disable":
+            response = await ui_client.sdk_disable_change_buffer()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text="Change buffer disabled.")]
+
+        elif name == "sdk_change_buffer_drain":
+            response = await ui_client.sdk_drain_change_buffer()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            changes = data.get("changes", [])
+            return [
+                types.TextContent(
+                    type="text", text=f"Drained {len(changes)} buffered changes."
+                )
+            ]
+
+        elif name == "sdk_change_buffer_size":
+            response = await ui_client.sdk_change_buffer_size()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Buffer size: {data.get('size', 0)}, enabled: {data.get('enabled', False)}",
+                )
+            ]
+
+        # =============================================================
+        # Change Tracking - Control Mode (Runner's Own UI)
+        # =============================================================
+
+        elif name == "ui_save_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.control_save_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Bookmark '{bookmark_name}' saved successfully."
+                )
+            ]
+
+        elif name == "ui_list_bookmarks":
+            response = await ui_client.control_list_bookmarks()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            bookmarks = response.data or []
+            if not bookmarks:
+                return [types.TextContent(type="text", text="No bookmarks saved.")]
+            if isinstance(bookmarks, list):
+                return [
+                    types.TextContent(
+                        type="text", text=f"Bookmarks: {', '.join(str(b) for b in bookmarks)}"
+                    )
+                ]
+            return [types.TextContent(type="text", text=json.dumps(bookmarks, indent=2))]
+
+        elif name == "ui_delete_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.control_delete_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Bookmark '{bookmark_name}' deleted."
+                )
+            ]
+
+        elif name == "ui_diff_from_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.control_diff_from_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            changes = data.get("changes", {})
+            appeared = changes.get("appeared", [])
+            disappeared = changes.get("disappeared", [])
+            modified = changes.get("modified", [])
+            lines = [f"Diff from bookmark '{bookmark_name}':"]
+            lines.append(f"  Appeared: {len(appeared)} elements")
+            lines.append(f"  Disappeared: {len(disappeared)} elements")
+            lines.append(f"  Modified: {len(modified)} elements")
+            if appeared:
+                lines.append("  New elements:")
+                for el in appeared[:10]:
+                    if isinstance(el, dict):
+                        lines.append(
+                            f"    - {el.get('type', '?')} '{el.get('label', el.get('id', '?'))}'"
+                        )
+                    else:
+                        lines.append(f"    - {el}")
+                if len(appeared) > 10:
+                    lines.append(f"    ... and {len(appeared) - 10} more")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "ui_execute_with_diff":
+            element_id = ref_manager.resolve(arguments["element_id"])
+            action_name = arguments["action"]
+            value = arguments.get("value")
+            settle_timeout = arguments.get("settle_timeout", 3000)
+            categorize = arguments.get("categorize", True)
+            summary_budget = arguments.get("summary_budget", 300)
+
+            request_body = {
+                "elementAction": {
+                    "elementId": element_id,
+                    "action": action_name,
+                },
+                "settleTimeout": settle_timeout,
+                "categorize": categorize,
+                "summaryBudget": summary_budget,
+            }
+            if value:
+                request_body["elementAction"]["value"] = value
+
+            response = await ui_client.control_execute_with_diff(request_body)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+
+            data = response.data or {}
+            lines = [f"Execute with diff: {action_name} on {element_id}"]
+            lines.append(f"  Action success: {data.get('actionSuccess', False)}")
+            diff = data.get("diff", {})
+            changes = diff.get("changes", {})
+            lines.append(f"  Appeared: {len(changes.get('appeared', []))}")
+            lines.append(f"  Disappeared: {len(changes.get('disappeared', []))}")
+            lines.append(f"  Modified: {len(changes.get('modified', []))}")
+            if data.get("categorized"):
+                cat = data["categorized"]
+                lines.append(
+                    f"  Category: {cat.get('category')} ({cat.get('confidence', 0) * 100:.0f}%)"
+                )
+            if data.get("budgetSummary"):
+                lines.append(f"  Summary: {data['budgetSummary']}")
+            lines.append(f"  Duration: {data.get('durationMs', 0):.0f}ms")
+            # Include error info from the underlying action response
+            action_result = data.get("actionResult")
+            if isinstance(action_result, dict):
+                error_info = format_action_error_info(action_result)
+                if error_info:
+                    lines.append(error_info)
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "ui_wait_for_change":
+            predicate = {"type": arguments["predicate_type"]}
+            if "element_id" in arguments:
+                predicate["elementId"] = ref_manager.resolve(arguments["element_id"])
+            if "property" in arguments:
+                predicate["property"] = arguments["property"]
+            if "min_count" in arguments:
+                predicate["minCount"] = arguments["min_count"]
+            options = {}
+            if "timeout" in arguments:
+                options["timeout"] = arguments["timeout"]
+            if "poll_interval" in arguments:
+                options["pollInterval"] = arguments["poll_interval"]
+            response = await ui_client.control_wait_for_change(predicate, options or None)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            if data.get("matched"):
+                diff = data.get("diff", {})
+                changes = diff.get("changes", {})
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Change detected! Appeared: {len(changes.get('appeared', []))}, "
+                        f"Disappeared: {len(changes.get('disappeared', []))}, "
+                        f"Modified: {len(changes.get('modified', []))}",
+                    )
+                ]
+            return [types.TextContent(type="text", text="Timed out waiting for change.")]
+
+        elif name == "ui_scoped_diff":
+            scope = arguments["scope"]
+            response = await ui_client.control_scoped_diff(scope, arguments.get("from_bookmark"))
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            changes = data.get("changes", {})
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Scoped diff ('{scope}'): "
+                    f"Appeared: {len(changes.get('appeared', []))}, "
+                    f"Disappeared: {len(changes.get('disappeared', []))}, "
+                    f"Modified: {len(changes.get('modified', []))}",
+                )
+            ]
+
+        elif name == "ui_get_bookmark":
+            bookmark_name = arguments["name"]
+            response = await ui_client.control_get_bookmark(bookmark_name)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data
+            if not data:
+                return [types.TextContent(type="text", text=f"Bookmark '{bookmark_name}' not found.")]
+            elements = data.get("snapshot", {}).get("elements", [])
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Bookmark '{bookmark_name}': {len(elements)} elements captured at {data.get('timestamp', '?')}",
+                )
+            ]
+
+        elif name == "ui_categorize_last_diff":
+            response = await ui_client.control_categorize_last_diff()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data
+            if not data:
+                return [
+                    types.TextContent(
+                        type="text", text="No previous diff to categorize."
+                    )
+                ]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Category: {data.get('category', '?')} (confidence: {data.get('confidence', 0) * 100:.0f}%)",
+                )
+            ]
+
+        elif name == "ui_summarize_diff":
+            budget = arguments.get("budget", 300)
+            body = {"budget": budget}
+            if "from_bookmark" in arguments:
+                body["fromBookmark"] = arguments["from_bookmark"]
+            if arguments.get("include_category"):
+                body["includeCategory"] = True
+            response = await ui_client.control_summarize_diff(body)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            summary = (response.data or {}).get("summary", "No changes")
+            return [types.TextContent(type="text", text=summary)]
+
+        elif name == "ui_structured_changes":
+            body = {}
+            if "from_bookmark" in arguments:
+                body["fromBookmark"] = arguments["from_bookmark"]
+            response = await ui_client.control_structured_changes(body or None)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            lines = ["Structured change analysis:"]
+            lines.append(f"  Has structured data: {data.get('hasStructuredData', False)}")
+            tables = data.get("tableChanges", [])
+            lists = data.get("listChanges", [])
+            if tables:
+                lines.append(f"  Table changes: {len(tables)}")
+                for t in tables[:5]:
+                    lines.append(
+                        f"    - {t.get('tableId', '?')}: "
+                        f"+{len(t.get('addedRows', []))} -{len(t.get('removedRows', []))} rows"
+                    )
+            if lists:
+                lines.append(f"  List changes: {len(lists)}")
+                for lst in lists[:5]:
+                    lines.append(
+                        f"    - {lst.get('listId', '?')}: "
+                        f"+{len(lst.get('addedItems', []))} -{len(lst.get('removedItems', []))} items"
+                    )
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "ui_change_buffer_enable":
+            response = await ui_client.control_enable_change_buffer()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text="Change buffer enabled.")]
+
+        elif name == "ui_change_buffer_disable":
+            response = await ui_client.control_disable_change_buffer()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text="Change buffer disabled.")]
+
+        elif name == "ui_change_buffer_drain":
+            response = await ui_client.control_drain_change_buffer()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            changes = data.get("changes", [])
+            return [
+                types.TextContent(
+                    type="text", text=f"Drained {len(changes)} buffered changes."
+                )
+            ]
+
+        elif name == "ui_change_buffer_size":
+            response = await ui_client.control_change_buffer_size()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"Buffer size: {data.get('size', 0)}, enabled: {data.get('enabled', False)}",
+                )
+            ]
+
+        # Undo/Redo awareness tools
+        elif name == "ui_undo_state":
+            response = await ui_client.control_undo_state()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text=_format_undo_state(response.data))]
+
+        elif name == "ui_undo":
+            response = await ui_client.control_undo()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            executed = data.get("executed", False)
+            msg = "Undo executed." if executed else "Undo was not available."
+            return [types.TextContent(type="text", text=msg)]
+
+        elif name == "ui_redo":
+            response = await ui_client.control_redo()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            executed = data.get("executed", False)
+            msg = "Redo executed." if executed else "Redo was not available."
+            return [types.TextContent(type="text", text=msg)]
+
+        elif name == "sdk_undo_state":
+            response = await ui_client.sdk_undo_state()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [types.TextContent(type="text", text=_format_undo_state(response.data))]
+
+        elif name == "sdk_undo":
+            response = await ui_client.sdk_undo()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            executed = data.get("executed", False)
+            msg = "Undo executed." if executed else "Undo was not available."
+            return [types.TextContent(type="text", text=msg)]
+
+        elif name == "sdk_redo":
+            response = await ui_client.sdk_redo()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            executed = data.get("executed", False)
+            msg = "Redo executed." if executed else "Redo was not available."
+            return [types.TextContent(type="text", text=msg)]
+
         else:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -4257,62 +7265,25 @@ def _format_diff(diff: dict[str, Any], rm: RefManager) -> str:
     return "\n".join(lines)
 
 
-def _annotate_screenshot(
-    screenshot_b64: str,
-    elements: list[dict[str, Any]],
-    width: int,
-    height: int,
-    rm: RefManager,
-) -> str:
-    """Annotate a screenshot with element ref labels. Returns base64 PNG."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        logger.warning("Pillow not installed. Returning unannotated screenshot.")
-        return screenshot_b64
-
-    img = Image.open(io.BytesIO(base64.b64decode(screenshot_b64)))
-    draw = ImageDraw.Draw(img)
-
-    # Account for DPI scaling: screenshot is physical pixels, rects are CSS pixels
-    scale_x = img.width / width if width else 1
-    scale_y = img.height / height if height else 1
-
-    # Try to load a small font; fall back to default
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont
-    try:
-        font = ImageFont.truetype("arial.ttf", 12)
-    except (OSError, IOError):
-        font = ImageFont.load_default()
-
-    for el in elements:
-        state = el.get("state", {})
-        rect = state.get("rect", {})
-        if not rect or not state.get("visible", True):
-            continue
-
-        elem_id = el.get("id", "?")
-        ref = rm.assign(elem_id)
-
-        x = rect.get("x", 0) * scale_x
-        y = rect.get("y", 0) * scale_y
-        w = rect.get("width", 0) * scale_x
-        h = rect.get("height", 0) * scale_y
-
-        # Draw rectangle outline
-        draw.rectangle((x, y, x + w, y + h), outline="red", width=2)
-
-        # Draw ref label background + text
-        text_bbox = draw.textbbox((0, 0), ref, font=font)
-        tw = text_bbox[2] - text_bbox[0]
-        th = text_bbox[3] - text_bbox[1]
-        label_y = max(y - th - 4, 0)
-        draw.rectangle((x, label_y, x + tw + 4, label_y + th + 2), fill="red")
-        draw.text((x + 2, label_y), ref, fill="white", font=font)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+def _build_annotation_options(
+    arguments: dict[str, Any], rm: RefManager
+) -> AnnotationOptions:
+    """Build AnnotationOptions from MCP tool arguments."""
+    highlight = arguments.get("highlight_elements")
+    if highlight:
+        highlight = [rm.resolve(eid) for eid in highlight]
+    scale = arguments.get("scale", 1.0)
+    scale = max(0.25, min(2.0, float(scale)))
+    quality = arguments.get("quality", 85)
+    quality = max(1, min(100, int(quality)))
+    return AnnotationOptions(
+        mode=arguments.get("mode", "interactive"),
+        highlight_elements=highlight,
+        crop=arguments.get("crop", "full"),
+        scale=scale,
+        format=arguments.get("format", "png"),
+        quality=quality,
+    )
 
 
 async def main() -> None:
