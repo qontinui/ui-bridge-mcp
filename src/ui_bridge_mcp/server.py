@@ -208,7 +208,12 @@ def format_action_error_info(response_data: dict[str, Any] | None) -> str:
                     severity = err.get("severity", "unknown")
                     reason = err.get("reason", "")
                     event = err.get("event", {})
-                    msg = event.get("message", event.get("args", [""])[0] if isinstance(event.get("args"), list) else "")
+                    msg = event.get(
+                        "message",
+                        event.get("args", [""])[0]
+                        if isinstance(event.get("args"), list)
+                        else "",
+                    )
                     if isinstance(msg, str) and len(msg) > 200:
                         msg = msg[:200] + "..."
                     diff_lines.append(f"    [{severity}] {msg}")
@@ -220,7 +225,12 @@ def format_action_error_info(response_data: dict[str, Any] | None) -> str:
                 diff_lines.append(f"  RESOLVED ({len(resolved)}):")
                 for err in resolved[:3]:
                     event = err.get("event", {})
-                    msg = event.get("message", event.get("args", [""])[0] if isinstance(event.get("args"), list) else "")
+                    msg = event.get(
+                        "message",
+                        event.get("args", [""])[0]
+                        if isinstance(event.get("args"), list)
+                        else "",
+                    )
                     if isinstance(msg, str) and len(msg) > 200:
                         msg = msg[:200] + "..."
                     diff_lines.append(f"    {msg}")
@@ -369,7 +379,9 @@ def _format_undo_state(data: dict[str, Any] | None) -> str:
                 entry_desc = entry.get("description", "?")
                 confidence = entry.get("confidence", 0)
                 source = entry.get("source", "?")
-                lines.append(f"    - {entry_desc} (confidence: {confidence:.1f}, source: {source})")
+                lines.append(
+                    f"    - {entry_desc} (confidence: {confidence:.1f}, source: {source})"
+                )
     else:
         lines.append("  Undo: not available")
     if redo_available:
@@ -801,9 +813,7 @@ def format_drag_drop_header(drag_drop: dict[str, Any]) -> list[str]:
         if n:
             origin_parts.append(f"{n} {origin}")
     origin_str = f" ({', '.join(origin_parts)})" if origin_parts else ""
-    lines.append(
-        f"Drag-Drop: {source_count} sources, {zone_count} zones{origin_str}"
-    )
+    lines.append(f"Drag-Drop: {source_count} sources, {zone_count} zones{origin_str}")
     if sources:
         for s in sources[:8]:
             sid = s.get("id", "?")
@@ -1496,8 +1506,7 @@ Returns per-field success/failure results with any validation errors.""",
                 "triggerValidation": {
                     "type": "boolean",
                     "description": (
-                        "Whether to trigger validation after filling. "
-                        "Defaults to true."
+                        "Whether to trigger validation after filling. Defaults to true."
                     ),
                     "default": True,
                 },
@@ -1533,8 +1542,7 @@ Returns per-field success/failure results.""",
                 "triggerValidation": {
                     "type": "boolean",
                     "description": (
-                        "Whether to trigger validation after filling. "
-                        "Defaults to true."
+                        "Whether to trigger validation after filling. Defaults to true."
                     ),
                     "default": True,
                 },
@@ -2409,7 +2417,16 @@ Supports smart cropping:
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["interactive", "all", "validation", "modal", "state", "relationships", "accessibility", "boxmodel"],
+                    "enum": [
+                        "interactive",
+                        "all",
+                        "validation",
+                        "modal",
+                        "state",
+                        "relationships",
+                        "accessibility",
+                        "boxmodel",
+                    ],
                     "description": "Annotation mode. Default: interactive.",
                 },
                 "crop": {
@@ -2469,7 +2486,16 @@ Supports smart cropping:
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["interactive", "all", "validation", "modal", "state", "relationships", "accessibility", "boxmodel"],
+                    "enum": [
+                        "interactive",
+                        "all",
+                        "validation",
+                        "modal",
+                        "state",
+                        "relationships",
+                        "accessibility",
+                        "boxmodel",
+                    ],
                     "description": "Annotation mode. Default: interactive.",
                 },
                 "crop": {
@@ -3178,9 +3204,7 @@ HTTP method, URL substring, and failures-only mode.""",
                 },
                 "method": {
                     "type": "string",
-                    "description": (
-                        "Filter by HTTP method (GET, POST, etc.)."
-                    ),
+                    "description": ("Filter by HTTP method (GET, POST, etc.)."),
                 },
                 "url_pattern": {
                     "type": "string",
@@ -3219,9 +3243,7 @@ Shows API calls with status, response codes, and timing.""",
                 },
                 "method": {
                     "type": "string",
-                    "description": (
-                        "Filter by HTTP method (GET, POST, etc.)."
-                    ),
+                    "description": ("Filter by HTTP method (GET, POST, etc.)."),
                 },
                 "url_pattern": {
                     "type": "string",
@@ -3412,7 +3434,13 @@ Returns the matched request details once it completes, or an error on timeout.""
             "properties": {
                 "predicate_type": {
                     "type": "string",
-                    "enum": ["anyChange", "elementAppeared", "elementDisappeared", "elementChanged", "countChanged"],
+                    "enum": [
+                        "anyChange",
+                        "elementAppeared",
+                        "elementDisappeared",
+                        "elementChanged",
+                        "countChanged",
+                    ],
                     "description": "Type of change to wait for",
                 },
                 "element_id": {
@@ -3626,7 +3654,13 @@ Returns the matched request details once it completes, or an error on timeout.""
             "properties": {
                 "predicate_type": {
                     "type": "string",
-                    "enum": ["anyChange", "elementAppeared", "elementDisappeared", "elementChanged", "countChanged"],
+                    "enum": [
+                        "anyChange",
+                        "elementAppeared",
+                        "elementDisappeared",
+                        "elementChanged",
+                        "countChanged",
+                    ],
                     "description": "Type of change to wait for",
                 },
                 "element_id": {
@@ -4332,16 +4366,26 @@ async def call_tool(
             data = response.data or {}
             text = data.get("text")
             if text is not None:
-                return [types.TextContent(type="text", text=f"Clipboard content:\n{text}")]
+                return [
+                    types.TextContent(type="text", text=f"Clipboard content:\n{text}")
+                ]
             else:
-                return [types.TextContent(type="text", text="Clipboard is empty (no text content).")]
+                return [
+                    types.TextContent(
+                        type="text", text="Clipboard is empty (no text content)."
+                    )
+                ]
 
         elif name == "ui_clipboard_write":
             text = arguments.get("text", "")
             response = await ui_client.control_clipboard_write(text)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [types.TextContent(type="text", text=f"Wrote {len(text)} chars to clipboard.")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Wrote {len(text)} chars to clipboard."
+                )
+            ]
 
         elif name == "sdk_clipboard_read":
             response = await ui_client.sdk_clipboard_read()
@@ -4350,16 +4394,26 @@ async def call_tool(
             data = response.data or {}
             text = data.get("text")
             if text is not None:
-                return [types.TextContent(type="text", text=f"Clipboard content:\n{text}")]
+                return [
+                    types.TextContent(type="text", text=f"Clipboard content:\n{text}")
+                ]
             else:
-                return [types.TextContent(type="text", text="Clipboard is empty (no text content).")]
+                return [
+                    types.TextContent(
+                        type="text", text="Clipboard is empty (no text content)."
+                    )
+                ]
 
         elif name == "sdk_clipboard_write":
             text = arguments.get("text", "")
             response = await ui_client.sdk_clipboard_write(text)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [types.TextContent(type="text", text=f"Wrote {len(text)} chars to clipboard.")]
+            return [
+                types.TextContent(
+                    type="text", text=f"Wrote {len(text)} chars to clipboard."
+                )
+            ]
 
         elif name == "sdk_forms":
             response = await ui_client.sdk_forms()
@@ -5416,7 +5470,7 @@ async def call_tool(
             snap_elements = snap_data.get("elements", [])
 
             # Fetch design data for boxmodel mode
-            design_data: list[dict[str, Any]] | None = None
+            design_data = None
             if opts.mode == "boxmodel":
                 design_resp = await ui_client.sdk_design_snapshot()
                 if design_resp.success:
@@ -5451,7 +5505,7 @@ async def call_tool(
                 snapshot=snap_data,
                 design_data=design_data,
             )
-            result_content: list[types.TextContent | types.ImageContent] = [
+            result_content = [
                 types.ImageContent(
                     type="image",
                     data=annotated_b64,
@@ -5570,23 +5624,13 @@ async def call_tool(
                         type="text", text="Error: No screenshot data returned"
                     )
                 ]
-            baseline_store.save_baseline(
-                key, base64.b64decode(screenshot_b64)
-            )
-            return [
-                types.TextContent(
-                    type="text", text=f"Baseline saved: '{key}'"
-                )
-            ]
+            baseline_store.save_baseline(key, base64.b64decode(screenshot_b64))
+            return [types.TextContent(type="text", text=f"Baseline saved: '{key}'")]
 
         elif name == "sdk_screenshot_baseline_list":
             keys = baseline_store.list_baselines()
             if not keys:
-                return [
-                    types.TextContent(
-                        type="text", text="No baselines saved."
-                    )
-                ]
+                return [types.TextContent(type="text", text="No baselines saved.")]
             lines = [f"Saved baselines ({len(keys)}):"]
             for k in keys:
                 lines.append(f"  - {k}")
@@ -5624,11 +5668,9 @@ async def call_tool(
                 ]
 
             baseline_b64 = base64.b64encode(baseline_bytes).decode()
-            result = diff_screenshots(
-                baseline_b64, screenshot_b64, threshold=threshold
-            )
+            result = diff_screenshots(baseline_b64, screenshot_b64, threshold=threshold)
 
-            status = "PASSED" if result.passed else "FAILED"
+            status: str | None = "PASSED" if result.passed else "FAILED"
             summary = (
                 f"Visual diff: {status}\n"
                 f"Change: {result.change_percentage}% "
@@ -5813,7 +5855,9 @@ async def call_tool(
                         indent=2,
                     )
                     return [
-                        types.TextContent(type="text", text=f"{summary}\n{tile_summary}")
+                        types.TextContent(
+                            type="text", text=f"{summary}\n{tile_summary}"
+                        )
                     ]
 
         # =====================================================================
@@ -6583,9 +6627,7 @@ async def call_tool(
                     )
                 ]
             return [
-                types.TextContent(
-                    type="text", text=_format_wait_result(response.data)
-                )
+                types.TextContent(type="text", text=_format_wait_result(response.data))
             ]
 
         elif name == "ui_wait_for_network_request":
@@ -6605,9 +6647,7 @@ async def call_tool(
                     )
                 ]
             return [
-                types.TextContent(
-                    type="text", text=_format_wait_result(response.data)
-                )
+                types.TextContent(type="text", text=_format_wait_result(response.data))
             ]
 
         # =============================================================
@@ -6629,16 +6669,19 @@ async def call_tool(
             response = await ui_client.sdk_list_bookmarks()
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            bookmarks = response.data or []
+            bookmarks: Any = response.data or []
             if not bookmarks:
                 return [types.TextContent(type="text", text="No bookmarks saved.")]
             if isinstance(bookmarks, list):
                 return [
                     types.TextContent(
-                        type="text", text=f"Bookmarks: {', '.join(str(b) for b in bookmarks)}"
+                        type="text",
+                        text=f"Bookmarks: {', '.join(str(b) for b in bookmarks)}",
                     )
                 ]
-            return [types.TextContent(type="text", text=json.dumps(bookmarks, indent=2))]
+            return [
+                types.TextContent(type="text", text=json.dumps(bookmarks, indent=2))
+            ]
 
         elif name == "sdk_delete_bookmark":
             bookmark_name = arguments["name"]
@@ -6754,14 +6797,18 @@ async def call_tool(
                         f"Modified: {len(changes.get('modified', []))}",
                     )
                 ]
-            return [types.TextContent(type="text", text="Timed out waiting for change.")]
+            return [
+                types.TextContent(type="text", text="Timed out waiting for change.")
+            ]
 
         elif name == "sdk_scoped_diff":
             scope = arguments["scope"]
             body_req: dict[str, Any] = {"scope": scope}
             if "from_bookmark" in arguments:
                 body_req["fromBookmark"] = arguments["from_bookmark"]
-            response = await ui_client.sdk_scoped_diff(scope, arguments.get("from_bookmark"))
+            response = await ui_client.sdk_scoped_diff(
+                scope, arguments.get("from_bookmark")
+            )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
             data = response.data or {}
@@ -6781,9 +6828,13 @@ async def call_tool(
             response = await ui_client.sdk_get_bookmark(bookmark_name)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            data = response.data
+            data = response.data or {}
             if not data:
-                return [types.TextContent(type="text", text=f"Bookmark '{bookmark_name}' not found.")]
+                return [
+                    types.TextContent(
+                        type="text", text=f"Bookmark '{bookmark_name}' not found."
+                    )
+                ]
             elements = data.get("snapshot", {}).get("elements", [])
             return [
                 types.TextContent(
@@ -6796,7 +6847,7 @@ async def call_tool(
             response = await ui_client.sdk_categorize_last_diff()
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            data = response.data
+            data = response.data or {}
             if not data:
                 return [
                     types.TextContent(
@@ -6832,7 +6883,9 @@ async def call_tool(
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
             data = response.data or {}
             lines = ["Structured change analysis:"]
-            lines.append(f"  Has structured data: {data.get('hasStructuredData', False)}")
+            lines.append(
+                f"  Has structured data: {data.get('hasStructuredData', False)}"
+            )
             tables = data.get("tableChanges", [])
             lists = data.get("listChanges", [])
             if tables:
@@ -6912,10 +6965,13 @@ async def call_tool(
             if isinstance(bookmarks, list):
                 return [
                     types.TextContent(
-                        type="text", text=f"Bookmarks: {', '.join(str(b) for b in bookmarks)}"
+                        type="text",
+                        text=f"Bookmarks: {', '.join(str(b) for b in bookmarks)}",
                     )
                 ]
-            return [types.TextContent(type="text", text=json.dumps(bookmarks, indent=2))]
+            return [
+                types.TextContent(type="text", text=json.dumps(bookmarks, indent=2))
+            ]
 
         elif name == "ui_delete_bookmark":
             bookmark_name = arguments["name"]
@@ -7016,7 +7072,9 @@ async def call_tool(
                 options["timeout"] = arguments["timeout"]
             if "poll_interval" in arguments:
                 options["pollInterval"] = arguments["poll_interval"]
-            response = await ui_client.control_wait_for_change(predicate, options or None)
+            response = await ui_client.control_wait_for_change(
+                predicate, options or None
+            )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
             data = response.data or {}
@@ -7031,11 +7089,15 @@ async def call_tool(
                         f"Modified: {len(changes.get('modified', []))}",
                     )
                 ]
-            return [types.TextContent(type="text", text="Timed out waiting for change.")]
+            return [
+                types.TextContent(type="text", text="Timed out waiting for change.")
+            ]
 
         elif name == "ui_scoped_diff":
             scope = arguments["scope"]
-            response = await ui_client.control_scoped_diff(scope, arguments.get("from_bookmark"))
+            response = await ui_client.control_scoped_diff(
+                scope, arguments.get("from_bookmark")
+            )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
             data = response.data or {}
@@ -7055,9 +7117,13 @@ async def call_tool(
             response = await ui_client.control_get_bookmark(bookmark_name)
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            data = response.data
+            data = response.data or {}
             if not data:
-                return [types.TextContent(type="text", text=f"Bookmark '{bookmark_name}' not found.")]
+                return [
+                    types.TextContent(
+                        type="text", text=f"Bookmark '{bookmark_name}' not found."
+                    )
+                ]
             elements = data.get("snapshot", {}).get("elements", [])
             return [
                 types.TextContent(
@@ -7070,7 +7136,7 @@ async def call_tool(
             response = await ui_client.control_categorize_last_diff()
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            data = response.data
+            data = response.data or {}
             if not data:
                 return [
                     types.TextContent(
@@ -7106,7 +7172,9 @@ async def call_tool(
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
             data = response.data or {}
             lines = ["Structured change analysis:"]
-            lines.append(f"  Has structured data: {data.get('hasStructuredData', False)}")
+            lines.append(
+                f"  Has structured data: {data.get('hasStructuredData', False)}"
+            )
             tables = data.get("tableChanges", [])
             lists = data.get("listChanges", [])
             if tables:
@@ -7166,7 +7234,9 @@ async def call_tool(
             response = await ui_client.control_undo_state()
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [types.TextContent(type="text", text=_format_undo_state(response.data))]
+            return [
+                types.TextContent(type="text", text=_format_undo_state(response.data))
+            ]
 
         elif name == "ui_undo":
             response = await ui_client.control_undo()
@@ -7190,7 +7260,9 @@ async def call_tool(
             response = await ui_client.sdk_undo_state()
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            return [types.TextContent(type="text", text=_format_undo_state(response.data))]
+            return [
+                types.TextContent(type="text", text=_format_undo_state(response.data))
+            ]
 
         elif name == "sdk_undo":
             response = await ui_client.sdk_undo()

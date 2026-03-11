@@ -134,7 +134,9 @@ class TestAnnotateScreenshot:
         screenshot = _make_screenshot()
         elements = [
             _make_element("input-email", type="input", validation_valid=False),
-            _make_element("input-name", type="input", validation_valid=True, x=10, y=60),
+            _make_element(
+                "input-name", type="input", validation_valid=True, x=10, y=60
+            ),
             _make_element("btn-submit", type="button", x=10, y=100),
         ]
         rm = FakeRefManager()
@@ -603,7 +605,7 @@ class TestExtractModalContext:
         assert rect is None
 
     def test_empty_active_modals(self) -> None:
-        snapshot = {"modalStack": {"activeModals": []}}
+        snapshot: dict[str, Any] = {"modalStack": {"activeModals": []}}
         ids, rect = _extract_modal_context(snapshot, [])
         assert ids is None
         assert rect is None
@@ -918,9 +920,7 @@ class TestBoxModelOverlay:
         rm = FakeRefManager()
         opts = AnnotationOptions(mode="boxmodel")
         # No design data — should not crash
-        result = annotate_screenshot(
-            screenshot, elements, 200, 150, rm, options=opts
-        )
+        result = annotate_screenshot(screenshot, elements, 200, 150, rm, options=opts)
         img = _decode_b64_image(result)
         assert img.width > 0
 
@@ -1000,9 +1000,7 @@ class TestAccessibilityOverlay:
         elements[1]["label"] = "OK"
         rm = FakeRefManager()
         opts = AnnotationOptions(mode="accessibility")
-        result = annotate_screenshot(
-            screenshot, elements, 400, 300, rm, options=opts
-        )
+        result = annotate_screenshot(screenshot, elements, 400, 300, rm, options=opts)
         img = _decode_b64_image(result)
         assert img.size == (400, 300)
 
@@ -1017,7 +1015,9 @@ class TestVisualDescription:
         elements = [
             _make_element("btn-1", type="button", x=100, y=20, w=80, h=30),
             _make_element("input-1", type="input", x=100, y=200, w=200, h=30),
-            _make_element("text-1", type="p", category="content", x=100, y=400, w=200, h=20),
+            _make_element(
+                "text-1", type="p", category="content", x=100, y=400, w=200, h=20
+            ),
         ]
         snapshot = {
             "viewport": {

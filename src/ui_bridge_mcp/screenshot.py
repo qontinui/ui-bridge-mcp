@@ -122,9 +122,7 @@ _STYLE_CONTENT = ("#78909C", "#78909C", "white", 1)  # blue-gray
 _STYLE_OFFSCREEN = ("#FFD600", "#FFD600", "black", 1)  # yellow
 
 
-def _element_style(
-    el: dict[str, Any], mode: str
-) -> tuple[str, str, str, int]:
+def _element_style(el: dict[str, Any], mode: str) -> tuple[str, str, str, int]:
     """Determine annotation style for an element based on mode and state."""
     state = el.get("state", {})
     category = el.get("category", "interactive")
@@ -300,9 +298,7 @@ def annotate_screenshot(
     modal_element_ids: set[str] | None = None
     modal_rect: dict[str, float] | None = None
     if options.mode == "modal" and snapshot:
-        modal_element_ids, modal_rect = _extract_modal_context(
-            snapshot, elements
-        )
+        modal_element_ids, modal_rect = _extract_modal_context(snapshot, elements)
 
     # Modal dimming overlay
     if options.mode == "modal" and modal_rect:
@@ -312,22 +308,16 @@ def annotate_screenshot(
 
     # Box model overlay (draws before element rectangles for layering)
     if options.mode == "boxmodel":
-        draw_box_model_overlay(
-            draw, elements, design_data, scale_x, scale_y, font
-        )
+        draw_box_model_overlay(draw, elements, design_data, scale_x, scale_y, font)
 
     # Accessibility overlay
     if options.mode == "accessibility":
-        draw_accessibility_overlay(
-            draw, elements, scale_x, scale_y, font
-        )
+        draw_accessibility_overlay(draw, elements, scale_x, scale_y, font)
 
     # Annotate elements (skip for boxmodel — box model draws its own overlays)
     if options.mode != "boxmodel":
         for el in elements:
-            if not _should_annotate(
-                el, options.mode, highlight_ids, modal_element_ids
-            ):
+            if not _should_annotate(el, options.mode, highlight_ids, modal_element_ids):
                 continue
 
             state = el.get("state", {})
@@ -354,22 +344,16 @@ def annotate_screenshot(
             tw = text_bbox[2] - text_bbox[0]
             th = text_bbox[3] - text_bbox[1]
             label_y = max(y - th - 4, 0)
-            draw.rectangle(
-                (x, label_y, x + tw + 4, label_y + th + 2), fill=fill_color
-            )
+            draw.rectangle((x, label_y, x + tw + 4, label_y + th + 2), fill=fill_color)
             draw.text((x + 2, label_y), ref, fill=text_color, font=font)
 
     # Relationship connector lines (drawn on top of elements)
     if options.mode == "relationships" and snapshot:
-        _draw_relationship_lines(
-            draw, elements, snapshot, scale_x, scale_y, font
-        )
+        _draw_relationship_lines(draw, elements, snapshot, scale_x, scale_y, font)
 
     # Viewport / scroll indicators (drawn on any mode if snapshot has viewport)
     if snapshot and snapshot.get("viewport"):
-        _draw_viewport_indicators(
-            draw, img, snapshot, elements, scale_x, scale_y, font
-        )
+        _draw_viewport_indicators(draw, img, snapshot, elements, scale_x, scale_y, font)
 
     # Crop
     img = _apply_crop(img, options.crop, snapshot, scale_x, scale_y, modal_rect)
@@ -795,9 +779,7 @@ def draw_box_model_overlay(
                 (x + w + 2, y, x + w + tw + 6, y + th + 4),
                 fill=(0, 0, 0, 180),
             )
-            draw.text(
-                (x + w + 4, y + 2), label, fill=(173, 216, 230), font=font
-            )
+            draw.text((x + w + 4, y + 2), label, fill=(173, 216, 230), font=font)
 
 
 def _parse_px(value: str) -> float:
@@ -977,8 +959,7 @@ def generate_visual_description(
     visible_elements = [
         el
         for el in elements
-        if el.get("state", {}).get("visible", True)
-        and el.get("state", {}).get("rect")
+        if el.get("state", {}).get("visible", True) and el.get("state", {}).get("rect")
     ]
 
     lines: list[str] = []
@@ -1016,9 +997,7 @@ def generate_visual_description(
     interactive = sum(
         1 for el in visible_elements if el.get("category") == "interactive"
     )
-    content = sum(
-        1 for el in visible_elements if el.get("category") == "content"
-    )
+    content = sum(1 for el in visible_elements if el.get("category") == "content")
     lines.append(f"\nInteractive: {interactive}, Content: {content}")
 
     # Modal status
@@ -1425,9 +1404,7 @@ def diff_screenshots(
     )
 
 
-def _find_changed_regions(
-    mask: Any, grid_size: int = 32
-) -> list[dict[str, int]]:
+def _find_changed_regions(mask: Any, grid_size: int = 32) -> list[dict[str, int]]:
     """Find bounding boxes of changed regions using a grid scan."""
     mask_data = mask.load()
     w, h = mask.size
@@ -1564,9 +1541,7 @@ def create_before_after(
 
         # After label
         x_after = img_before.width + divider
-        draw.rectangle(
-            (x_after, 0, total_w, label_height), fill=(33, 33, 33)
-        )
+        draw.rectangle((x_after, 0, total_w, label_height), fill=(33, 33, 33))
         draw.text((x_after + 8, 4), "AFTER", fill="white", font=font)
         result.paste(img_after, (x_after, label_height))
 

@@ -158,7 +158,9 @@ class UIBridgeClient:
         """Read the current system clipboard content."""
         return await self._request("GET", "/ui-bridge/control/clipboard")
 
-    async def control_clipboard_write(self, text: str, html: str | None = None) -> UIBridgeResponse:
+    async def control_clipboard_write(
+        self, text: str, html: str | None = None
+    ) -> UIBridgeResponse:
         """Write text to the system clipboard."""
         data: dict[str, Any] = {"text": text}
         if html is not None:
@@ -445,7 +447,9 @@ class UIBridgeClient:
         """Read the current system clipboard content via SDK endpoint."""
         return await self._request("GET", "/ui-bridge/sdk/clipboard")
 
-    async def sdk_clipboard_write(self, text: str, html: str | None = None) -> UIBridgeResponse:
+    async def sdk_clipboard_write(
+        self, text: str, html: str | None = None
+    ) -> UIBridgeResponse:
         """Write text to the system clipboard via SDK endpoint."""
         data: dict[str, Any] = {"text": text}
         if html is not None:
@@ -995,9 +999,7 @@ class UIBridgeClient:
 
     async def sdk_network_requests_in_flight(self) -> UIBridgeResponse:
         """Show currently in-flight network requests from the connected SDK app."""
-        return await self._request(
-            "GET", "/ui-bridge/sdk/network-requests/in-flight"
-        )
+        return await self._request("GET", "/ui-bridge/sdk/network-requests/in-flight")
 
     async def sdk_wait_for_network_request(
         self,
@@ -1259,9 +1261,7 @@ class UIBridgeClient:
         Args:
             name: Bookmark name to delete.
         """
-        return await self._request(
-            "DELETE", f"/ui-bridge/control/ai/bookmark/{name}"
-        )
+        return await self._request("DELETE", f"/ui-bridge/control/ai/bookmark/{name}")
 
     async def control_diff_from_bookmark(self, name: str) -> UIBridgeResponse:
         """Diff current UI state against a saved bookmark (control mode).
@@ -1269,9 +1269,7 @@ class UIBridgeClient:
         Args:
             name: Bookmark name to diff against.
         """
-        return await self._request(
-            "GET", f"/ui-bridge/control/ai/bookmark/{name}/diff"
-        )
+        return await self._request("GET", f"/ui-bridge/control/ai/bookmark/{name}/diff")
 
     async def control_execute_with_diff(
         self, request: dict[str, Any]
@@ -1303,9 +1301,7 @@ class UIBridgeClient:
 
     async def control_categorize_last_diff(self) -> UIBridgeResponse:
         """Categorize the last computed diff (control mode)."""
-        return await self._request(
-            "GET", "/ui-bridge/control/ai/categorize-last-diff"
-        )
+        return await self._request("GET", "/ui-bridge/control/ai/categorize-last-diff")
 
     async def control_scoped_diff(
         self,
@@ -1321,21 +1317,15 @@ class UIBridgeClient:
         body: dict[str, Any] = {"scope": scope}
         if from_bookmark:
             body["fromBookmark"] = from_bookmark
-        return await self._request(
-            "POST", "/ui-bridge/control/ai/scoped-diff", body
-        )
+        return await self._request("POST", "/ui-bridge/control/ai/scoped-diff", body)
 
-    async def control_summarize_diff(
-        self, body: dict[str, Any]
-    ) -> UIBridgeResponse:
+    async def control_summarize_diff(self, body: dict[str, Any]) -> UIBridgeResponse:
         """Get a budget-aware summary of UI changes (control mode).
 
         Args:
             body: Request body with budget, fromBookmark, includeCategory.
         """
-        return await self._request(
-            "POST", "/ui-bridge/control/ai/summarize-diff", body
-        )
+        return await self._request("POST", "/ui-bridge/control/ai/summarize-diff", body)
 
     async def control_structured_changes(
         self, body: dict[str, Any] | None = None
@@ -1351,9 +1341,7 @@ class UIBridgeClient:
 
     async def control_enable_change_buffer(self) -> UIBridgeResponse:
         """Enable change buffering (control mode)."""
-        return await self._request(
-            "POST", "/ui-bridge/control/ai/change-buffer/enable"
-        )
+        return await self._request("POST", "/ui-bridge/control/ai/change-buffer/enable")
 
     async def control_disable_change_buffer(self) -> UIBridgeResponse:
         """Disable change buffering (control mode)."""
@@ -1363,15 +1351,11 @@ class UIBridgeClient:
 
     async def control_drain_change_buffer(self) -> UIBridgeResponse:
         """Drain the change buffer (control mode)."""
-        return await self._request(
-            "POST", "/ui-bridge/control/ai/change-buffer/drain"
-        )
+        return await self._request("POST", "/ui-bridge/control/ai/change-buffer/drain")
 
     async def control_change_buffer_size(self) -> UIBridgeResponse:
         """Get change buffer size and enabled status (control mode)."""
-        return await self._request(
-            "GET", "/ui-bridge/control/ai/change-buffer/size"
-        )
+        return await self._request("GET", "/ui-bridge/control/ai/change-buffer/size")
 
     # -------------------------------------------------------------------------
     # SDK Mode - Change Tracking (/ui-bridge/sdk/ai/*)
@@ -1405,9 +1389,7 @@ class UIBridgeClient:
         Args:
             name: Bookmark name to delete.
         """
-        return await self._request(
-            "DELETE", f"/ui-bridge/sdk/ai/bookmark/{name}"
-        )
+        return await self._request("DELETE", f"/ui-bridge/sdk/ai/bookmark/{name}")
 
     async def sdk_diff_from_bookmark(self, name: str) -> UIBridgeResponse:
         """Diff current UI state against a saved bookmark (SDK mode).
@@ -1415,13 +1397,9 @@ class UIBridgeClient:
         Args:
             name: Bookmark name to diff against.
         """
-        return await self._request(
-            "GET", f"/ui-bridge/sdk/ai/bookmark/{name}/diff"
-        )
+        return await self._request("GET", f"/ui-bridge/sdk/ai/bookmark/{name}/diff")
 
-    async def sdk_execute_with_diff(
-        self, request: dict[str, Any]
-    ) -> UIBridgeResponse:
+    async def sdk_execute_with_diff(self, request: dict[str, Any]) -> UIBridgeResponse:
         """Execute an element action and capture what changed (SDK mode).
 
         Args:
@@ -1443,15 +1421,11 @@ class UIBridgeClient:
         body: dict[str, Any] = {"predicate": predicate}
         if options:
             body["options"] = options
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/wait-for-change", body
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/wait-for-change", body)
 
     async def sdk_categorize_last_diff(self) -> UIBridgeResponse:
         """Categorize the last computed diff (SDK mode)."""
-        return await self._request(
-            "GET", "/ui-bridge/sdk/ai/categorize-last-diff"
-        )
+        return await self._request("GET", "/ui-bridge/sdk/ai/categorize-last-diff")
 
     async def sdk_scoped_diff(
         self,
@@ -1467,21 +1441,15 @@ class UIBridgeClient:
         body: dict[str, Any] = {"scope": scope}
         if from_bookmark:
             body["fromBookmark"] = from_bookmark
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/scoped-diff", body
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/scoped-diff", body)
 
-    async def sdk_summarize_diff(
-        self, body: dict[str, Any]
-    ) -> UIBridgeResponse:
+    async def sdk_summarize_diff(self, body: dict[str, Any]) -> UIBridgeResponse:
         """Get a budget-aware summary of UI changes (SDK mode).
 
         Args:
             body: Request body with budget, fromBookmark, includeCategory.
         """
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/summarize-diff", body
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/summarize-diff", body)
 
     async def sdk_structured_changes(
         self, body: dict[str, Any] | None = None
@@ -1491,33 +1459,23 @@ class UIBridgeClient:
         Args:
             body: Optional request body with fromBookmark.
         """
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/structured-changes", body
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/structured-changes", body)
 
     async def sdk_enable_change_buffer(self) -> UIBridgeResponse:
         """Enable change buffering (SDK mode)."""
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/change-buffer/enable"
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/change-buffer/enable")
 
     async def sdk_disable_change_buffer(self) -> UIBridgeResponse:
         """Disable change buffering (SDK mode)."""
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/change-buffer/disable"
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/change-buffer/disable")
 
     async def sdk_drain_change_buffer(self) -> UIBridgeResponse:
         """Drain the change buffer (SDK mode)."""
-        return await self._request(
-            "POST", "/ui-bridge/sdk/ai/change-buffer/drain"
-        )
+        return await self._request("POST", "/ui-bridge/sdk/ai/change-buffer/drain")
 
     async def sdk_change_buffer_size(self) -> UIBridgeResponse:
         """Get change buffer size and enabled status (SDK mode)."""
-        return await self._request(
-            "GET", "/ui-bridge/sdk/ai/change-buffer/size"
-        )
+        return await self._request("GET", "/ui-bridge/sdk/ai/change-buffer/size")
 
     # -------------------------------------------------------------------------
     # Agent Mode - Annotated Screenshots
