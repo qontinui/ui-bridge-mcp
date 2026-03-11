@@ -6803,9 +6803,6 @@ async def call_tool(
 
         elif name == "sdk_scoped_diff":
             scope = arguments["scope"]
-            body_req: dict[str, Any] = {"scope": scope}
-            if "from_bookmark" in arguments:
-                body_req["fromBookmark"] = arguments["from_bookmark"]
             response = await ui_client.sdk_scoped_diff(
                 scope, arguments.get("from_bookmark")
             )
