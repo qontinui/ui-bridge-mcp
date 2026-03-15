@@ -1158,9 +1158,9 @@ class DeltaEncoder:
             "changed_tiles": changed_tiles,
             "total_tiles": total_tiles,
             "changed_count": len(changed_tiles),
-            "change_ratio": round(len(changed_tiles) / total_tiles, 3)
-            if total_tiles
-            else 0,
+            "change_ratio": (
+                round(len(changed_tiles) / total_tiles, 3) if total_tiles else 0
+            ),
             "is_first": is_first,
             "image_width": iw,
             "image_height": ih,
@@ -1366,10 +1366,10 @@ def diff_screenshots(
 
     for y_px in range(img1.height):
         for x_px in range(img1.width):
-            r, g, b = diff_data[x_px, y_px]  # type: ignore[index,misc]
+            r, g, b = diff_data[x_px, y_px]
             if max(r, g, b) > pixel_tolerance:
                 changed_pixels += 1
-                mask_data[x_px, y_px] = 255  # type: ignore[index]
+                mask_data[x_px, y_px] = 255
 
     change_pct = changed_pixels / total_pixels if total_pixels > 0 else 0.0
 

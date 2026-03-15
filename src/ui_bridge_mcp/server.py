@@ -7790,21 +7790,21 @@ async def call_tool(
             width = data.get("width", 0)
             height = data.get("height", 0)
             media_type = data.get("mediaType", "image/png")
-            result: list[types.TextContent | types.ImageContent] = [
+            snapshot_result: list[types.TextContent | types.ImageContent] = [
                 types.TextContent(
                     type="text",
                     text=f"Snapshot of {element_id}: {width}×{height} ({media_type})",
                 ),
             ]
             if img_data and media_type == "image/png":
-                result.append(
+                snapshot_result.append(
                     types.ImageContent(
                         type="image",
                         data=img_data,
                         mimeType="image/png",
                     )
                 )
-            return result
+            return snapshot_result
 
         elif name == "sdk_media_compare":
             response = await ui_client.sdk_media_compare(
@@ -7849,8 +7849,10 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            results = response.data if isinstance(response.data, list) else []
-            if not results:
+            batch_results: list[Any] = (
+                response.data if isinstance(response.data, list) else []
+            )
+            if not batch_results:
                 return [
                     types.TextContent(
                         type="text", text="No media elements could be captured."
@@ -7859,10 +7861,11 @@ async def call_tool(
 
             batch_items: list[types.TextContent | types.ImageContent] = [
                 types.TextContent(
-                    type="text", text=f"## Batch Analysis: {len(results)} element(s)\n"
+                    type="text",
+                    text=f"## Batch Analysis: {len(batch_results)} element(s)\n",
                 ),
             ]
-            for i, entry in enumerate(results):
+            for i, entry in enumerate(batch_results):
                 image = entry.get("image", {})
                 context = entry.get("context", {})
                 el_id = context.get("elementId", f"media-{i}")
@@ -7932,21 +7935,23 @@ async def call_tool(
             )
             if not response.success:
                 return [types.TextContent(type="text", text=f"Error: {response.error}")]
-            results = response.data if isinstance(response.data, list) else []
-            if not results:
+            audit_results: list[Any] = (
+                response.data if isinstance(response.data, list) else []
+            )
+            if not audit_results:
                 return [
                     types.TextContent(
                         type="text", text="No visible media elements found on the page."
                     )
                 ]
 
-            items: list[types.TextContent | types.ImageContent] = [
+            audit_items: list[types.TextContent | types.ImageContent] = [
                 types.TextContent(
                     type="text",
-                    text=f"## Page Media Audit: {len(results)} element(s)\n",
+                    text=f"## Page Media Audit: {len(audit_results)} element(s)\n",
                 ),
             ]
-            for i, entry in enumerate(results):
+            for i, entry in enumerate(audit_results):
                 image = entry.get("image", {})
                 context = entry.get("context", {})
                 el_id = context.get("elementId", f"media-{i}")
@@ -7967,15 +7972,15 @@ async def call_tool(
                 if parent:
                     label += f" [{parent}]"
 
-                items.append(types.TextContent(type="text", text=label))
+                audit_items.append(types.TextContent(type="text", text=label))
                 img_data3 = image.get("data", "")
                 if img_data3:
-                    items.append(
+                    audit_items.append(
                         types.ImageContent(
                             type="image", data=img_data3, mimeType="image/png"
                         )
                     )
-            return items
+            return audit_items
 
         # DOM Query & JS Evaluation
         elif name == "ui_query_selector":
