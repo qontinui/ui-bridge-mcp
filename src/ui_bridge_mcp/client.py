@@ -742,6 +742,29 @@ class UIBridgeClient:
             "POST", "/ui-bridge/control/wait-for-idle", body, timeout=http_timeout
         )
 
+    async def control_diagnose_stuck(
+        self,
+        observation_window_ms: int = 3000,
+    ) -> UIBridgeResponse:
+        """Diagnose whether the runner is stuck on a loading screen.
+
+        Uses native screenshot capture — works even if React hasn't mounted.
+
+        Args:
+            observation_window_ms: How long to observe in ms. Defaults to 3000.
+        """
+        body: dict[str, Any] = {
+            "observationWindowMs": observation_window_ms,
+        }
+        # HTTP timeout must exceed the observation window + screenshot capture + DOM probes
+        http_timeout = (observation_window_ms / 1000) + 15.0
+        return await self._request(
+            "POST",
+            "/ui-bridge/control/diagnose-stuck",
+            body,
+            timeout=http_timeout,
+        )
+
     async def control_wait_for_signal(
         self,
         signal: str,
@@ -833,6 +856,30 @@ class UIBridgeClient:
         http_timeout = (timeout / 1000) + 10.0
         return await self._request(
             "POST", "/ui-bridge/sdk/wait-for-idle", body, timeout=http_timeout
+        )
+
+    async def sdk_diagnose_stuck(
+        self,
+        observation_window_ms: int = 3000,
+        dom_mutation_threshold: int = 3,
+    ) -> UIBridgeResponse:
+        """Diagnose whether the connected SDK app is stuck on a loading screen.
+
+        Args:
+            observation_window_ms: How long to observe in ms. Defaults to 3000.
+            dom_mutation_threshold: Fewer DOM mutations than this = not changing.
+                Defaults to 3.
+        """
+        body: dict[str, Any] = {
+            "observationWindowMs": observation_window_ms,
+            "domMutationThreshold": dom_mutation_threshold,
+        }
+        http_timeout = (observation_window_ms / 1000) + 15.0
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/diagnose-stuck",
+            body,
+            timeout=http_timeout,
         )
 
     async def sdk_wait_for_signal(

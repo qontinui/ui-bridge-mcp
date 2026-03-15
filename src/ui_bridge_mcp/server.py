@@ -3180,6 +3180,56 @@ reached.""",
             "required": ["targets"],
         },
     ),
+    types.Tool(
+        name="diagnose_stuck_screen",
+        description="""Diagnose whether the connected app is stuck on a loading screen.
+
+Observes the app for a short window (default 3s) and checks:
+- Are loading indicators (spinners, skeletons, progress bars) visible?
+- Is the DOM changing (new content being rendered)?
+- Are network requests completing or hanging?
+
+Returns a verdict:
+- 'stuck': Loading indicators are visible but nothing is changing — the app
+  is frozen on a loading screen.
+- 'loading': Loading indicators are visible and the DOM is actively changing —
+  normal loading in progress.
+- 'idle': No loading indicators detected — the app is in a resting state.
+- 'unknown': Ambiguous signals.
+
+Includes detailed evidence (what indicators were found, DOM mutation count,
+pending network requests) and suggestions for recovery.
+
+Automatically detects the connection mode: if an SDK app is connected,
+diagnoses the SDK app; otherwise diagnoses the runner's own UI.
+
+Use this when:
+- The app seems to be taking too long to load
+- You suspect the app may be stuck after an action
+- You want to verify the app has fully loaded before proceeding""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "observation_window_ms": {
+                    "type": "number",
+                    "description": (
+                        "How long to observe in milliseconds. Longer = more "
+                        "confident. Default: 3000 (3 seconds)."
+                    ),
+                    "default": 3000,
+                },
+                "dom_mutation_threshold": {
+                    "type": "number",
+                    "description": (
+                        "Minimum DOM mutations to consider the page 'changing'. "
+                        "Fewer than this = static. Default: 3."
+                    ),
+                    "default": 3,
+                },
+            },
+            "required": [],
+        },
+    ),
     # -------------------------------------------------------------------------
     # Network Request Monitoring
     # -------------------------------------------------------------------------
@@ -6539,6 +6589,109 @@ async def call_tool(
                         t_stable = t.get("stableForMs", 0)
                         lines.append(f"  {t_name}: stable {t_stable}ms")
             return [types.TextContent(type="text", text="\n".join(lines))]
+
+        # =====================================================================
+        # Stuck Screen Diagnosis
+        # =====================================================================
+
+        elif name == "diagnose_stuck_screen":
+            observation_window_ms = arguments.get("observation_window_ms", 3000)
+            dom_mutation_threshold = arguments.get("dom_mutation_threshold", 3)
+            # Auto-detect mode
+            sdk_check = await ui_client.sdk_status()
+            use_sdk = (
+                sdk_check.success
+                and sdk_check.data
+                and sdk_check.data.get("connected", False)
+            )
+            if use_sdk:
+                response = await ui_client.sdk_diagnose_stuck(
+                    observation_window_ms=observation_window_ms,
+                    dom_mutation_threshold=dom_mutation_threshold,
+                )
+            else:
+                response = await ui_client.control_diagnose_stuck(
+                    observation_window_ms=observation_window_ms,
+                )
+            if not response.success:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=f"Diagnosis failed: {response.error}",
+                    )
+                ]
+            data = response.data or {}
+            verdict = data.get("verdict", "unknown")
+            confidence = data.get("confidence", 0)
+            summary = data.get("summary", "")
+            evidence = data.get("evidence", {})
+            suggestions = data.get("suggestions", [])
+            obs_ms = data.get("observationWindowMs", 0)
+            capture_source = data.get("captureSource", "unknown")
+            mode_label = "SDK app" if use_sdk else "Runner"
+
+            lines = [
+                f"Stuck Screen Diagnosis ({mode_label})",
+                f"Verdict: {verdict.upper()} (confidence: {confidence:.0%})",
+                "",
+                summary,
+            ]
+
+            # Evidence section
+            lines.append("")
+            similarity = evidence.get("screenshotSimilarity")
+            if similarity is not None:
+                lines.append(
+                    f"Screenshot similarity: {similarity:.1%} "
+                    f"(changed: {evidence.get('screenshotChanged', False)})"
+                )
+            lines.append(
+                f"UI Bridge responsive: {evidence.get('uiBridgeResponsive', False)}"
+            )
+
+            indicators = evidence.get("loadingIndicators", [])
+            if indicators:
+                lines.append(f"Loading indicators ({len(indicators)}):")
+                for ind in indicators[:5]:
+                    ind_type = ind.get("type", "unknown")
+                    ind_detail = (
+                        ind.get("selector")
+                        or ind.get("details")
+                        or ind.get("element")
+                        or ind_type
+                    )
+                    lines.append(f"  - [{ind_type}] {ind_detail}")
+                if len(indicators) > 5:
+                    lines.append(f"  ... +{len(indicators) - 5} more")
+
+            lines.append(
+                f"Network: {'busy' if evidence.get('networkBusy') else 'idle'} "
+                f"({evidence.get('pendingNetworkRequests', 0)} pending)"
+            )
+            lines.append(f"Capture source: {capture_source} | Observation window: {obs_ms}ms")
+
+            if suggestions:
+                lines.append("")
+                lines.append("Suggestions:")
+                for s in suggestions:
+                    lines.append(f"  - {s}")
+
+            diagnosis_result: list[types.TextContent | types.ImageContent] = [
+                types.TextContent(type="text", text="\n".join(lines))
+            ]
+
+            # Include screenshot as visual evidence
+            screenshot_b64 = data.get("screenshot", "")
+            if screenshot_b64:
+                diagnosis_result.append(
+                    types.ImageContent(
+                        type="image",
+                        data=screenshot_b64,
+                        mimeType="image/png",
+                    )
+                )
+
+            return diagnosis_result
 
         # =====================================================================
         # Network Request Monitoring Tools
