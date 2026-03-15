@@ -1529,7 +1529,7 @@ class UIBridgeClient:
     # -------------------------------------------------------------------------
 
     async def control_annotated_screenshot(
-        self, monitor: int | None = None
+        self, monitor: int | None = None, runner: bool = False
     ) -> UIBridgeResponse:
         """Get a screenshot of the runner's monitor for annotation.
 
@@ -1537,11 +1537,53 @@ class UIBridgeClient:
 
         Args:
             monitor: Monitor index (0-based). Defaults to primary.
+            runner: If True, capture the runner's Tauri window instead of monitor.
         """
         params: dict[str, str] | None = None
         if monitor is not None:
-            params = {"monitor": str(monitor)}
+            params = params or {}
+            params["monitor"] = str(monitor)
+        if runner:
+            params = params or {}
+            params["runner"] = "true"
         return await self._get("/ui-bridge/control/annotated-screenshot", params=params)
+
+    async def control_query_selector(
+        self,
+        selector: str,
+        action: str | None = None,
+        index: int | None = None,
+    ) -> UIBridgeResponse:
+        """Query DOM elements by CSS selector.
+
+        Args:
+            selector: CSS selector to query.
+            action: Optional action to perform on matched element(s).
+            index: Index of matched element to target (0-based).
+        """
+        body: dict[str, Any] = {"selector": selector}
+        if action is not None:
+            body["action"] = action
+        if index is not None:
+            body["index"] = index
+        return await self._request(
+            "POST", "/ui-bridge/sdk/control/query-selector", body
+        )
+
+    async def control_page_evaluate(self, expression: str) -> UIBridgeResponse:
+        """Evaluate a JavaScript expression in the webview.
+
+        The expression is validated by a regex on the frontend side.
+        Only safe property access expressions are allowed.
+
+        Args:
+            expression: JavaScript expression to evaluate.
+        """
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/control/page-evaluate",
+            {"expression": expression},
+        )
 
     async def sdk_screenshot_raw(self, monitor: int | None = None) -> UIBridgeResponse:
         """Get raw screenshot data from the SDK app's monitor.
@@ -1555,6 +1597,154 @@ class UIBridgeClient:
         if monitor is not None:
             params = {"monitor": str(monitor)}
         return await self._request("GET", "/ui-bridge/sdk/screenshot", params=params)
+
+    # -------------------------------------------------------------------------
+    # SDK Mode - Media Discovery & Analysis (/ui-bridge/sdk/ai/media/*)
+    # -------------------------------------------------------------------------
+
+    async def sdk_media_find(
+        self,
+        media_type: str | None = None,
+        broken_only: bool = False,
+        missing_alt_only: bool = False,
+        src_pattern: str | None = None,
+        oversize_threshold: float | None = None,
+    ) -> UIBridgeResponse:
+        """Find media elements with optional filters.
+
+        Args:
+            media_type: Filter by type ('image', 'video', 'svg', 'canvas', 'picture').
+            broken_only: Only return media that failed to load.
+            missing_alt_only: Only return images missing alt text.
+            src_pattern: Regex pattern to match against source URL.
+            oversize_threshold: Filter images where natural/rendered ratio exceeds this.
+        """
+        body: dict[str, Any] = {"mediaOnly": True}
+        if media_type:
+            body["mediaType"] = media_type
+        if broken_only:
+            body["brokenOnly"] = True
+        if missing_alt_only:
+            body["missingAltOnly"] = True
+        if src_pattern:
+            body["srcPattern"] = src_pattern
+        if oversize_threshold is not None:
+            body["oversizeThreshold"] = oversize_threshold
+        return await self._request("POST", "/ui-bridge/sdk/ai/media/find", body)
+
+    async def sdk_media_audit_accessibility(self) -> UIBridgeResponse:
+        """Run an accessibility audit on media elements.
+
+        Returns images missing alt text, images with generic alt text,
+        and decorative images that should have empty alt.
+        """
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/media/audit/accessibility"
+        )
+
+    async def sdk_media_audit_performance(self) -> UIBridgeResponse:
+        """Run a performance audit on media elements.
+
+        Returns oversized images, images with large transfer sizes,
+        and below-fold images not using lazy loading.
+        """
+        return await self._request("POST", "/ui-bridge/sdk/ai/media/audit/performance")
+
+    async def sdk_media_snapshot(
+        self,
+        element_id: str,
+        max_size: int | None = None,
+    ) -> UIBridgeResponse:
+        """Capture a visual snapshot of a media element as base64 PNG.
+
+        Args:
+            element_id: The media element ID to capture.
+            max_size: Maximum dimension in pixels (default: 512).
+        """
+        body: dict[str, Any] = {"elementId": element_id}
+        if max_size is not None:
+            body["maxSize"] = max_size
+        return await self._request("POST", "/ui-bridge/sdk/ai/media/snapshot", body)
+
+    async def sdk_media_compare(
+        self,
+        snapshot_a: dict[str, Any],
+        snapshot_b: dict[str, Any],
+    ) -> UIBridgeResponse:
+        """Compare two media snapshots pixel-by-pixel.
+
+        Args:
+            snapshot_a: First snapshot from sdk_media_snapshot.
+            snapshot_b: Second snapshot from sdk_media_snapshot.
+        """
+        return await self._request(
+            "POST",
+            "/ui-bridge/sdk/ai/media/compare",
+            {"snapshotA": snapshot_a, "snapshotB": snapshot_b},
+        )
+
+    async def sdk_media_analyze(
+        self,
+        element_id: str,
+        max_size: int | None = None,
+    ) -> UIBridgeResponse:
+        """Capture a media element's visual content + metadata for AI analysis.
+
+        Returns base64 PNG image data and structured context (alt text, src,
+        parent context, sibling labels, dimensions) formatted for direct use
+        with Claude's vision API.
+
+        Args:
+            element_id: The media element ID to analyze.
+            max_size: Maximum image dimension in pixels (default: 512).
+        """
+        body: dict[str, Any] = {"elementId": element_id}
+        if max_size is not None:
+            body["maxSize"] = max_size
+        return await self._request("POST", "/ui-bridge/sdk/ai/media/analyze", body)
+
+    async def sdk_media_analyze_batch(
+        self,
+        element_ids: list[str],
+        max_size: int | None = None,
+    ) -> UIBridgeResponse:
+        """Capture multiple media elements for comparison.
+
+        Args:
+            element_ids: List of media element IDs to analyze.
+            max_size: Maximum image dimension per element (default: 512).
+        """
+        body: dict[str, Any] = {"elementIds": element_ids}
+        if max_size is not None:
+            body["maxSize"] = max_size
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/media/analyze/batch", body
+        )
+
+    async def sdk_media_analyze_page(
+        self,
+        max_elements: int | None = None,
+        max_size: int | None = None,
+        include_context: bool = True,
+    ) -> UIBridgeResponse:
+        """Capture ALL visible media on the page for AI analysis.
+
+        Returns all visible media with context, enabling full-page visual
+        audits like "are all images appropriate and loading correctly?"
+
+        Args:
+            max_elements: Maximum number of elements to capture (default: 20).
+            max_size: Maximum image dimension per element (default: 512).
+            include_context: Include parent/sibling context (default: True).
+        """
+        body: dict[str, Any] = {}
+        if max_elements is not None:
+            body["maxElements"] = max_elements
+        if max_size is not None:
+            body["maxSize"] = max_size
+        if not include_context:
+            body["includeContext"] = False
+        return await self._request("POST", "/ui-bridge/sdk/ai/media/analyze/page", body)
 
     async def _get(
         self,

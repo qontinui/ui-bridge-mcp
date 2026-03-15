@@ -210,9 +210,11 @@ def format_action_error_info(response_data: dict[str, Any] | None) -> str:
                     event = err.get("event", {})
                     msg = event.get(
                         "message",
-                        event.get("args", [""])[0]
-                        if isinstance(event.get("args"), list)
-                        else "",
+                        (
+                            event.get("args", [""])[0]
+                            if isinstance(event.get("args"), list)
+                            else ""
+                        ),
                     )
                     if isinstance(msg, str) and len(msg) > 200:
                         msg = msg[:200] + "..."
@@ -227,9 +229,11 @@ def format_action_error_info(response_data: dict[str, Any] | None) -> str:
                     event = err.get("event", {})
                     msg = event.get(
                         "message",
-                        event.get("args", [""])[0]
-                        if isinstance(event.get("args"), list)
-                        else "",
+                        (
+                            event.get("args", [""])[0]
+                            if isinstance(event.get("args"), list)
+                            else ""
+                        ),
                     )
                     if isinstance(msg, str) and len(msg) > 200:
                         msg = msg[:200] + "..."
@@ -3862,6 +3866,235 @@ Returns the matched request details once it completes, or an error on timeout.""
         description="Execute redo in the connected SDK app. Uses the app's redo handler if available, otherwise dispatches Ctrl+Shift+Z.",
         inputSchema={"type": "object", "properties": {}},
     ),
+    # =========================================================================
+    # SDK Mode - Media Discovery & Analysis
+    # =========================================================================
+    types.Tool(
+        name="sdk_media_find",
+        description="""Find media elements (images, video, SVG, canvas) in the connected SDK app.
+
+Returns discovered media elements with metadata including source URL, alt text,
+dimensions, loading state, and oversize ratio. Supports filters for broken images,
+missing alt text, oversized images, and source URL patterns.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "media_type": {
+                    "type": "string",
+                    "description": "Filter by media type",
+                    "enum": [
+                        "image",
+                        "video",
+                        "svg",
+                        "canvas",
+                        "picture",
+                        "background-image",
+                    ],
+                },
+                "broken_only": {
+                    "type": "boolean",
+                    "description": "Only return media that failed to load",
+                    "default": False,
+                },
+                "missing_alt_only": {
+                    "type": "boolean",
+                    "description": "Only return images missing alt text",
+                    "default": False,
+                },
+                "src_pattern": {
+                    "type": "string",
+                    "description": "Regex pattern to match against source URL",
+                },
+                "oversize_threshold": {
+                    "type": "number",
+                    "description": "Filter images where natural/rendered ratio exceeds this value (default: 2.0)",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="sdk_media_audit_accessibility",
+        description="""Run an accessibility audit on media elements in the connected SDK app.
+
+Returns:
+- Images missing alt text entirely
+- Images with generic/unhelpful alt text (e.g., "image", "photo")
+- Decorative images that should have empty alt but don't""",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_media_audit_performance",
+        description="""Run a performance audit on media elements in the connected SDK app.
+
+Returns:
+- Oversized images (natural size much larger than rendered size)
+- Images with large transfer sizes (>500KB)
+- Below-fold images not using lazy loading""",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    types.Tool(
+        name="sdk_media_snapshot",
+        description="""Capture a visual snapshot of a specific media element as base64 PNG.
+
+Use this to get the actual visual content of an image, video frame, canvas,
+or SVG element for inspection or comparison.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The media element ID to capture",
+                },
+                "max_size": {
+                    "type": "integer",
+                    "description": "Maximum dimension in pixels (default: 512)",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="sdk_media_compare",
+        description="""Compare two media snapshots pixel-by-pixel.
+
+Returns whether the images are identical, the percentage of differing pixels,
+the bounding box of the diff region, and an optional diff image highlighting
+changes in red. Use this to detect visual regressions or content changes.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "snapshot_a": {
+                    "type": "object",
+                    "description": "First snapshot from sdk_media_snapshot",
+                },
+                "snapshot_b": {
+                    "type": "object",
+                    "description": "Second snapshot from sdk_media_snapshot",
+                },
+            },
+            "required": ["snapshot_a", "snapshot_b"],
+        },
+    ),
+    types.Tool(
+        name="sdk_media_analyze_batch",
+        description="""Capture multiple media elements for side-by-side comparison.
+
+Returns base64 PNG data + context for each element. Use this when you need
+to compare specific images — e.g., "compare these two chart thumbnails" or
+"are these product images showing the same item?".""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of media element IDs to analyze",
+                },
+                "max_size": {
+                    "type": "integer",
+                    "description": "Maximum image dimension per element in pixels (default: 512)",
+                },
+            },
+            "required": ["element_ids"],
+        },
+    ),
+    types.Tool(
+        name="ui_analyze_image",
+        description="""Capture a media element's visual content + context for AI vision analysis.
+
+Returns base64 PNG image data and structured context metadata (alt text, src,
+parent context, sibling labels, dimensions) formatted for direct use with
+Claude's vision API. The image data can be passed as an image content block
+for visual analysis like "what does this chart show?" or "is this logo correct?".""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "element_id": {
+                    "type": "string",
+                    "description": "The media element ID to analyze",
+                },
+                "max_size": {
+                    "type": "integer",
+                    "description": "Maximum image dimension in pixels (default: 512)",
+                },
+            },
+            "required": ["element_id"],
+        },
+    ),
+    types.Tool(
+        name="ui_audit_images",
+        description="""Capture ALL visible media on the page for AI visual audit.
+
+Returns base64 PNG data + context for every visible media element on the page,
+enabling prompts like "audit this page — are all images appropriate and loading
+correctly?" or "compare these product thumbnails for consistency".
+
+Each result includes the image data in Claude-compatible format plus structured
+context about the element's position, alt text, and surrounding content.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "max_elements": {
+                    "type": "integer",
+                    "description": "Maximum number of elements to capture (default: 20)",
+                },
+                "max_size": {
+                    "type": "integer",
+                    "description": "Maximum image dimension per element in pixels (default: 512)",
+                },
+            },
+        },
+    ),
+    types.Tool(
+        name="ui_query_selector",
+        description="""Query DOM elements by CSS selector.
+
+Returns matched elements with tagName, textContent, id, className, visible, and rect.
+Optionally perform an action (e.g., "click") on a matched element by index.
+
+Use this to inspect elements by CSS class or to find elements that aren't
+registered with the UI Bridge.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector to query (e.g., 'input.bg-bg-tertiary', '#my-id')",
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Optional action to perform on matched element (e.g., 'click')",
+                },
+                "index": {
+                    "type": "integer",
+                    "description": "Index of matched element to target (0-based). Required if action is specified.",
+                },
+            },
+            "required": ["selector"],
+        },
+    ),
+    types.Tool(
+        name="ui_page_evaluate",
+        description="""Evaluate a safe JavaScript expression in the runner's webview.
+
+Only property access expressions are allowed (validated by regex on the frontend).
+Use this for reading CSS computed styles, custom properties, or element state.
+
+Examples:
+- getComputedStyle(document.documentElement).getPropertyValue('--my-custom-prop')
+- document.querySelector('input').value
+- window.innerWidth""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "JavaScript expression to evaluate (property access only)",
+                },
+            },
+            "required": ["expression"],
+        },
+    ),
 ]
 
 
@@ -5455,9 +5688,9 @@ async def call_tool(
                 if design_resp.success:
                     design_data = (design_resp.data or {}).get("elements", [])
 
-            # Get screenshot
+            # Get screenshot (runner=True to capture Tauri window, not monitor)
             screenshot_resp = await ui_client.control_annotated_screenshot(
-                monitor=monitor
+                monitor=monitor, runner=True
             )
             if not screenshot_resp.success:
                 return [
@@ -5608,7 +5841,9 @@ async def call_tool(
                 ]
 
             screenshot_resp = (
-                await ui_client.control_annotated_screenshot(monitor=monitor)
+                await ui_client.control_annotated_screenshot(
+                    monitor=monitor, runner=True
+                )
                 if is_ui
                 else await ui_client.sdk_screenshot_raw(monitor=monitor)
             )
@@ -6668,7 +6903,9 @@ async def call_tool(
                 f"Network: {'busy' if evidence.get('networkBusy') else 'idle'} "
                 f"({evidence.get('pendingNetworkRequests', 0)} pending)"
             )
-            lines.append(f"Capture source: {capture_source} | Observation window: {obs_ms}ms")
+            lines.append(
+                f"Capture source: {capture_source} | Observation window: {obs_ms}ms"
+            )
 
             if suggestions:
                 lines.append("")
@@ -7431,6 +7668,343 @@ async def call_tool(
             executed = data.get("executed", False)
             msg = "Redo executed." if executed else "Redo was not available."
             return [types.TextContent(type="text", text=msg)]
+
+        # =================================================================
+        # SDK Mode - Media Discovery & Analysis
+        # =================================================================
+
+        elif name == "sdk_media_find":
+            response = await ui_client.sdk_media_find(
+                media_type=arguments.get("media_type"),
+                broken_only=arguments.get("broken_only", False),
+                missing_alt_only=arguments.get("missing_alt_only", False),
+                src_pattern=arguments.get("src_pattern"),
+                oversize_threshold=arguments.get("oversize_threshold"),
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            elements = data.get("elements", [])
+            lines = [f"Found {len(elements)} media element(s):", ""]
+            for el in elements:
+                meta = el.get("mediaMetadata", {})
+                media_type = meta.get("mediaType", "unknown")
+                src = meta.get("src", "")
+                alt = meta.get("altText", "")
+                state = meta.get("loadingState", "unknown")
+                w = meta.get("renderedWidth", 0)
+                h = meta.get("renderedHeight", 0)
+                ratio = meta.get("oversizeRatio")
+                el_id = el.get("id", "?")
+                src_short = src.split("/")[-1][:40] if src else "(no src)"
+                line = f"  [{media_type}] {el_id}: {src_short} ({w}×{h}, {state})"
+                if alt:
+                    line += f' alt="{alt[:30]}"'
+                if ratio and ratio > 1.5:
+                    line += f" ⚠ oversize {ratio:.1f}x"
+                lines.append(line)
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_media_audit_accessibility":
+            response = await ui_client.sdk_media_audit_accessibility()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            lines = ["## Media Accessibility Audit", ""]
+            missing = data.get("missingAlt", [])
+            generic = data.get("genericAlt", [])
+            decorative = data.get("decorativeWithoutEmptyAlt", [])
+            total = data.get("totalAudited", 0)
+            lines.append(f"Audited {total} media element(s)")
+            lines.append("")
+            if missing:
+                lines.append(f"### Missing Alt Text ({len(missing)})")
+                for item in missing:
+                    lines.append(f"  - {item.get('id')}: {item.get('src', '(no src)')}")
+                lines.append("")
+            if generic:
+                lines.append(f"### Generic Alt Text ({len(generic)})")
+                for item in generic:
+                    lines.append(f'  - {item.get("id")}: alt="{item.get("altText")}"')
+                lines.append("")
+            if decorative:
+                lines.append(f"### Decorative Without Empty Alt ({len(decorative)})")
+                for item in decorative:
+                    lines.append(
+                        f'  - {item.get("id")}: alt="{item.get("altText", "")}"'
+                    )
+                lines.append("")
+            if not missing and not generic and not decorative:
+                lines.append("✓ No accessibility issues found.")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_media_audit_performance":
+            response = await ui_client.sdk_media_audit_performance()
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            lines = ["## Media Performance Audit", ""]
+            oversized = data.get("oversized", [])
+            large = data.get("largeTransferSize", [])
+            not_lazy = data.get("notLazyLoaded", [])
+            total = data.get("totalAudited", 0)
+            lines.append(f"Audited {total} media element(s)")
+            lines.append("")
+            if oversized:
+                lines.append(f"### Oversized Images ({len(oversized)})")
+                for item in oversized:
+                    nw = item.get("naturalWidth", 0)
+                    nh = item.get("naturalHeight", 0)
+                    rw = item.get("renderedWidth", 0)
+                    rh = item.get("renderedHeight", 0)
+                    ratio = item.get("oversizeRatio", 0)
+                    lines.append(
+                        f"  - {item.get('id')}: {nw}×{nh} → {rw}×{rh} ({ratio:.1f}x)"
+                    )
+                lines.append("")
+            if large:
+                lines.append(f"### Large Transfer Size ({len(large)})")
+                for item in large:
+                    size_kb = item.get("transferSize", 0) / 1024
+                    lines.append(f"  - {item.get('id')}: {size_kb:.0f}KB")
+                lines.append("")
+            if not_lazy:
+                lines.append(f"### Below-Fold Not Lazy-Loaded ({len(not_lazy)})")
+                for item in not_lazy:
+                    lines.append(f"  - {item.get('id')}: {item.get('src', '(no src)')}")
+                lines.append("")
+            if not oversized and not large and not not_lazy:
+                lines.append("✓ No performance issues found.")
+            return [types.TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "sdk_media_snapshot":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_media_snapshot(
+                element_id=element_id,
+                max_size=arguments.get("max_size"),
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            img_data = data.get("data", "")
+            width = data.get("width", 0)
+            height = data.get("height", 0)
+            media_type = data.get("mediaType", "image/png")
+            result: list[types.TextContent | types.ImageContent] = [
+                types.TextContent(
+                    type="text",
+                    text=f"Snapshot of {element_id}: {width}×{height} ({media_type})",
+                ),
+            ]
+            if img_data and media_type == "image/png":
+                result.append(
+                    types.ImageContent(
+                        type="image",
+                        data=img_data,
+                        mimeType="image/png",
+                    )
+                )
+            return result
+
+        elif name == "sdk_media_compare":
+            response = await ui_client.sdk_media_compare(
+                snapshot_a=arguments["snapshot_a"],
+                snapshot_b=arguments["snapshot_b"],
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            identical = data.get("identical", False)
+            diff_pct = data.get("diffPercentage", 0)
+            region = data.get("diffRegion")
+            error_msg = data.get("error")
+            lines = ["## Media Comparison Result", ""]
+            if error_msg:
+                lines.append(f"⚠ {error_msg}")
+            elif identical:
+                lines.append("✓ Images are identical.")
+            else:
+                lines.append(f"Diff: {diff_pct:.2f}% of pixels differ")
+                if region:
+                    lines.append(
+                        f"Region: ({region['x']}, {region['y']}) {region['width']}×{region['height']}"
+                    )
+            result_items: list[types.TextContent | types.ImageContent] = [
+                types.TextContent(type="text", text="\n".join(lines))
+            ]
+            diff_img = data.get("diffImage")
+            if diff_img:
+                result_items.append(
+                    types.ImageContent(
+                        type="image", data=diff_img, mimeType="image/png"
+                    )
+                )
+            return result_items
+
+        elif name == "sdk_media_analyze_batch":
+            element_ids = arguments["element_ids"]
+            response = await ui_client.sdk_media_analyze_batch(
+                element_ids=element_ids,
+                max_size=arguments.get("max_size"),
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            results = response.data if isinstance(response.data, list) else []
+            if not results:
+                return [
+                    types.TextContent(
+                        type="text", text="No media elements could be captured."
+                    )
+                ]
+
+            batch_items: list[types.TextContent | types.ImageContent] = [
+                types.TextContent(
+                    type="text", text=f"## Batch Analysis: {len(results)} element(s)\n"
+                ),
+            ]
+            for i, entry in enumerate(results):
+                image = entry.get("image", {})
+                context = entry.get("context", {})
+                el_id = context.get("elementId", f"media-{i}")
+                alt = context.get("altText", "")
+                dims = context.get("dimensions", {})
+                rendered = dims.get("rendered", [0, 0])
+                label = f"**{i+1}. {el_id}** ({rendered[0]}×{rendered[1]})"
+                if alt:
+                    label += f' — "{alt[:40]}"'
+                batch_items.append(types.TextContent(type="text", text=label))
+                img_data_b = image.get("data", "")
+                if img_data_b:
+                    batch_items.append(
+                        types.ImageContent(
+                            type="image", data=img_data_b, mimeType="image/png"
+                        )
+                    )
+            return batch_items
+
+        elif name == "ui_analyze_image":
+            element_id = arguments["element_id"]
+            response = await ui_client.sdk_media_analyze(
+                element_id=element_id,
+                max_size=arguments.get("max_size"),
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            data = response.data or {}
+            image = data.get("image", {})
+            context = data.get("context", {})
+            # Build context text
+            ctx_lines = [f"**Element:** {context.get('elementId', element_id)}"]
+            if context.get("altText"):
+                ctx_lines.append(f"**Alt:** {context['altText']}")
+            if context.get("src"):
+                ctx_lines.append(f"**Src:** {context['src']}")
+            if context.get("parentContext"):
+                ctx_lines.append(f"**Context:** {context['parentContext']}")
+            dims = context.get("dimensions", {})
+            if dims:
+                natural = dims.get("natural", [0, 0])
+                rendered = dims.get("rendered", [0, 0])
+                ctx_lines.append(
+                    f"**Dimensions:** {natural[0]}×{natural[1]} natural, {rendered[0]}×{rendered[1]} rendered"
+                )
+            ctx_lines.append(f"**Loading:** {context.get('loadingState', 'unknown')}")
+            siblings = context.get("siblingLabels", [])
+            if siblings:
+                ctx_lines.append(f"**Nearby text:** {', '.join(siblings[:3])}")
+
+            result_items2: list[types.TextContent | types.ImageContent] = [
+                types.TextContent(type="text", text="\n".join(ctx_lines)),
+            ]
+            img_data2 = image.get("data", "")
+            if img_data2:
+                result_items2.append(
+                    types.ImageContent(
+                        type="image", data=img_data2, mimeType="image/png"
+                    )
+                )
+            return result_items2
+
+        elif name == "ui_audit_images":
+            response = await ui_client.sdk_media_analyze_page(
+                max_elements=arguments.get("max_elements"),
+                max_size=arguments.get("max_size"),
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            results = response.data if isinstance(response.data, list) else []
+            if not results:
+                return [
+                    types.TextContent(
+                        type="text", text="No visible media elements found on the page."
+                    )
+                ]
+
+            items: list[types.TextContent | types.ImageContent] = [
+                types.TextContent(
+                    type="text",
+                    text=f"## Page Media Audit: {len(results)} element(s)\n",
+                ),
+            ]
+            for i, entry in enumerate(results):
+                image = entry.get("image", {})
+                context = entry.get("context", {})
+                el_id = context.get("elementId", f"media-{i}")
+                alt = context.get("altText", "")
+                src = context.get("src", "")
+                loading = context.get("loadingState", "unknown")
+                dims = context.get("dimensions", {})
+                natural = dims.get("natural", [0, 0])
+                rendered = dims.get("rendered", [0, 0])
+                parent = context.get("parentContext", "")
+
+                label = f"**{i+1}. {el_id}**"
+                if alt:
+                    label += f' — alt="{alt[:40]}"'
+                if src:
+                    label += f" — {src.split('/')[-1][:30]}"
+                label += f" ({rendered[0]}×{rendered[1]}, {loading})"
+                if parent:
+                    label += f" [{parent}]"
+
+                items.append(types.TextContent(type="text", text=label))
+                img_data3 = image.get("data", "")
+                if img_data3:
+                    items.append(
+                        types.ImageContent(
+                            type="image", data=img_data3, mimeType="image/png"
+                        )
+                    )
+            return items
+
+        # DOM Query & JS Evaluation
+        elif name == "ui_query_selector":
+            selector = arguments.get("selector", "")
+            action = arguments.get("action")
+            index = arguments.get("index")
+            response = await ui_client.control_query_selector(
+                selector=selector, action=action, index=index
+            )
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(response.data, indent=2, default=str),
+                )
+            ]
+
+        elif name == "ui_page_evaluate":
+            expression = arguments.get("expression", "")
+            response = await ui_client.control_page_evaluate(expression)
+            if not response.success:
+                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(response.data, indent=2, default=str),
+                )
+            ]
 
         else:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
