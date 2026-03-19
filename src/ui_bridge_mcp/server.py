@@ -310,6 +310,11 @@ def format_element_compact(element: dict[str, Any], ref: str) -> str:
         if content_role:
             parts.append(f"content:{content_role}")
 
+    class_name = element.get("className", "")
+    if class_name:
+        truncated = class_name[:60] + ("..." if len(class_name) > 60 else "")
+        parts.append(f'class="{truncated}"')
+
     flags: list[str] = []
     if not state.get("visible", True):
         flags.append("hidden")
@@ -357,7 +362,13 @@ def format_element_summary(element: dict[str, Any]) -> str:
         if content_role:
             content_str = f" [content:{content_role}]"
 
-    return f"- {elem_id} ({elem_type}): {label}{bounds}{status_str}{content_str}"
+    class_str = ""
+    class_name = element.get("className", "")
+    if class_name:
+        truncated = class_name[:80] + ("..." if len(class_name) > 80 else "")
+        class_str = f" [class: {truncated}]"
+
+    return f"- {elem_id} ({elem_type}): {label}{bounds}{status_str}{content_str}{class_str}"
 
 
 def _format_undo_state(data: dict[str, Any] | None) -> str:
@@ -6167,6 +6178,12 @@ async def call_tool(
                     if val and val != "none" and val != "normal" and val != "0px":
                         result_lines.append(f"  {prop}: {val}")
 
+                custom_props = data.get("customProperties", {})
+                if custom_props:
+                    result_lines.append("\n  Custom Properties:")
+                    for prop, val in sorted(custom_props.items()):
+                        result_lines.append(f"    {prop}: {val}")
+
                 if include_state_variations:
                     sv_resp = await ui_client.sdk_design_state_styles(element_id)
                     if sv_resp.success:
@@ -6199,8 +6216,10 @@ async def call_tool(
                     font_size = styles.get("fontSize", "?")
                     color = styles.get("color", "?")
                     bg = styles.get("backgroundColor", "?")
+                    custom_count = len(el.get("customProperties", {}))
+                    cp_str = f" vars={custom_count}" if custom_count else ""
                     result_lines.append(
-                        f"  {eid} ({etype}): font={font_size} color={color} bg={bg}"
+                        f"  {eid} ({etype}): font={font_size} color={color} bg={bg}{cp_str}"
                     )
                 if len(elements) > 50:
                     result_lines.append(f"  ... and {len(elements) - 50} more")
@@ -6265,7 +6284,13 @@ async def call_tool(
                         if isinstance(el, dict)
                         else "?"
                     )
-                    result_lines.append(f"    {eid}: {w}×{h} display={display}")
+                    custom_count = (
+                        len(el.get("customProperties", {}))
+                        if isinstance(el, dict)
+                        else 0
+                    )
+                    cp_str = f" vars={custom_count}" if custom_count else ""
+                    result_lines.append(f"    {eid}: {w}×{h} display={display}{cp_str}")
                 if len(vp_elements) > 20:
                     result_lines.append(f"    ... and {len(vp_elements) - 20} more")
             return [types.TextContent(type="text", text="\n".join(result_lines))]
@@ -6345,9 +6370,11 @@ async def call_tool(
                 eid = el.get("elementId", "?")
                 etype = el.get("type", "?")
                 styles = el.get("styles", {})
+                custom_count = len(el.get("customProperties", {}))
+                cp_str = f" vars={custom_count}" if custom_count else ""
                 result_lines.append(
                     f"  {eid} ({etype}): font={styles.get('fontSize', '?')} "
-                    f"color={styles.get('color', '?')} bg={styles.get('backgroundColor', '?')}"
+                    f"color={styles.get('color', '?')} bg={styles.get('backgroundColor', '?')}{cp_str}"
                 )
             if len(elements) > 30:
                 result_lines.append(f"  ... and {len(elements) - 30} more")
@@ -6638,6 +6665,16 @@ async def call_tool(
                         lines.append(
                             f"  ~ {eid}: {', '.join(parts) if parts else 'modified'}"
                         )
+                        if style_changes:
+                            for sc in style_changes[:5]:
+                                lines.append(
+                                    f"      {sc.get('property', '?')}: "
+                                    f"{sc.get('oldValue', '')} \u2192 {sc.get('newValue', '')}"
+                                )
+                            if len(style_changes) > 5:
+                                lines.append(
+                                    f"      ... and {len(style_changes) - 5} more"
+                                )
                     if len(modified) > 15:
                         lines.append(f"  ... and {len(modified) - 15} more")
 
