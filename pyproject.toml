@@ -29,7 +29,6 @@ Pillow = "^11.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.10"
-isort = "^7.0"
 ruff = "^0.14"
 mypy = "^1.14"
 pytest = "^8.3"
@@ -43,13 +42,12 @@ build-backend = "poetry.core.masonry.api"
 line-length = 88
 target-version = ["py312"]
 
-[tool.isort]
-profile = "black"
-line_length = 88
-
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
 
 [tool.mypy]
 python_version = "3.12"

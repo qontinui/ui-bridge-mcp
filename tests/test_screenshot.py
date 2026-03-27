@@ -21,12 +21,11 @@ from ui_bridge_mcp.screenshot import (
     annotate_screenshot,
     create_before_after,
     crop_to_element,
+    diff_screenshots,
     draw_accessibility_overlay,
     generate_visual_description,
-    diff_screenshots,
     mime_type_for_format,
 )
-
 
 # =============================================================================
 # Helpers
