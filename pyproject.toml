@@ -48,6 +48,7 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line length enforced by black; docstrings exempt
 
 [tool.mypy]
 python_version = "3.12"
