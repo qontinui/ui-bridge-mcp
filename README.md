@@ -167,8 +167,7 @@ poetry run ruff check .
 poetry run mypy src
 
 # Format code
-poetry run black src
-poetry run isort src
+poetry run ruff format src
 ```
 
 ## License
