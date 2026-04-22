@@ -28,7 +28,6 @@ httpx = "^0.28.0"
 Pillow = "^11.0"
 
 [tool.poetry.group.dev.dependencies]
-black = "^24.10"
 ruff = "^0.14"
 mypy = "^1.14"
 pytest = "^8.3"
