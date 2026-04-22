@@ -7909,7 +7909,7 @@ async def call_tool(
                 alt = context.get("altText", "")
                 dims = context.get("dimensions", {})
                 rendered = dims.get("rendered", [0, 0])
-                label = f"**{i+1}. {el_id}** ({rendered[0]}×{rendered[1]})"
+                label = f"**{i + 1}. {el_id}** ({rendered[0]}×{rendered[1]})"
                 if alt:
                     label += f' — "{alt[:40]}"'
                 batch_items.append(types.TextContent(type="text", text=label))
@@ -8000,7 +8000,7 @@ async def call_tool(
                 rendered = dims.get("rendered", [0, 0])
                 parent = context.get("parentContext", "")
 
-                label = f"**{i+1}. {el_id}**"
+                label = f"**{i + 1}. {el_id}**"
                 if alt:
                     label += f' — alt="{alt[:40]}"'
                 if src:
