@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest  # type: ignore[import-not-found]
+import pytest
 
 from ui_bridge_mcp.server import (
     CONTENT_END,
