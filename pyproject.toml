@@ -3,7 +3,7 @@ name = "ui-bridge-mcp"
 version = "0.1.0"
 description = "MCP server for UI Bridge - enables AI to inspect and interact with UI elements"
 authors = ["Qontinui Team"]
-license = "MIT"
+license = "AGPL-3.0-or-later"
 readme = "README.md"
 homepage = "https://github.com/qontinui/ui-bridge-mcp"
 repository = "https://github.com/qontinui/ui-bridge-mcp"
@@ -11,7 +11,7 @@ keywords = ["mcp", "ui", "automation", "ai", "testing", "ui-bridge"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: User Interfaces",
