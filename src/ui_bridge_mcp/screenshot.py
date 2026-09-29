@@ -1122,13 +1122,17 @@ def generate_visual_description(
     elif active_toasts:
         lines.append(f"Active toasts: {len(active_toasts)}")
         for t in active_toasts[:3]:
-            severity = t.get("severity", "info")
-            text = t.get("text", "")[:60]
+            if not isinstance(t, dict):
+                lines.append(f"  {_unknown_line('toast')}")
+                continue
+            severity = t.get("severity") or "info"
+            raw_text = t.get("text")
+            text = raw_text[:60] if isinstance(raw_text, str) else "UNKNOWN (no text)"
             lines.append(f"  [{severity}] {text}")
 
     # Error status
     errors = snapshot.get("errorSummary")
-    if not isinstance(errors, dict) or "health" not in errors:
+    if not isinstance(errors, dict) or errors.get("health") is None:
         lines.append(_unknown_line("Health"))
     else:
         health = errors["health"]

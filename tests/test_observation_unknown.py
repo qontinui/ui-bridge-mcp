@@ -709,3 +709,25 @@ def test_snapshot_tools_survive_state_null(
     text = _call_tool(tool, arguments)
     assert "NoneType" not in text
     assert not text.startswith("Error:")
+
+
+def test_null_health_and_null_toast_text_render_unknown_not_none_or_crash() -> None:
+    from ui_bridge_mcp.screenshot import generate_visual_description
+
+    snap = {
+        "viewport": {
+            "viewportWidth": 800,
+            "viewportHeight": 600,
+            "scrollY": 0,
+            "canScrollDown": False,
+            "documentHeight": 600,
+        },
+        "errorSummary": {"health": None, "errorCount": 0, "warningCount": 0},
+        "toasts": {"activeToasts": [{"severity": None, "text": None}, None]},
+        "modalStack": {"activeModals": []},
+    }
+    out = generate_visual_description([], snap)
+    assert "Health: None" not in out
+    assert "Health: UNKNOWN" in out
+    assert "UNKNOWN (no text)" in out
+    assert "[info]" in out
