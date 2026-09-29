@@ -942,75 +942,147 @@ def draw_accessibility_overlay(
 # ---------------------------------------------------------------------------
 
 
+ABSENT_FIELD = "UNKNOWN (field absent from snapshot)"
+
+
+def _unknown_line(label: str) -> str:
+    """The line printed when a snapshot field needed for ``label`` is absent.
+
+    An absent field is never rendered as its clean value ("healthy", "no
+    modal", "0 toasts"): the producer did not say, so the description does not
+    either.
+    """
+    return f"{label}: {ABSENT_FIELD}"
+
+
+def _present_list(container: Any, key: str) -> list[Any] | None:
+    """Return ``container[key]`` if ``container`` is a dict carrying a list there.
+
+    ``None`` means the field is ABSENT (container missing, not an object, or the
+    key missing / not a list) — distinct from a present, empty list.
+    """
+    if not isinstance(container, dict):
+        return None
+    value = container.get(key)
+    return value if isinstance(value, list) else None
+
+
+def _has_unmeasured_geometry(el: dict[str, Any]) -> bool:
+    """True when an element's geometry cannot be read from the snapshot.
+
+    The element has no ``state`` object, or a ``state`` with no ``rect`` key and
+    no explicit ``visible: false``. A present ``rect: null`` is the producer
+    saying "not rendered" and is not counted.
+    """
+    state = el.get("state")
+    if not isinstance(state, dict):
+        return True
+    return "rect" not in state and state.get("visible", True) is not False
+
+
 def generate_visual_description(
-    elements: list[dict[str, Any]],
+    elements: list[dict[str, Any]] | None,
     snapshot: dict[str, Any],
 ) -> str:
     """Generate a structured text description of the visual layout.
 
     Analyzes element positions to detect layout regions, count element types,
     and provide a verbal summary AI can use alongside the screenshot.
-    """
-    viewport = snapshot.get("viewport", {})
-    vp_w = viewport.get("viewportWidth", 1920)
-    vp_h = viewport.get("viewportHeight", 1080)
-    page = snapshot.get("page", {})
 
-    visible_elements = [
-        el
-        for el in elements
-        if el.get("state", {}).get("visible", True) and el.get("state", {}).get("rect")
-    ]
+    Every snapshot field the description states something about is checked for
+    PRESENCE first. An absent field prints ``<label>: UNKNOWN (field absent from
+    snapshot)`` instead of the clean statement its default would have produced;
+    a present-but-empty field keeps the clean rendering. ``elements=None`` means
+    the snapshot carried no ``elements`` array at all.
+    """
+    viewport_raw = snapshot.get("viewport")
+    viewport: dict[str, Any] | None = None
+    if (
+        isinstance(viewport_raw, dict)
+        and isinstance(viewport_raw.get("viewportWidth"), (int, float))
+        and isinstance(viewport_raw.get("viewportHeight"), (int, float))
+    ):
+        viewport = viewport_raw
+    page_raw = snapshot.get("page")
+    page: dict[str, Any] = page_raw if isinstance(page_raw, dict) else {}
 
     lines: list[str] = []
 
-    # Page info
+    # Page info — an absent page prints nothing, exactly as an untitled one does,
+    # so no statement is made either way.
     title = page.get("title", "")
     pathname = page.get("pathname", "")
     if title or pathname:
         lines.append(f"Page: {title or pathname}")
 
-    lines.append(f"Viewport: {vp_w}x{vp_h}px")
-    lines.append(f"Elements: {len(visible_elements)} visible")
+    if viewport is not None:
+        vp_w = viewport["viewportWidth"]
+        vp_h = viewport["viewportHeight"]
+        lines.append(f"Viewport: {vp_w}x{vp_h}px")
+    else:
+        lines.append(_unknown_line("Viewport"))
 
-    # Detect layout regions
-    regions = _detect_layout_regions(visible_elements, vp_w, vp_h)
-    if regions:
+    visible_elements: list[dict[str, Any]] = []
+    if elements is None:
+        lines.append(_unknown_line("Elements"))
+    else:
+        visible_elements = [
+            el
+            for el in elements
+            if el.get("state", {}).get("visible", True)
+            and el.get("state", {}).get("rect")
+        ]
+        lines.append(f"Elements: {len(visible_elements)} visible")
+        unmeasured = sum(1 for el in elements if _has_unmeasured_geometry(el))
+        if unmeasured:
+            noun = "element" if unmeasured == 1 else "elements"
+            lines.append(_unknown_line(f"Geometry of {unmeasured} {noun}"))
+
+    # Detect layout regions — needs both the elements and the viewport size.
+    if elements is None or viewport is None:
         lines.append("")
-        lines.append("Layout:")
-        for region_name, count in regions.items():
-            lines.append(f"  {region_name}: {count} elements")
+        lines.append(_unknown_line("Layout"))
+    else:
+        regions = _detect_layout_regions(visible_elements, vp_w, vp_h)
+        if regions:
+            lines.append("")
+            lines.append("Layout:")
+            for region_name, count in regions.items():
+                lines.append(f"  {region_name}: {count} elements")
 
-    # Element type breakdown
-    type_counts: dict[str, int] = {}
-    for el in visible_elements:
-        et = el.get("type", "unknown")
-        type_counts[et] = type_counts.get(et, 0) + 1
+    if elements is not None:
+        # Element type breakdown
+        type_counts: dict[str, int] = {}
+        for el in visible_elements:
+            et = el.get("type", "unknown")
+            type_counts[et] = type_counts.get(et, 0) + 1
 
-    if type_counts:
-        lines.append("")
-        lines.append("Element types:")
-        for et, count in sorted(type_counts.items(), key=lambda x: -x[1])[:10]:
-            lines.append(f"  {et}: {count}")
+        if type_counts:
+            lines.append("")
+            lines.append("Element types:")
+            for et, count in sorted(type_counts.items(), key=lambda x: -x[1])[:10]:
+                lines.append(f"  {et}: {count}")
 
-    # Interactive vs content
-    interactive = sum(
-        1 for el in visible_elements if el.get("category") == "interactive"
-    )
-    content = sum(1 for el in visible_elements if el.get("category") == "content")
-    lines.append(f"\nInteractive: {interactive}, Content: {content}")
+        # Interactive vs content
+        interactive = sum(
+            1 for el in visible_elements if el.get("category") == "interactive"
+        )
+        content = sum(1 for el in visible_elements if el.get("category") == "content")
+        lines.append(f"\nInteractive: {interactive}, Content: {content}")
 
     # Modal status
-    modal_stack = snapshot.get("modalStack", {})
-    active_modals = modal_stack.get("activeModals", [])
-    if active_modals:
+    active_modals = _present_list(snapshot.get("modalStack"), "activeModals")
+    if active_modals is None:
+        lines.append(_unknown_line("Modals"))
+    elif active_modals:
         top = active_modals[-1]
         lines.append(f"Modal open: {top.get('title', top.get('id', 'untitled'))}")
 
     # Toast status
-    toasts = snapshot.get("toasts", {})
-    active_toasts = toasts.get("activeToasts", [])
-    if active_toasts:
+    active_toasts = _present_list(snapshot.get("toasts"), "activeToasts")
+    if active_toasts is None:
+        lines.append(_unknown_line("Toasts"))
+    elif active_toasts:
         lines.append(f"Active toasts: {len(active_toasts)}")
         for t in active_toasts[:3]:
             severity = t.get("severity", "info")
@@ -1018,26 +1090,32 @@ def generate_visual_description(
             lines.append(f"  [{severity}] {text}")
 
     # Error status
-    errors = snapshot.get("errorSummary", {})
-    health = errors.get("health", "healthy")
-    if health != "healthy":
-        lines.append(f"Health: {health}")
-        ec = errors.get("errorCount", 0)
-        wc = errors.get("warningCount", 0)
-        if ec:
-            lines.append(f"  Errors: {ec}")
-        if wc:
-            lines.append(f"  Warnings: {wc}")
+    errors = snapshot.get("errorSummary")
+    if not isinstance(errors, dict) or "health" not in errors:
+        lines.append(_unknown_line("Health"))
+    else:
+        health = errors["health"]
+        if health != "healthy":
+            lines.append(f"Health: {health}")
+            ec = errors.get("errorCount", 0)
+            wc = errors.get("warningCount", 0)
+            if ec:
+                lines.append(f"  Errors: {ec}")
+            if wc:
+                lines.append(f"  Warnings: {wc}")
 
     # Scroll status
-    can_down = viewport.get("canScrollDown", False)
-    scroll_y = viewport.get("scrollY", 0)
-    if can_down or scroll_y > 0:
-        doc_h = viewport.get("documentHeight", vp_h)
-        pct = int(scroll_y / max(doc_h - vp_h, 1) * 100) if doc_h > vp_h else 0
-        lines.append(f"Scroll: {pct}% down ({int(scroll_y)}px)")
-        if can_down:
-            lines.append("  More content below")
+    if viewport is None:
+        lines.append(_unknown_line("Scroll"))
+    else:
+        can_down = viewport.get("canScrollDown", False)
+        scroll_y = viewport.get("scrollY", 0)
+        if can_down or scroll_y > 0:
+            doc_h = viewport.get("documentHeight", vp_h)
+            pct = int(scroll_y / max(doc_h - vp_h, 1) * 100) if doc_h > vp_h else 0
+            lines.append(f"Scroll: {pct}% down ({int(scroll_y)}px)")
+            if can_down:
+                lines.append("  More content below")
 
     return "\n".join(lines)
 

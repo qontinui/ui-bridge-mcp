@@ -32,13 +32,86 @@ def get_windows_host() -> str:
     return "localhost"
 
 
+# Observation ``UnknownCode`` values (wire contract, snake_case) that this client
+# assigns itself when the failure happened before any body could carry a code.
+CODE_APP_UNREACHABLE = "app_unreachable"
+CODE_PRODUCER_FAILED = "producer_failed"
+
+
 @dataclass
 class UIBridgeResponse:
-    """Response from the UI Bridge API."""
+    """Response from the UI Bridge API.
+
+    ``code`` is the machine-readable cause of a failure (or of an ``unknown``
+    Observation carried in a successful body): the body's own diagnostic code
+    when the producer sent one (``UB-NET-ERROR``, ``RUNNER_REQUIRED``, an
+    Observation ``unknown.code`` …), else a code this client assigned from the
+    transport failure (``app_unreachable`` / ``producer_failed``). ``status`` is
+    the HTTP status, ``None`` when no HTTP response was received.
+    """
 
     success: bool
     data: dict[str, Any] | None = None
     error: str | None = None
+    code: str | None = None
+    status: int | None = None
+
+    def describe_error(self) -> str:
+        """Render the failure for a tool result: typed code and status first.
+
+        The MCP consumer must be able to branch on the code without parsing the
+        English, so the code is always emitted as a ``[code=…]`` prefix when set.
+        """
+        tags: list[str] = []
+        if self.code is not None:
+            tags.append(f"code={self.code}")
+        if self.status is not None:
+            tags.append(f"status={self.status}")
+        message = self.error if self.error is not None else "no error message"
+        if not tags:
+            return message
+        return f"[{' '.join(tags)}] {message}"
+
+
+def _str_field(obj: Any, key: str) -> str | None:
+    """Return ``obj[key]`` when ``obj`` is a dict and the value is a non-empty str."""
+    if isinstance(obj, dict):
+        value = obj.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _envelope_unknown_code(obj: Any) -> str | None:
+    """Return ``unknown.code`` when ``obj`` is an Observation envelope in ``unknown``."""
+    if isinstance(obj, dict) and obj.get("status") == "unknown":
+        return _str_field(obj.get("unknown"), "code")
+    return None
+
+
+def extract_code(body: Any) -> str | None:
+    """Extract the producer's own machine-readable code from a response body.
+
+    Handles every shape a UI Bridge producer answers with:
+
+    - SDK ``APIResponse`` — top-level ``code``;
+    - legacy / recovery bodies — top-level ``error_code``;
+    - runner ``ApiResponse`` — ``error_detail.code``;
+    - a bare Observation envelope — ``unknown.code`` when ``status == "unknown"``;
+    - an ``ApiResponse`` wrapping an envelope — ``data.unknown.code``.
+
+    Explicit error codes win over an envelope's code. Returns ``None`` when the
+    body carries no code at all.
+    """
+    if not isinstance(body, dict):
+        return None
+    return (
+        _str_field(body, "code")
+        or _str_field(body, "error_code")
+        or _str_field(body.get("error_detail"), "code")
+        or _envelope_unknown_code(body)
+        or _envelope_unknown_code(body.get("data"))
+    )
 
 
 class UIBridgeClient:
@@ -111,28 +184,68 @@ class UIBridgeClient:
 
             response.raise_for_status()
             data = response.json()
+            if not isinstance(data, dict):
+                return UIBridgeResponse(
+                    success=False,
+                    error=(
+                        f"Unexpected response body from {url}: expected a JSON "
+                        f"object, got {type(data).__name__}"
+                    ),
+                    code=CODE_PRODUCER_FAILED,
+                    status=response.status_code,
+                )
             return UIBridgeResponse(
+                # Absent `success` is a failure, never a success.
                 success=data.get("success", False),
                 data=data.get("data"),
                 error=data.get("error"),
+                code=extract_code(data),
+                status=response.status_code,
+            )
+        except httpx.ConnectTimeout:
+            # The connection itself never completed: the app was not reached.
+            return UIBridgeResponse(
+                success=False,
+                error=f"Cannot connect to runner at {url}: connect timeout after {timeout}s",
+                code=CODE_APP_UNREACHABLE,
             )
         except httpx.ConnectError as e:
             return UIBridgeResponse(
                 success=False,
                 error=f"Cannot connect to runner at {url}. Is qontinui-runner running? Error: {e}",
+                code=CODE_APP_UNREACHABLE,
             )
         except httpx.HTTPStatusError as e:
-            return UIBridgeResponse(
-                success=False,
-                error=f"API error: {e.response.status_code} - {e.response.text}",
-            )
+            return self._http_status_failure(e.response)
         except httpx.TimeoutException:
             return UIBridgeResponse(
                 success=False,
-                error=f"Request timed out after {timeout}s",
+                error=f"Request timed out after {timeout}s (timeout)",
+                code=CODE_PRODUCER_FAILED,
             )
         except Exception as e:
-            return UIBridgeResponse(success=False, error=str(e))
+            return UIBridgeResponse(
+                success=False,
+                error=f"{type(e).__name__}: {e}",
+                code=CODE_PRODUCER_FAILED,
+            )
+
+    @staticmethod
+    def _http_status_failure(response: httpx.Response) -> UIBridgeResponse:
+        """Build the failure for a non-2xx answer, keeping the body's own code."""
+        status = response.status_code
+        body: Any = None
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        code = extract_code(body) or CODE_PRODUCER_FAILED
+        body_error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(body_error, str) and body_error:
+            error = f"API error {status}: {body_error}"
+        else:
+            error = f"API error: {status} - {response.text}"
+        return UIBridgeResponse(success=False, error=error, code=code, status=status)
 
     # -------------------------------------------------------------------------
     # Health & Status

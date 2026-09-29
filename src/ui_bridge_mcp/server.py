@@ -18,7 +18,7 @@ from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from .client import UIBridgeClient
+from .client import UIBridgeClient, UIBridgeResponse
 from .screenshot import (
     AnnotationOptions,
     BaselineStore,
@@ -43,6 +43,20 @@ server = Server("ui-bridge-mcp")
 client: UIBridgeClient | None = None
 baseline_store = BaselineStore()
 delta_encoder = DeltaEncoder()
+
+
+def _error_result(
+    response: UIBridgeResponse, prefix: str = "Error"
+) -> list[types.TextContent | types.ImageContent]:
+    """Tool result for a failed UI Bridge call.
+
+    Carries the typed ``code`` and HTTP ``status`` (see
+    ``UIBridgeResponse.describe_error``) so the MCP consumer can branch on the
+    cause instead of parsing English.
+    """
+    return [
+        types.TextContent(type="text", text=f"{prefix}: {response.describe_error()}")
+    ]
 
 
 def get_client() -> UIBridgeClient:
@@ -4135,7 +4149,8 @@ async def call_tool(
             else:
                 return [
                     types.TextContent(
-                        type="text", text=f"Runner not accessible: {response.error}"
+                        type="text",
+                        text=f"Runner not accessible: {response.describe_error()}",
                     )
                 ]
 
@@ -4148,7 +4163,7 @@ async def call_tool(
 
             response = await ui_client.control_snapshot()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
 
             data = response.data or {}
             elements = data.get("elements", [])
@@ -4277,7 +4292,7 @@ async def call_tool(
             interactive_only = arguments.get("interactive_only", False)
             response = await ui_client.control_discover(interactive_only)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -4290,7 +4305,7 @@ async def call_tool(
             max_content_length = arguments.get("max_content_length")
             response = await ui_client.control_get_element(element_id)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             result_data = response.data or {}
             # Feature 5: Content boundary markers
             sanitize_element_content(result_data)
@@ -4310,7 +4325,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_click(element_id)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Clicked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4320,7 +4335,7 @@ async def call_tool(
             text = arguments["text"]
             response = await ui_client.control_type(element_id, text)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Typed '{text}' into element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4329,7 +4344,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_focus(element_id)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Focused element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4338,7 +4353,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "blur")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Blurred element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4347,7 +4362,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_hover(element_id)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Hovered element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4356,7 +4371,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "doubleClick")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Double-clicked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4365,7 +4380,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "rightClick")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Right-clicked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4374,7 +4389,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "clear")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Cleared element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4387,7 +4402,7 @@ async def call_tool(
                 params["byLabel"] = True
             response = await ui_client.control_action(element_id, "select", params)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Selected '{value}' in element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4403,7 +4418,7 @@ async def call_tool(
                 element_id, "scroll", scroll_params
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Scrolled element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4412,7 +4427,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "check")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Checked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4421,7 +4436,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "uncheck")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Unchecked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4430,7 +4445,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "toggle")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Toggled element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4442,7 +4457,7 @@ async def call_tool(
                 element_id, "setValue", {"value": value}
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Set value '{value}' on element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4457,7 +4472,7 @@ async def call_tool(
                 params["holdDelay"] = arguments["hold_delay"]
             response = await ui_client.control_action(element_id, "drag", params)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Dragged {element_id} to {target_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4466,7 +4481,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "submit")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Submitted form for element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4475,7 +4490,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.control_action(element_id, "reset")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Reset form for element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4485,7 +4500,7 @@ async def call_tool(
             url = arguments["url"]
             response = await ui_client.sdk_connect(url)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(type="text", text=f"Connected to SDK app at {url}")
             ]
@@ -4493,7 +4508,7 @@ async def call_tool(
         elif name == "sdk_disconnect":
             response = await ui_client.sdk_disconnect()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Disconnected from SDK app")]
 
         elif name == "sdk_status":
@@ -4501,7 +4516,8 @@ async def call_tool(
             if not response.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"SDK not connected: {response.error}"
+                        type="text",
+                        text=f"SDK not connected: {response.describe_error()}",
                     )
                 ]
             data = response.data or {}
@@ -4525,7 +4541,7 @@ async def call_tool(
                 include_content=include_content,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             elements = data.get("elements", [])
 
@@ -4656,7 +4672,7 @@ async def call_tool(
         elif name == "ui_clipboard_read":
             response = await ui_client.control_clipboard_read()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             text = data.get("text")
             if text is not None:
@@ -4674,7 +4690,7 @@ async def call_tool(
             text = arguments.get("text", "")
             response = await ui_client.control_clipboard_write(text)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=f"Wrote {len(text)} chars to clipboard."
@@ -4684,7 +4700,7 @@ async def call_tool(
         elif name == "sdk_clipboard_read":
             response = await ui_client.sdk_clipboard_read()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             text = data.get("text")
             if text is not None:
@@ -4702,7 +4718,7 @@ async def call_tool(
             text = arguments.get("text", "")
             response = await ui_client.sdk_clipboard_write(text)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=f"Wrote {len(text)} chars to clipboard."
@@ -4712,7 +4728,7 @@ async def call_tool(
         elif name == "sdk_forms":
             response = await ui_client.sdk_forms()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=_format_forms_response(response.data)
@@ -4722,7 +4738,7 @@ async def call_tool(
         elif name == "ui_forms":
             response = await ui_client.control_forms()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=_format_forms_response(response.data)
@@ -4739,7 +4755,7 @@ async def call_tool(
                 clear_first=clear_first,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=_format_fill_form_response(response.data)
@@ -4756,7 +4772,7 @@ async def call_tool(
                 clear_first=clear_first,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=_format_fill_form_response(response.data)
@@ -4766,7 +4782,7 @@ async def call_tool(
         elif name == "sdk_form_snapshot":
             response = await ui_client.sdk_form_snapshot()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -4777,7 +4793,7 @@ async def call_tool(
         elif name == "ui_form_snapshot":
             response = await ui_client.control_form_snapshot()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -4790,7 +4806,7 @@ async def call_tool(
             after = arguments.get("after", {})
             response = await ui_client.sdk_form_diff(before=before, after=after)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=_format_form_diff_response(response.data)
@@ -4802,7 +4818,7 @@ async def call_tool(
             after = arguments.get("after", {})
             response = await ui_client.control_form_diff(before=before, after=after)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=_format_form_diff_response(response.data)
@@ -4821,7 +4837,7 @@ async def call_tool(
                 content_types=content_types,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             elements = data.get("elements", [])
 
@@ -4890,7 +4906,7 @@ async def call_tool(
                 content_roles=content_roles,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             elements = data.get("elements", [])
             total = data.get("total", len(elements))
@@ -4915,7 +4931,7 @@ async def call_tool(
             max_content_length = arguments.get("max_content_length")
             response = await ui_client.sdk_element(element_id)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             result_data = response.data or {}
             # Feature 5: Content boundary markers
             sanitize_element_content(result_data)
@@ -4935,7 +4951,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "click")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Clicked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4947,7 +4963,7 @@ async def call_tool(
                 element_id, "type", {"text": text}
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Typed '{text}' into element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4956,7 +4972,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "clear")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Cleared element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4968,7 +4984,7 @@ async def call_tool(
                 element_id, "select", {"value": value}
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Selected '{value}' in element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4977,7 +4993,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "focus")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Focused element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4986,7 +5002,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "blur")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Blurred element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -4995,7 +5011,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "hover")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Hovered element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5004,7 +5020,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "doubleClick")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Double-clicked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5013,7 +5029,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "rightClick")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Right-clicked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5029,7 +5045,7 @@ async def call_tool(
                 element_id, "scroll", sdk_scroll_params or None
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Scrolled element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5038,7 +5054,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "check")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Checked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5047,7 +5063,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "uncheck")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Unchecked element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5056,7 +5072,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "toggle")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Toggled element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5068,7 +5084,7 @@ async def call_tool(
                 element_id, "setValue", {"value": value}
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Set value '{value}' on element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5081,7 +5097,7 @@ async def call_tool(
                 params["steps"] = arguments["steps"]
             response = await ui_client.sdk_element_action(element_id, "drag", params)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Dragged {element_id} to {target_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5090,7 +5106,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "submit")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Submitted form for element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5099,7 +5115,7 @@ async def call_tool(
             element_id = ref_manager.resolve(arguments["element_id"])
             response = await ui_client.sdk_element_action(element_id, "reset")
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Reset form for element: {element_id}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5114,7 +5130,7 @@ async def call_tool(
                 content_types=content_types,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             matches = data.get("matches", [])
 
@@ -5166,7 +5182,7 @@ async def call_tool(
                 confidence_threshold=confidence_threshold,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             found = data.get("found", False)
 
@@ -5225,7 +5241,7 @@ async def call_tool(
             instruction = arguments["instruction"]
             response = await ui_client.sdk_ai_execute(instruction)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             msg = f"Executed: {instruction}"
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
@@ -5237,7 +5253,8 @@ async def call_tool(
             if not response.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"Assertion failed: {response.error}"
+                        type="text",
+                        text=f"Assertion failed: {response.describe_error()}",
                     )
                 ]
             return [
@@ -5250,7 +5267,7 @@ async def call_tool(
         elif name == "sdk_page_summary":
             response = await ui_client.sdk_ai_summary()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             summary = data.get("summary", json.dumps(data, indent=2))
             return [types.TextContent(type="text", text=summary)]
@@ -5258,7 +5275,7 @@ async def call_tool(
         elif name == "sdk_page_refresh":
             response = await ui_client.sdk_page_refresh()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Page refreshed successfully")]
 
         elif name == "sdk_page_navigate":
@@ -5267,25 +5284,25 @@ async def call_tool(
                 return [types.TextContent(type="text", text="Error: url is required")]
             response = await ui_client.sdk_page_navigate(url)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text=f"Navigated to: {url}")]
 
         elif name == "sdk_page_go_back":
             response = await ui_client.sdk_page_go_back()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Navigated back")]
 
         elif name == "sdk_page_go_forward":
             response = await ui_client.sdk_page_go_forward()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Navigated forward")]
 
         elif name == "sdk_screenshot":
             response = await ui_client.sdk_screenshot()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             path = data.get("screenshot_path", data.get("path", "unknown"))
             return [types.TextContent(type="text", text=f"Screenshot captured: {path}")]
@@ -5294,7 +5311,7 @@ async def call_tool(
         elif name == "sdk_analyze_data":
             response = await ui_client.sdk_ai_analyze_data()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             values = data.get("values", {})
             lines = [f"Page Data ({len(values)} values extracted):", ""]
@@ -5307,7 +5324,7 @@ async def call_tool(
         elif name == "sdk_analyze_regions":
             response = await ui_client.sdk_ai_analyze_regions()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             regions = data.get("regions", [])
             lines = [f"Page Regions ({len(regions)} detected):", ""]
@@ -5324,7 +5341,7 @@ async def call_tool(
         elif name == "sdk_analyze_structured_data":
             response = await ui_client.sdk_ai_analyze_structured_data()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             tables = data.get("tables", [])
             lists = data.get("lists", [])
@@ -5355,7 +5372,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error connecting to source {source_url}: {connect_resp.error}",
+                        text=f"Error connecting to source {source_url}: {connect_resp.describe_error()}",
                     )
                 ]
 
@@ -5364,7 +5381,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting source snapshot: {source_snap_resp.error}",
+                        text=f"Error getting source snapshot: {source_snap_resp.describe_error()}",
                     )
                 ]
             source_snapshot = source_snap_resp.data
@@ -5387,7 +5404,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error connecting to target {target_url}: {connect_resp.error}",
+                        text=f"Error connecting to target {target_url}: {connect_resp.describe_error()}",
                     )
                 ]
 
@@ -5396,7 +5413,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting target snapshot: {target_snap_resp.error}",
+                        text=f"Error getting target snapshot: {target_snap_resp.describe_error()}",
                     )
                 ]
             target_snapshot = target_snap_resp.data
@@ -5430,7 +5447,8 @@ async def call_tool(
             if not compare_resp.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"Error comparing: {compare_resp.error}"
+                        type="text",
+                        text=f"Error comparing: {compare_resp.describe_error()}",
                     )
                 ]
 
@@ -5644,7 +5662,7 @@ async def call_tool(
         elif name == "ui_diff":
             response = await ui_client.control_snapshot()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             elements = data.get("elements", [])
             diff = control_diff_tracker.update_and_diff(elements)
@@ -5662,7 +5680,7 @@ async def call_tool(
         elif name == "sdk_diff":
             response = await ui_client.sdk_snapshot()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             elements = data.get("elements", [])
             diff = sdk_diff_tracker.update_and_diff(elements)
@@ -5686,7 +5704,8 @@ async def call_tool(
             if not snap_resp.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"Error getting snapshot: {snap_resp.error}"
+                        type="text",
+                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
                     )
                 ]
             snap_data = snap_resp.data or {}
@@ -5707,7 +5726,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -5757,7 +5776,8 @@ async def call_tool(
             if not snap_resp.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"Error getting snapshot: {snap_resp.error}"
+                        type="text",
+                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
                     )
                 ]
             snap_data = snap_resp.data or {}
@@ -5776,7 +5796,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -5836,7 +5856,8 @@ async def call_tool(
             if not snap_resp.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"Error getting snapshot: {snap_resp.error}"
+                        type="text",
+                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
                     )
                 ]
             snap_elements = (snap_resp.data or {}).get("elements", [])
@@ -5862,7 +5883,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -5909,7 +5930,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -5951,7 +5972,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -5991,7 +6012,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -6028,7 +6049,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -6078,11 +6099,14 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting snapshot: {snap_resp.error}",
+                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
                     )
                 ]
             snap_data = snap_resp.data or {}
-            snap_elements = snap_data.get("elements", [])
+            # None (not []) when the snapshot carried no elements array, so the
+            # description says UNKNOWN instead of "0 visible".
+            raw_elements = snap_data.get("elements")
+            snap_elements = raw_elements if isinstance(raw_elements, list) else None
             description = generate_visual_description(snap_elements, snap_data)
             return [types.TextContent(type="text", text=description)]
 
@@ -6097,7 +6121,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.error}",
+                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
                     )
                 ]
             ss_data = screenshot_resp.data or {}
@@ -6169,7 +6193,9 @@ async def call_tool(
                 response = await ui_client.sdk_design_element_styles(element_id)
                 if not response.success:
                     return [
-                        types.TextContent(type="text", text=f"Error: {response.error}")
+                        types.TextContent(
+                            type="text", text=f"Error: {response.describe_error()}"
+                        )
                     ]
                 result_lines = [f"Design styles for {element_id}:"]
                 data = response.data or {}
@@ -6204,7 +6230,9 @@ async def call_tool(
                 response = await ui_client.sdk_design_snapshot()
                 if not response.success:
                     return [
-                        types.TextContent(type="text", text=f"Error: {response.error}")
+                        types.TextContent(
+                            type="text", text=f"Error: {response.describe_error()}"
+                        )
                     ]
                 data = response.data or {}
                 elements = data.get("elements", [])
@@ -6230,7 +6258,7 @@ async def call_tool(
             states = arguments.get("states")
             response = await ui_client.sdk_design_state_styles(element_id, states)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             result_lines = [f"State styles for {element_id}:"]
             for state_info in data.get("stateStyles", []):
@@ -6253,7 +6281,7 @@ async def call_tool(
             element_ids = arguments.get("element_ids")
             response = await ui_client.sdk_design_responsive(viewports, element_ids)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             snapshots: list[dict[str, object]] = (
                 response.data if isinstance(response.data, list) else []
             )
@@ -6300,7 +6328,7 @@ async def call_tool(
             element_ids = arguments.get("element_ids")
             response = await ui_client.sdk_design_audit(guide, element_ids)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             report = response.data or {}
             result_lines = [
                 f"Style Audit: {report.get('guideName', '?')}",
@@ -6336,7 +6364,7 @@ async def call_tool(
             guide = arguments["guide"]
             response = await ui_client.sdk_design_load_guide(guide)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -6360,7 +6388,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Error getting design snapshot: {snap_resp.error}",
+                        text=f"Error getting design snapshot: {snap_resp.describe_error()}",
                     )
                 ]
             snap_data = snap_resp.data or {}
@@ -6464,8 +6492,10 @@ async def call_tool(
                                     result_lines.append(
                                         f"    [{eid}] {cr.get('message', '?')}"
                                     )
-            elif "NO_STYLE_GUIDE" not in (audit_resp.error or ""):
-                result_lines.append(f"\nStyle audit: {audit_resp.error}")
+            elif audit_resp.code != "NO_STYLE_GUIDE" and "NO_STYLE_GUIDE" not in (
+                audit_resp.error or ""
+            ):
+                result_lines.append(f"\nStyle audit: {audit_resp.describe_error()}")
 
             # 5. Quality evaluation
             if include_quality_evaluation:
@@ -6508,7 +6538,9 @@ async def call_tool(
                                 if rec:
                                     result_lines.append(f"      → {rec}")
                     else:
-                        result_lines.append(f"\nQuality evaluation: {eval_resp.error}")
+                        result_lines.append(
+                            f"\nQuality evaluation: {eval_resp.describe_error()}"
+                        )
                 except Exception as e:
                     result_lines.append(f"\nQuality evaluation error: {e}")
 
@@ -6532,7 +6564,8 @@ async def call_tool(
             if not response.success:
                 return [
                     types.TextContent(
-                        type="text", text=f"Quality evaluation error: {response.error}"
+                        type="text",
+                        text=f"Quality evaluation error: {response.describe_error()}",
                     )
                 ]
 
@@ -6598,7 +6631,8 @@ async def call_tool(
                 if not response.success:
                     return [
                         types.TextContent(
-                            type="text", text=f"Save baseline error: {response.error}"
+                            type="text",
+                            text=f"Save baseline error: {response.describe_error()}",
                         )
                     ]
                 data = response.data or {}
@@ -6616,7 +6650,8 @@ async def call_tool(
                 if not response.success:
                     return [
                         types.TextContent(
-                            type="text", text=f"Diff baseline error: {response.error}"
+                            type="text",
+                            text=f"Diff baseline error: {response.describe_error()}",
                         )
                     ]
 
@@ -6698,7 +6733,7 @@ async def call_tool(
             else:
                 response = await ui_client.control_idle_status(signal=signal)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             mode_label = "SDK app" if use_sdk else "Runner"
             if signal:
@@ -6760,7 +6795,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Idle wait failed: {response.error}",
+                        text=f"Idle wait failed: {response.describe_error()}",
                     )
                 ]
             data = response.data or {}
@@ -6802,7 +6837,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Signal wait failed ({signal}): {response.error}",
+                        text=f"Signal wait failed ({signal}): {response.describe_error()}",
                     )
                 ]
             data = response.data or {}
@@ -6846,7 +6881,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Targets wait failed: {response.error}",
+                        text=f"Targets wait failed: {response.describe_error()}",
                     )
                 ]
             data = response.data or {}
@@ -6889,7 +6924,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Diagnosis failed: {response.error}",
+                        text=f"Diagnosis failed: {response.describe_error()}",
                     )
                 ]
             data = response.data or {}
@@ -6985,7 +7020,7 @@ async def call_tool(
                 limit=limit,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -7007,7 +7042,7 @@ async def call_tool(
                 limit=limit,
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -7018,7 +7053,7 @@ async def call_tool(
         elif name == "sdk_network_requests_in_flight":
             response = await ui_client.sdk_network_requests_in_flight()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -7029,7 +7064,7 @@ async def call_tool(
         elif name == "ui_network_requests_in_flight":
             response = await ui_client.control_network_requests_in_flight()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -7050,7 +7085,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Network request wait failed: {response.error}",
+                        text=f"Network request wait failed: {response.describe_error()}",
                     )
                 ]
             return [
@@ -7070,7 +7105,7 @@ async def call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Network request wait failed: {response.error}",
+                        text=f"Network request wait failed: {response.describe_error()}",
                     )
                 ]
             return [
@@ -7085,7 +7120,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.sdk_save_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=f"Bookmark '{bookmark_name}' saved successfully."
@@ -7095,7 +7130,7 @@ async def call_tool(
         elif name == "sdk_list_bookmarks":
             response = await ui_client.sdk_list_bookmarks()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             bookmarks: Any = response.data or []
             if not bookmarks:
                 return [types.TextContent(type="text", text="No bookmarks saved.")]
@@ -7114,7 +7149,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.sdk_delete_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=f"Bookmark '{bookmark_name}' deleted."
@@ -7125,7 +7160,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.sdk_diff_from_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             changes = data.get("changes", {})
             appeared = changes.get("appeared", [])
@@ -7170,7 +7205,7 @@ async def call_tool(
 
             response = await ui_client.sdk_execute_with_diff(request_body)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
 
             data = response.data or {}
             lines = [f"Execute with diff: {action_name} on {element_id}"]
@@ -7211,7 +7246,7 @@ async def call_tool(
                 options["pollInterval"] = arguments["poll_interval"]
             response = await ui_client.sdk_wait_for_change(predicate, options or None)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             if data.get("matched"):
                 diff = data.get("diff", {})
@@ -7234,7 +7269,7 @@ async def call_tool(
                 scope, arguments.get("from_bookmark")
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             changes = data.get("changes", {})
             return [
@@ -7251,7 +7286,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.sdk_get_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             if not data:
                 return [
@@ -7270,7 +7305,7 @@ async def call_tool(
         elif name == "sdk_categorize_last_diff":
             response = await ui_client.sdk_categorize_last_diff()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             if not data:
                 return [
@@ -7294,7 +7329,7 @@ async def call_tool(
                 body["includeCategory"] = True
             response = await ui_client.sdk_summarize_diff(body)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             summary = (response.data or {}).get("summary", "No changes")
             return [types.TextContent(type="text", text=summary)]
 
@@ -7304,7 +7339,7 @@ async def call_tool(
                 body["fromBookmark"] = arguments["from_bookmark"]
             response = await ui_client.sdk_structured_changes(body or None)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             lines = ["Structured change analysis:"]
             lines.append(
@@ -7331,19 +7366,19 @@ async def call_tool(
         elif name == "sdk_change_buffer_enable":
             response = await ui_client.sdk_enable_change_buffer()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Change buffer enabled.")]
 
         elif name == "sdk_change_buffer_disable":
             response = await ui_client.sdk_disable_change_buffer()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Change buffer disabled.")]
 
         elif name == "sdk_change_buffer_drain":
             response = await ui_client.sdk_drain_change_buffer()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             changes = data.get("changes", [])
             return [
@@ -7355,7 +7390,7 @@ async def call_tool(
         elif name == "sdk_change_buffer_size":
             response = await ui_client.sdk_change_buffer_size()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             return [
                 types.TextContent(
@@ -7372,7 +7407,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.control_save_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=f"Bookmark '{bookmark_name}' saved successfully."
@@ -7382,7 +7417,7 @@ async def call_tool(
         elif name == "ui_list_bookmarks":
             response = await ui_client.control_list_bookmarks()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             bookmarks = response.data or []
             if not bookmarks:
                 return [types.TextContent(type="text", text="No bookmarks saved.")]
@@ -7401,7 +7436,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.control_delete_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text", text=f"Bookmark '{bookmark_name}' deleted."
@@ -7412,7 +7447,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.control_diff_from_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             changes = data.get("changes", {})
             appeared = changes.get("appeared", [])
@@ -7457,7 +7492,7 @@ async def call_tool(
 
             response = await ui_client.control_execute_with_diff(request_body)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
 
             data = response.data or {}
             lines = [f"Execute with diff: {action_name} on {element_id}"]
@@ -7500,7 +7535,7 @@ async def call_tool(
                 predicate, options or None
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             if data.get("matched"):
                 diff = data.get("diff", {})
@@ -7523,7 +7558,7 @@ async def call_tool(
                 scope, arguments.get("from_bookmark")
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             changes = data.get("changes", {})
             return [
@@ -7540,7 +7575,7 @@ async def call_tool(
             bookmark_name = arguments["name"]
             response = await ui_client.control_get_bookmark(bookmark_name)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             if not data:
                 return [
@@ -7559,7 +7594,7 @@ async def call_tool(
         elif name == "ui_categorize_last_diff":
             response = await ui_client.control_categorize_last_diff()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             if not data:
                 return [
@@ -7583,7 +7618,7 @@ async def call_tool(
                 body["includeCategory"] = True
             response = await ui_client.control_summarize_diff(body)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             summary = (response.data or {}).get("summary", "No changes")
             return [types.TextContent(type="text", text=summary)]
 
@@ -7593,7 +7628,7 @@ async def call_tool(
                 body["fromBookmark"] = arguments["from_bookmark"]
             response = await ui_client.control_structured_changes(body or None)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             lines = ["Structured change analysis:"]
             lines.append(
@@ -7620,19 +7655,19 @@ async def call_tool(
         elif name == "ui_change_buffer_enable":
             response = await ui_client.control_enable_change_buffer()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Change buffer enabled.")]
 
         elif name == "ui_change_buffer_disable":
             response = await ui_client.control_disable_change_buffer()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [types.TextContent(type="text", text="Change buffer disabled.")]
 
         elif name == "ui_change_buffer_drain":
             response = await ui_client.control_drain_change_buffer()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             changes = data.get("changes", [])
             return [
@@ -7644,7 +7679,7 @@ async def call_tool(
         elif name == "ui_change_buffer_size":
             response = await ui_client.control_change_buffer_size()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             return [
                 types.TextContent(
@@ -7657,7 +7692,7 @@ async def call_tool(
         elif name == "ui_undo_state":
             response = await ui_client.control_undo_state()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(type="text", text=_format_undo_state(response.data))
             ]
@@ -7665,7 +7700,7 @@ async def call_tool(
         elif name == "ui_undo":
             response = await ui_client.control_undo()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             executed = data.get("executed", False)
             msg = "Undo executed." if executed else "Undo was not available."
@@ -7674,7 +7709,7 @@ async def call_tool(
         elif name == "ui_redo":
             response = await ui_client.control_redo()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             executed = data.get("executed", False)
             msg = "Redo executed." if executed else "Redo was not available."
@@ -7683,7 +7718,7 @@ async def call_tool(
         elif name == "sdk_undo_state":
             response = await ui_client.sdk_undo_state()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(type="text", text=_format_undo_state(response.data))
             ]
@@ -7691,7 +7726,7 @@ async def call_tool(
         elif name == "sdk_undo":
             response = await ui_client.sdk_undo()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             executed = data.get("executed", False)
             msg = "Undo executed." if executed else "Undo was not available."
@@ -7700,7 +7735,7 @@ async def call_tool(
         elif name == "sdk_redo":
             response = await ui_client.sdk_redo()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             executed = data.get("executed", False)
             msg = "Redo executed." if executed else "Redo was not available."
@@ -7719,7 +7754,7 @@ async def call_tool(
                 oversize_threshold=arguments.get("oversize_threshold"),
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             elements = data.get("elements", [])
             lines = [f"Found {len(elements)} media element(s):", ""]
@@ -7745,7 +7780,7 @@ async def call_tool(
         elif name == "sdk_media_audit_accessibility":
             response = await ui_client.sdk_media_audit_accessibility()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             lines = ["## Media Accessibility Audit", ""]
             missing = data.get("missingAlt", [])
@@ -7778,7 +7813,7 @@ async def call_tool(
         elif name == "sdk_media_audit_performance":
             response = await ui_client.sdk_media_audit_performance()
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             lines = ["## Media Performance Audit", ""]
             oversized = data.get("oversized", [])
@@ -7821,7 +7856,7 @@ async def call_tool(
                 max_size=arguments.get("max_size"),
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             img_data = data.get("data", "")
             width = data.get("width", 0)
@@ -7849,7 +7884,7 @@ async def call_tool(
                 snapshot_b=arguments["snapshot_b"],
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             identical = data.get("identical", False)
             diff_pct = data.get("diffPercentage", 0)
@@ -7885,7 +7920,7 @@ async def call_tool(
                 max_size=arguments.get("max_size"),
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             batch_results: list[Any] = (
                 response.data if isinstance(response.data, list) else []
             )
@@ -7929,7 +7964,7 @@ async def call_tool(
                 max_size=arguments.get("max_size"),
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             data = response.data or {}
             image = data.get("image", {})
             context = data.get("context", {})
@@ -7971,7 +8006,7 @@ async def call_tool(
                 max_size=arguments.get("max_size"),
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             audit_results: list[Any] = (
                 response.data if isinstance(response.data, list) else []
             )
@@ -8028,7 +8063,7 @@ async def call_tool(
                 selector=selector, action=action, index=index
             )
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
@@ -8040,7 +8075,7 @@ async def call_tool(
             expression = arguments.get("expression", "")
             response = await ui_client.control_page_evaluate(expression)
             if not response.success:
-                return [types.TextContent(type="text", text=f"Error: {response.error}")]
+                return _error_result(response)
             return [
                 types.TextContent(
                     type="text",
