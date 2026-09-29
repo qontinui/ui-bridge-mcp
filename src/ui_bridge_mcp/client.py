@@ -83,11 +83,18 @@ def _str_field(obj: Any, key: str) -> str | None:
     return None
 
 
+def _envelope_unknown(obj: Any) -> dict[str, Any] | None:
+    """The ``unknown`` object of an Observation envelope in ``unknown`` state."""
+    if isinstance(obj, dict) and obj.get("status") == "unknown":
+        unknown = obj.get("unknown")
+        if isinstance(unknown, dict):
+            return unknown
+    return None
+
+
 def _envelope_unknown_code(obj: Any) -> str | None:
     """Return ``unknown.code`` when ``obj`` is an Observation envelope in ``unknown``."""
-    if isinstance(obj, dict) and obj.get("status") == "unknown":
-        return _str_field(obj.get("unknown"), "code")
-    return None
+    return _str_field(_envelope_unknown(obj), "code")
 
 
 def extract_code(body: Any) -> str | None:
@@ -144,17 +151,19 @@ def render_body_error(body: Any, raw_text: str) -> str:
         if not raw:
             return "(empty response body)"
         if len(raw) > RAW_BODY_LIMIT:
-            raw = raw[:RAW_BODY_LIMIT] + f"\u2026 ({len(raw_text)} bytes)"
+            raw = raw[:RAW_BODY_LIMIT] + f"\u2026 ({len(raw_text)} chars)"
         return raw
 
     detail = body.get("error_detail")
     detail = detail if isinstance(detail, dict) else {}
-    unknown = body.get("unknown") if body.get("status") == "unknown" else None
-    unknown = unknown if isinstance(unknown, dict) else {}
+    unknown = _envelope_unknown(body) or _envelope_unknown(body.get("data")) or {}
 
     head = _str_field(body, "error") or _str_field(detail, "message")
-    if head is None and unknown.get("detail") is not None:
-        head = _compact(unknown["detail"])
+    unknown_detail = unknown.get("detail")
+    if head is None and unknown_detail is not None:
+        # The envelope's detail IS the message; do not repeat it below.
+        head = _compact(unknown_detail)
+        unknown_detail = None
     lines = [head if head is not None else "(no error message in body)"]
 
     if body.get("hint") is not None:
@@ -166,8 +175,8 @@ def render_body_error(body: Any, raw_text: str) -> str:
         lines.append(f"recovery: {_compact(detail['recovery'])}")
     if detail.get("context") is not None:
         lines.append(f"context: {_compact(detail['context'])}")
-    if head is not None and unknown.get("detail") is not None:
-        lines.append(f"detail: {_compact(unknown['detail'])}")
+    if unknown_detail is not None:
+        lines.append(f"detail: {_compact(unknown_detail)}")
     return "\n".join(lines)
 
 

@@ -19,6 +19,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .client import UIBridgeClient, UIBridgeResponse
+from .elements import element_state
 from .screenshot import (
     AnnotationOptions,
     BaselineStore,
@@ -150,8 +151,8 @@ class DiffTracker:
     def _prop_changes(
         self, old_el: dict[str, Any], new_el: dict[str, Any]
     ) -> dict[str, Any]:
-        old_state = old_el.get("state", {})
-        new_state = new_el.get("state", {})
+        old_state = element_state(old_el)
+        new_state = element_state(new_el)
         changes: dict[str, Any] = {}
         for prop in self.TRACKED_PROPS:
             old_val = old_state.get(prop)
@@ -177,7 +178,7 @@ CONTENT_END = "<</CONTENT>>"
 
 def sanitize_element_content(data: dict[str, Any]) -> dict[str, Any]:
     """Wrap user-generated content fields in boundary markers."""
-    state = data.get("state", {})
+    state = element_state(data)
     for field in ("textContent", "innerHTML", "value"):
         if field in state and state[field]:
             state[field] = f"{CONTENT_START}{state[field]}{CONTENT_END}"
@@ -306,7 +307,7 @@ def format_element_compact(element: dict[str, Any], ref: str) -> str:
     label = element.get("label", "")
     category = element.get("category", "")
     content_meta = element.get("contentMetadata", {})
-    state = element.get("state", {})
+    state = element_state(element)
     rect = state.get("rect", {})
 
     parts = [ref, elem_id, f"({elem_type})"]
@@ -353,7 +354,7 @@ def format_element_summary(element: dict[str, Any]) -> str:
     label = element.get("label", "")
     category = element.get("category", "")
     content_meta = element.get("contentMetadata", {})
-    state = element.get("state", {})
+    state = element_state(element)
     rect = state.get("rect", {})
     visible = state.get("visible", True)
     enabled = state.get("enabled", True)
@@ -936,14 +937,7 @@ def _normalize_components(raw: Any) -> list[dict[str, Any]]:
                 "id": comp.get("id", ""),
                 "name": comp.get("name", comp.get("id", "")),
                 "type": comp.get("type", "component"),
-                "stateKeys": comp.get(
-                    "stateKeys",
-                    (
-                        list(comp.get("state", {}).keys())
-                        if isinstance(comp.get("state"), dict)
-                        else []
-                    ),
-                ),
+                "stateKeys": comp.get("stateKeys", list(element_state(comp).keys())),
                 "actions": comp.get("actions", []),
             }
         )
@@ -4215,7 +4209,7 @@ async def call_tool(
             if max_content_length:
                 for el in elements:
                     el["label"] = truncate_field(el.get("label"), max_content_length)
-                    state = el.get("state", {})
+                    state = element_state(el)
                     for field in ("textContent", "value"):
                         if field in state:
                             state[field] = truncate_field(
@@ -4311,7 +4305,7 @@ async def call_tool(
             sanitize_element_content(result_data)
             # Feature 3: Truncate content fields
             if max_content_length:
-                state = result_data.get("state", {})
+                state = element_state(result_data)
                 for field in ("textContent", "innerHTML", "value"):
                     if field in state:
                         state[field] = truncate_field(
@@ -4594,7 +4588,7 @@ async def call_tool(
             if max_content_length:
                 for el in elements:
                     el["label"] = truncate_field(el.get("label"), max_content_length)
-                    state = el.get("state", {})
+                    state = element_state(el)
                     for field in ("textContent", "value"):
                         if field in state:
                             state[field] = truncate_field(
@@ -4858,7 +4852,7 @@ async def call_tool(
             if max_content_length:
                 for el in elements:
                     el["label"] = truncate_field(el.get("label"), max_content_length)
-                    state = el.get("state", {})
+                    state = element_state(el)
                     for field in ("textContent", "value"):
                         if field in state:
                             state[field] = truncate_field(
@@ -4937,7 +4931,7 @@ async def call_tool(
             sanitize_element_content(result_data)
             # Feature 3: Truncate content fields
             if max_content_length:
-                state = result_data.get("state", {})
+                state = element_state(result_data)
                 for field in ("textContent", "innerHTML", "value"):
                     if field in state:
                         state[field] = truncate_field(
@@ -5248,8 +5242,8 @@ async def call_tool(
 
         elif name == "sdk_ai_assert":
             text = arguments["text"]
-            state = arguments.get("state")
-            response = await ui_client.sdk_ai_assert(text, state)
+            assert_state = arguments.get("state")
+            response = await ui_client.sdk_ai_assert(text, assert_state)
             if not response.success:
                 return [
                     types.TextContent(

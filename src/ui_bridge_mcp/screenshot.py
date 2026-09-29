@@ -13,6 +13,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from .elements import element_state
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -122,19 +124,9 @@ _STYLE_CONTENT = ("#78909C", "#78909C", "white", 1)  # blue-gray
 _STYLE_OFFSCREEN = ("#FFD600", "#FFD600", "black", 1)  # yellow
 
 
-def _state(el: dict[str, Any]) -> dict[str, Any]:
-    """An element's ``state`` object, or ``{}`` when absent or not an object.
-
-    ``state: null`` must not crash a renderer; callers that need to tell an
-    absent state from an empty one use ``_has_unmeasured_geometry``.
-    """
-    state = el.get("state")
-    return state if isinstance(state, dict) else {}
-
-
 def _element_style(el: dict[str, Any], mode: str) -> tuple[str, str, str, int]:
     """Determine annotation style for an element based on mode and state."""
-    state = _state(el)
+    state = element_state(el)
     category = el.get("category", "interactive")
 
     if mode == "state":
@@ -180,7 +172,7 @@ def _should_annotate(
     modal_element_ids: set[str] | None,
 ) -> bool:
     """Decide whether to annotate a given element."""
-    state = _state(el)
+    state = element_state(el)
     rect = state.get("rect")
     if not rect:
         return False
@@ -330,7 +322,7 @@ def annotate_screenshot(
             if not _should_annotate(el, options.mode, highlight_ids, modal_element_ids):
                 continue
 
-            state = _state(el)
+            state = element_state(el)
             rect = state.get("rect", {})
             elem_id = el.get("id", "?")
             ref = rm.assign(elem_id)
@@ -405,7 +397,7 @@ def _extract_modal_context(
     # Try to find the modal element itself for its rect
     for el in elements:
         if el.get("id") == modal_id:
-            r = _state(el).get("rect")
+            r = element_state(el).get("rect")
             if r:
                 modal_rect = r
             break
@@ -422,7 +414,7 @@ def _extract_modal_context(
     mh = modal_rect.get("height", 0)
 
     for el in elements:
-        r = _state(el).get("rect")
+        r = element_state(el).get("rect")
         if not r:
             continue
         ex = r.get("x", 0)
@@ -492,7 +484,7 @@ def _draw_relationship_lines(
     centers: dict[str, tuple[float, float]] = {}
     for el in elements:
         eid = el.get("id", "")
-        rect = _state(el).get("rect")
+        rect = element_state(el).get("rect")
         if rect:
             cx = (rect.get("x", 0) + rect.get("width", 0) / 2) * scale_x
             cy = (rect.get("y", 0) + rect.get("height", 0) / 2) * scale_y
@@ -630,7 +622,8 @@ def _draw_viewport_indicators(
     offscreen_count = sum(
         1
         for el in elements
-        if _state(el).get("inViewport") is False and _state(el).get("visible", True)
+        if element_state(el).get("inViewport") is False
+        and element_state(el).get("visible", True)
     )
     if offscreen_count > 0:
         label = f"{offscreen_count} off-screen"
@@ -723,7 +716,7 @@ def draw_box_model_overlay(
 
     for el in elements:
         eid = el.get("id", "")
-        state = _state(el)
+        state = element_state(el)
         rect = state.get("rect")
         if not rect or not state.get("visible", True):
             continue
@@ -843,7 +836,7 @@ def draw_accessibility_overlay(
     focus_order = 0
 
     for el in elements:
-        state = _state(el)
+        state = element_state(el)
         rect = state.get("rect")
         if not rect or not state.get("visible", True):
             continue
@@ -999,9 +992,9 @@ def _scroll_lines(viewport: dict[str, Any], vp_h: float) -> list[str]:
     """
     raw_y = viewport.get("scrollY")
     scroll_y: float | None = float(raw_y) if isinstance(raw_y, (int, float)) else None
-    can_down: bool | None = (
-        bool(viewport["canScrollDown"]) if "canScrollDown" in viewport else None
-    )
+    raw_down = viewport.get("canScrollDown")
+    # null is treated like absent: the producer did not say.
+    can_down: bool | None = bool(raw_down) if raw_down is not None else None
     if scroll_y is None and can_down is None:
         return [_unknown_line("Scroll")]
 
@@ -1074,7 +1067,7 @@ def generate_visual_description(
         visible_elements = [
             el
             for el in elements
-            if _state(el).get("visible", True) and _state(el).get("rect")
+            if element_state(el).get("visible", True) and element_state(el).get("rect")
         ]
         lines.append(f"Elements: {len(visible_elements)} visible")
         unmeasured = sum(1 for el in elements if _has_unmeasured_geometry(el))
@@ -1142,7 +1135,7 @@ def generate_visual_description(
         if health != "healthy":
             lines.append(f"Health: {health}")
             for key, label in (("errorCount", "Errors"), ("warningCount", "Warnings")):
-                if key not in errors:
+                if errors.get(key) is None:
                     lines.append(_unknown_line(f"  {label}"))
                 elif errors[key]:
                     lines.append(f"  {label}: {errors[key]}")
@@ -1171,7 +1164,7 @@ def _detect_layout_regions(
     sidebar_min_x = vp_w * 0.75
 
     for el in elements:
-        rect = _state(el).get("rect", {})
+        rect = element_state(el).get("rect", {})
         x = rect.get("x", 0)
         y = rect.get("y", 0)
         w = rect.get("width", 0)
@@ -1369,7 +1362,7 @@ def crop_to_element(
         logger.warning("Pillow not installed.")
         return None
 
-    state = _state(element)
+    state = element_state(element)
     rect = state.get("rect")
     if not rect:
         return None

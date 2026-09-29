@@ -598,7 +598,7 @@ def test_http_error_unparseable_body_is_truncated(
     resp = _run(_mocked(monkeypatch, handler))
     assert resp.error is not None
     assert len(resp.error) < 700
-    assert "(5000 bytes)" in resp.error
+    assert "(5000 chars)" in resp.error
 
 
 def test_200_success_false_without_code_is_producer_failed(
@@ -619,3 +619,93 @@ def test_unsupported_method_carries_code(monkeypatch: pytest.MonkeyPatch) -> Non
     resp = _run(_client(monkeypatch), method="PATCH")
     assert resp.success is False
     assert resp.code == CODE_PRODUCER_FAILED
+
+
+# =============================================================================
+# Round 2: null is not clean, and state:null never crashes a snapshot tool
+# =============================================================================
+
+
+def test_can_scroll_down_null_is_unknown() -> None:
+    present = _full_snapshot()
+    null = copy.deepcopy(present)
+    null["viewport"]["canScrollDown"] = None
+    null["viewport"]["scrollY"] = None
+
+    out_null = _describe(null)
+    assert _unknown("Scroll") in out_null
+    assert "UNKNOWN" not in _describe(present)
+
+    only_down_null = copy.deepcopy(present)
+    only_down_null["viewport"]["canScrollDown"] = None
+    assert _unknown("  More content below") in _describe(only_down_null)
+
+
+def test_unhealthy_counts_null_are_unknown() -> None:
+    snap = _full_snapshot()
+    snap["errorSummary"] = {
+        "health": "degraded",
+        "errorCount": None,
+        "warningCount": None,
+    }
+    desc = _describe(snap)
+    assert _unknown("  Errors") in desc
+    assert _unknown("  Warnings") in desc
+
+
+def test_wrapped_envelope_detail_is_rendered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {
+        "success": False,
+        "data": {
+            "status": "unknown",
+            "unknown": {"code": "stale_input", "detail": "frame older than 5s"},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    resp = _run(_mocked(monkeypatch, handler))
+    assert resp.code == "stale_input"
+    assert resp.error == "frame older than 5s"
+
+
+_NULL_STATE_SNAPSHOT = {
+    "elements": [
+        {"id": "a", "type": "button", "label": "A", "state": None},
+        {
+            "id": "b",
+            "type": "input",
+            "label": "B",
+            "state": {"visible": True, "value": "x" * 50},
+        },
+    ],
+    "components": [{"id": "c", "state": None}],
+}
+
+
+def _snapshot_handler(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200, json={"success": True, "data": copy.deepcopy(_NULL_STATE_SNAPSHOT)}
+    )
+
+
+@pytest.mark.parametrize("tool", ["ui_snapshot", "sdk_snapshot"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"agent_mode": True},
+        {"max_content_length": 10},
+        {"agent_mode": True, "max_content_length": 10},
+    ],
+)
+def test_snapshot_tools_survive_state_null(
+    monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, Any]
+) -> None:
+    monkeypatch.setattr(server_mod, "client", _mocked(monkeypatch, _snapshot_handler))
+    text = _call_tool(tool, arguments)
+    assert "NoneType" not in text
+    assert not text.startswith("Error:")
