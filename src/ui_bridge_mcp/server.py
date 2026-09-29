@@ -6492,9 +6492,9 @@ async def call_tool(
                                     result_lines.append(
                                         f"    [{eid}] {cr.get('message', '?')}"
                                     )
-            elif audit_resp.code != "NO_STYLE_GUIDE" and "NO_STYLE_GUIDE" not in (
-                audit_resp.error or ""
-            ):
+            else:
+                # Every audit failure is reported, including "no style guide":
+                # an audit that did not run is not a clean audit.
                 result_lines.append(f"\nStyle audit: {audit_resp.describe_error()}")
 
             # 5. Quality evaluation

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -114,6 +115,62 @@ def extract_code(body: Any) -> str | None:
     )
 
 
+RAW_BODY_LIMIT = 500
+FIELD_LIMIT = 300
+
+
+def _compact(value: Any, limit: int = FIELD_LIMIT) -> str:
+    """One-line rendering of a JSON value, truncated to ``limit`` characters."""
+    text = (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
+    )
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def render_body_error(body: Any, raw_text: str) -> str:
+    """Render a failure body for a human AND keep every recovery field.
+
+    The body's ``error`` comes first, then one compact line per recovery field
+    the producer sent: runner ``hint`` / SDK+runner ``suggestions`` /
+    ``error_detail.recovery`` / ``error_detail.context``, and an Observation
+    envelope's ``unknown.detail``. A body that is not a JSON object falls back
+    to the raw response text, truncated.
+    """
+    if not isinstance(body, dict):
+        raw = " ".join(raw_text.split())
+        if not raw:
+            return "(empty response body)"
+        if len(raw) > RAW_BODY_LIMIT:
+            raw = raw[:RAW_BODY_LIMIT] + f"\u2026 ({len(raw_text)} bytes)"
+        return raw
+
+    detail = body.get("error_detail")
+    detail = detail if isinstance(detail, dict) else {}
+    unknown = body.get("unknown") if body.get("status") == "unknown" else None
+    unknown = unknown if isinstance(unknown, dict) else {}
+
+    head = _str_field(body, "error") or _str_field(detail, "message")
+    if head is None and unknown.get("detail") is not None:
+        head = _compact(unknown["detail"])
+    lines = [head if head is not None else "(no error message in body)"]
+
+    if body.get("hint") is not None:
+        lines.append(f"hint: {_compact(body['hint'])}")
+    suggestions = body.get("suggestions")
+    if isinstance(suggestions, list) and suggestions:
+        lines.append(f"suggestions: {_compact('; '.join(map(str, suggestions)))}")
+    if detail.get("recovery") is not None:
+        lines.append(f"recovery: {_compact(detail['recovery'])}")
+    if detail.get("context") is not None:
+        lines.append(f"context: {_compact(detail['context'])}")
+    if head is not None and unknown.get("detail") is not None:
+        lines.append(f"detail: {_compact(unknown['detail'])}")
+    return "\n".join(lines)
+
+
 class UIBridgeClient:
     """HTTP client for the UI Bridge API.
 
@@ -179,7 +236,9 @@ class UIBridgeClient:
                 response = await client.delete(url, timeout=timeout)
             else:
                 return UIBridgeResponse(
-                    success=False, error=f"Unsupported method: {method}"
+                    success=False,
+                    error=f"Unsupported method: {method} (client did not send a request)",
+                    code=CODE_PRODUCER_FAILED,
                 )
 
             response.raise_for_status()
@@ -194,12 +253,22 @@ class UIBridgeClient:
                     code=CODE_PRODUCER_FAILED,
                     status=response.status_code,
                 )
+            # Absent `success` is a failure, never a success.
+            success = data.get("success", False) is True
+            code = extract_code(data)
+            if success:
+                return UIBridgeResponse(
+                    success=True,
+                    data=data.get("data"),
+                    error=data.get("error"),
+                    code=code,
+                    status=response.status_code,
+                )
             return UIBridgeResponse(
-                # Absent `success` is a failure, never a success.
-                success=data.get("success", False),
+                success=False,
                 data=data.get("data"),
-                error=data.get("error"),
-                code=extract_code(data),
+                error=render_body_error(data, response.text),
+                code=code or CODE_PRODUCER_FAILED,
                 status=response.status_code,
             )
         except httpx.ConnectTimeout:
@@ -240,11 +309,7 @@ class UIBridgeClient:
         except ValueError:
             body = None
         code = extract_code(body) or CODE_PRODUCER_FAILED
-        body_error = body.get("error") if isinstance(body, dict) else None
-        if isinstance(body_error, str) and body_error:
-            error = f"API error {status}: {body_error}"
-        else:
-            error = f"API error: {status} - {response.text}"
+        error = f"API error {status}: {render_body_error(body, response.text)}"
         return UIBridgeResponse(success=False, error=error, code=code, status=status)
 
     # -------------------------------------------------------------------------

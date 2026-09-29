@@ -110,11 +110,85 @@ def test_error_summary_present_without_health_key_is_unknown() -> None:
 
 def test_error_summary_unhealthy_still_renders() -> None:
     snap = _full_snapshot()
-    snap["errorSummary"] = {"health": "degraded", "errorCount": 2}
+    snap["errorSummary"] = {"health": "degraded", "errorCount": 2, "warningCount": 0}
     desc = _describe(snap)
     assert "Health: degraded" in desc
     assert "Errors: 2" in desc
     assert "UNKNOWN" not in desc
+
+
+def test_unhealthy_counts_absent_vs_present() -> None:
+    present = _full_snapshot()
+    present["errorSummary"] = {"health": "degraded", "errorCount": 0, "warningCount": 0}
+    absent = _full_snapshot()
+    absent["errorSummary"] = {"health": "degraded"}
+
+    out_absent = _describe(absent)
+    out_present = _describe(present)
+
+    assert _unknown("  Errors") in out_absent
+    assert _unknown("  Warnings") in out_absent
+    assert "UNKNOWN" not in out_present
+    assert out_absent != out_present
+
+
+def test_scroll_fields_absent_vs_present() -> None:
+    present = _full_snapshot()
+    absent = copy.deepcopy(present)
+    del absent["viewport"]["scrollY"]
+    del absent["viewport"]["canScrollDown"]
+
+    out_absent = _describe(absent)
+    out_present = _describe(present)
+
+    assert _unknown("Scroll") in out_absent
+    assert "UNKNOWN" not in out_present
+    assert out_absent != out_present
+
+
+def test_scroll_without_document_height_invents_no_percentage() -> None:
+    snap = _full_snapshot()
+    snap["viewport"] = {"viewportWidth": 800, "viewportHeight": 600, "scrollY": 500}
+    desc = _describe(snap)
+    assert "Scroll: 500px down" in desc
+    assert "%" not in desc
+    assert _unknown("  Document height") in desc
+    assert _unknown("  More content below") in desc
+
+
+def test_scroll_with_document_height_keeps_percentage() -> None:
+    snap = _full_snapshot()
+    snap["viewport"] = {
+        "viewportWidth": 800,
+        "viewportHeight": 600,
+        "scrollY": 500,
+        "documentHeight": 1600,
+        "canScrollDown": True,
+    }
+    desc = _describe(snap)
+    assert "Scroll: 50% down (500px)" in desc
+    assert "More content below" in desc
+    assert "UNKNOWN" not in desc
+
+
+def test_scroll_position_absent_with_can_scroll_present() -> None:
+    snap = _full_snapshot()
+    snap["viewport"] = {
+        "viewportWidth": 800,
+        "viewportHeight": 600,
+        "canScrollDown": True,
+    }
+    desc = _describe(snap)
+    assert _unknown("Scroll position") in desc
+    assert "  More content below" in desc
+
+
+def test_state_null_is_unmeasured_not_a_crash() -> None:
+    snap = _full_snapshot()
+    snap["elements"] = [{"id": "a", "state": None}]
+    desc = _describe(snap)
+    assert "Elements: 0 visible" in desc
+    assert _unknown("Geometry of 1 element") in desc
 
 
 @pytest.mark.parametrize(
@@ -468,3 +542,80 @@ def test_visual_description_tool_renders_absent_fields_unknown(
     assert _unknown("Health") in text
     assert _unknown("Elements") in text
     assert "0 visible" not in text
+
+
+def test_tool_error_result_carries_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool that fails through ``_error_result`` (ui_snapshot) shows the code."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500, json={"success": False, "error": "x", "code": "UB-NET-ERROR"}
+        )
+
+    monkeypatch.setattr(server_mod, "client", _mocked(monkeypatch, handler))
+    text = _call_tool("ui_snapshot", {})
+    assert text.startswith("Error: [code=UB-NET-ERROR status=500]")
+
+
+def test_http_422_runner_body_keeps_recovery_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {
+        "success": False,
+        "error": "Element 'btn-sav' not found",
+        "code": "ELEMENT_NOT_FOUND",
+        "hint": {"closestMatch": "btn-save", "distance": 1},
+        "suggestions": ["Re-take a snapshot", "Use btn-save"],
+        "error_detail": {
+            "code": "ELEMENT_NOT_FOUND",
+            "message": "Element 'btn-sav' not found",
+            "recovery": "RESNAPSHOT",
+            "context": {"element_id": "btn-sav"},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json=body)
+
+    resp = _run(_mocked(monkeypatch, handler))
+    assert resp.code == "ELEMENT_NOT_FOUND"
+    assert resp.status == 422
+    assert resp.error is not None
+    lines = resp.error.splitlines()
+    assert lines[0] == "API error 422: Element 'btn-sav' not found"
+    assert 'hint: {"closestMatch":"btn-save","distance":1}' in lines
+    assert "suggestions: Re-take a snapshot; Use btn-save" in lines
+    assert "recovery: RESNAPSHOT" in lines
+    assert 'context: {"element_id":"btn-sav"}' in lines
+
+
+def test_http_error_unparseable_body_is_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="E" * 5000)
+
+    resp = _run(_mocked(monkeypatch, handler))
+    assert resp.error is not None
+    assert len(resp.error) < 700
+    assert "(5000 bytes)" in resp.error
+
+
+def test_200_success_false_without_code_is_producer_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"success": False, "error": "nope", "suggestions": ["retry"]}
+        )
+
+    resp = _run(_mocked(monkeypatch, handler))
+    assert resp.success is False
+    assert resp.code == CODE_PRODUCER_FAILED
+    assert resp.error == "nope\nsuggestions: retry"
+
+
+def test_unsupported_method_carries_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    resp = _run(_client(monkeypatch), method="PATCH")
+    assert resp.success is False
+    assert resp.code == CODE_PRODUCER_FAILED
