@@ -603,6 +603,57 @@ def test_state_styles_are_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "[hover] (1 changes):\n    color: red → blue" in text(result)
 
 
+RELAY_AUDIT = ok({"issues": [{"type": "contrast"}], "checkedElements": 3})
+
+
+def test_relay_style_audit_is_unknown_not_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The relay's own scan, ``{issues, checkedElements}``, ignores the loaded guide.
+
+    Read with defaults it rendered "Passed: 0 | Failed: 0" (coord finding c577a740).
+    """
+    answering(monkeypatch, {"/ui-bridge/sdk/design/audit": RELAY_AUDIT})
+    result = call("sdk_design_audit", {})
+    assert result.isError is True
+    assert text(result).startswith("Style audit UNKNOWN")
+
+
+def test_style_audit_report_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = {
+        "guideName": "brand",
+        "totalElements": 4,
+        "totalRules": 2,
+        "passedCount": 3,
+        "failedCount": 1,
+        "summary": {"errors": [], "warnings": []},
+    }
+    answering(monkeypatch, {"/ui-bridge/sdk/design/audit": ok(report)})
+    result = call("sdk_design_audit", {})
+    assert result.isError is False
+    assert text(result) == (
+        "Style Audit: brand\nElements: 4 | Rules: 2\nPassed: 3 | Failed: 1"
+    )
+
+
+def test_design_review_reports_a_relay_audit_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(
+        monkeypatch,
+        {
+            "/ui-bridge/sdk/design/snapshot": ok({"elements": []}),
+            "/ui-bridge/sdk/design/audit": RELAY_AUDIT,
+        },
+    )
+    result = call(
+        "sdk_design_review",
+        {"include_state_variations": False, "include_quality_evaluation": False},
+    )
+    assert "Style audit: UNKNOWN" in text(result)
+    assert "0 passed, 0 failed" not in text(result)
+
+
 def test_cross_app_compare_stub_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     """react/commandHandlers.ts crossAppCompare answers a stub with no scores."""
     answering(

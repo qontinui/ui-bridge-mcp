@@ -344,6 +344,18 @@ def _state_style_entries(data: Any) -> list[dict[str, Any]] | None:
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
+def _is_style_audit(data: Any) -> bool:
+    """``data`` is a ``StyleAuditReport``: it carries both counts.
+
+    The browser relay audits with its own contrast/size scan, never reads the
+    loaded guide, and answers ``{issues, checkedElements}`` (``react/
+    commandHandlers.ts`` runDesignAudit; coord finding c577a740). Read with
+    defaults, that rendered as a clean "Passed: 0 | Failed: 0" audit.
+    """
+    report = _as_dict(data)
+    return _number(report.get("passedCount")) and _number(report.get("failedCount"))
+
+
 def _percent(value: Any) -> str:
     """A 0-1 score as a percentage; UNKNOWN when the producer sent none."""
     return f"{value:.0%}" if _number(value) else "UNKNOWN"
@@ -6906,6 +6918,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not response.success:
                 return _error_result(response)
             report = response.data or {}
+            if not _is_style_audit(report):
+                return _tool_error(
+                    "Style audit UNKNOWN: the response is not an audit against the "
+                    "style guide (no passedCount/failedCount); this transport does "
+                    "not audit against the loaded guide."
+                )
             result_lines = [
                 f"Style Audit: {report.get('guideName', '?')}",
                 f"Elements: {report.get('totalElements', 0)} | Rules: {report.get('totalRules', 0)}",
@@ -7060,7 +7078,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
             # 4. Style audit (if guide loaded)
             audit_resp = await ui_client.sdk_design_audit(element_ids=element_ids)
-            if audit_resp.success:
+            if audit_resp.success and not _is_style_audit(audit_resp.data):
+                result_lines.append(
+                    "\nStyle audit: UNKNOWN (the response is not an audit against "
+                    "the style guide)"
+                )
+            elif audit_resp.success:
                 report = audit_resp.data or {}
                 failed = report.get("failedCount", 0)
                 passed = report.get("passedCount", 0)

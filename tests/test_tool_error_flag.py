@@ -803,6 +803,19 @@ FAILURE_PATHS: list[FailurePath] = [
         setup=_fresh("baseline_store", BaselineStore),
     ),
     FailurePath(
+        "sdk_design_audit: Style audit UNKNOWN: the response is not an audit against "
+        "the style guide (no passedCount/failedCount); this transport does not audit "
+        "against the loaded guide.",
+        "sdk_design_audit",
+        {},
+        {
+            "/ui-bridge/sdk/design/audit": ok(
+                {"issues": [{"type": "contrast"}], "checkedElements": 3}
+            )
+        },
+        "Style audit UNKNOWN",
+    ),
+    FailurePath(
         "sdk_design_state_styles: State styles for {} UNKNOWN: the response carried "
         "no per-state list; this transport cannot compute state styles.",
         "sdk_design_state_styles",
