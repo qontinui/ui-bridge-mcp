@@ -70,11 +70,6 @@ def test_client_lifts_a_nested_failure_with_its_code() -> None:
         ("sdk_page_navigate", {"url": "http://x"}, "/ui-bridge/sdk/page/navigate"),
         # Runner routes that wrap their own UI's answer in {success: true}.
         (
-            "ui_page_evaluate",
-            {"expression": "1"},
-            "/ui-bridge/sdk/control/page-evaluate",
-        ),
-        (
             "ui_query_selector",
             {"selector": "a"},
             "/ui-bridge/sdk/control/query-selector",
@@ -90,6 +85,54 @@ def test_nested_failure_is_an_error(
     result = call(tool, arguments)
     assert result.isError is True
     assert "[code=NOPE status=200] it did not happen" in text(result)
+
+
+EVALUATE = "/ui-bridge/sdk/control/page-evaluate"
+
+
+def test_page_evaluate_is_not_lifted_by_the_client() -> None:
+    """Its data is foreign: the lift is off for this one route."""
+    runner = FakeRunner({EVALUATE: ok({"success": False, "error": "page data"})})
+    client = UIBridgeClient(host="127.0.0.1", port=1)
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(runner))
+
+    async def go() -> Any:
+        try:
+            return await client.control_page_evaluate("window.result")
+        finally:
+            await client.close()
+
+    response = asyncio.run(go())
+    assert response.success is True
+    assert response.data == {"success": False, "error": "page data"}
+
+
+def test_page_evaluate_bare_value_with_its_own_success_false_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner built before 0dbc0bace answers the evaluated value as bare `data`.
+
+    That value can carry its own ``success: false``; it is the page's data, not
+    a verdict, so it stays an answer, said to be UNKNOWN.
+    """
+    value = {"success": False, "error": "from the page", "items": 2}
+    answering(monkeypatch, {EVALUATE: ok(value)})
+    result = call("ui_page_evaluate", {"expression": "window.result"})
+    assert result.isError is False
+    assert '"error": "from the page"' in text(result)
+    assert "Note: whether this evaluation succeeded is UNKNOWN." in text(result)
+
+
+def test_page_evaluate_value_and_type_shape_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Since 0dbc0bace the value arrives as {value, type} (runner utils.ts)."""
+    shaped = {"value": {"success": False, "error": "from the page"}, "type": "object"}
+    answering(monkeypatch, {EVALUATE: ok(shaped)})
+    result = call("ui_page_evaluate", {"expression": "window.result"})
+    assert result.isError is False
+    assert '"type": "object"' in text(result)
+    assert "UNKNOWN" not in text(result)
 
 
 def test_nested_success_is_still_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -363,6 +406,29 @@ def test_missing_diff_summary_is_unknown_not_no_changes(
     assert text(result).startswith("Diff summary UNKNOWN")
 
 
+def test_relay_summary_stub_is_unknown_not_a_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """react/commandHandlers.ts summarizeDiff always answers this fixed text.
+
+    The SDK answers the same request, with no diff, as NO_DIFF.
+    """
+    answering(
+        monkeypatch,
+        {
+            "/ui-bridge/sdk/ai/summarize-diff": ok(
+                {"summary": "No diff data available", "timestamp": 1}
+            )
+        },
+    )
+    result = call("sdk_summarize_diff", {})
+    assert result.isError is True
+    assert text(result).startswith(
+        "Diff summary UNKNOWN: 'No diff data available' is the browser relay's "
+        "fixed answer"
+    )
+
+
 STRUCTURED = [
     ("sdk_structured_changes", "/ui-bridge/sdk/ai/structured-changes"),
     ("ui_structured_changes", "/ui-bridge/control/ai/structured-changes"),
@@ -603,7 +669,22 @@ def test_state_styles_are_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "[hover] (1 changes):\n    color: red → blue" in text(result)
 
 
-RELAY_AUDIT = ok({"issues": [{"type": "contrast"}], "checkedElements": 3})
+# react/commandHandlers.ts runDesignAudit: {issues: [{element, issue, severity,
+# fix?}], checkedElements}.
+RELAY_AUDIT = ok(
+    {
+        "issues": [
+            {
+                "element": "save-btn",
+                "issue": "Low contrast: 2.10:1 (#999 on #fff)",
+                "severity": "warning",
+                "fix": "Increase contrast to at least 4.5:1",
+            },
+            {"element": "title", "issue": "Text nearly invisible", "severity": "error"},
+        ],
+        "checkedElements": 3,
+    }
+)
 
 
 def test_relay_style_audit_is_unknown_not_clean(
@@ -617,6 +698,14 @@ def test_relay_style_audit_is_unknown_not_clean(
     result = call("sdk_design_audit", {})
     assert result.isError is True
     assert text(result).startswith("Style audit UNKNOWN")
+    # Flagged, and the relay's own findings are not dropped.
+    assert text(result).endswith(
+        "The relay's own contrast and size scan reported 2 issue(s) over 3 "
+        "elements:\n"
+        "  [warning] save-btn: Low contrast: 2.10:1 (#999 on #fff) (fix: Increase "
+        "contrast to at least 4.5:1)\n"
+        "  [error] title: Text nearly invisible"
+    )
 
 
 def test_style_audit_report_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -651,6 +740,7 @@ def test_design_review_reports_a_relay_audit_as_unknown(
         {"include_state_variations": False, "include_quality_evaluation": False},
     )
     assert "Style audit: UNKNOWN" in text(result)
+    assert "the relay's own scan reported 2 issue(s)" in text(result)
     assert "0 passed, 0 failed" not in text(result)
 
 
