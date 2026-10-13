@@ -13,6 +13,7 @@ they observe the flag exactly as a client reads it.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import socket
 from collections.abc import Callable
@@ -22,6 +23,7 @@ from typing import Any
 import httpx
 import pytest
 from mcp import types
+from mcp.shared.memory import create_connected_server_and_client_session
 
 import ui_bridge_mcp.server as server_mod
 from ui_bridge_mcp.client import UIBridgeResponse
@@ -42,6 +44,27 @@ def ok(data: Any) -> dict[str, Any]:
     return {"success": True, "data": data}
 
 
+def _call_over_session(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    """``mcp_session.call``, spelled out in this file for the arming proof.
+
+    The arming prover reads only a test's same-file closure, so the test that
+    arms this branch (test_failed_request_is_an_error) has to reach the MCP
+    client session's ``call_tool`` in this file, where the population enters.
+    """
+
+    async def go() -> types.CallToolResult:
+        try:
+            async with create_connected_server_and_client_session(
+                server_mod.server
+            ) as session:
+                return await session.call_tool(name, arguments)
+        finally:
+            if server_mod.client is not None:
+                await server_mod.client.close()
+
+    return asyncio.run(go())
+
+
 # =============================================================================
 # Failures carry isError: true
 # =============================================================================
@@ -59,7 +82,7 @@ def test_failed_request_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
         500, json={"success": False, "error": "x", "code": "UB-NET-ERROR"}
     )
     answering(monkeypatch, {"/ui-bridge/control/snapshot": failed})
-    result = call("ui_snapshot", {})
+    result = _call_over_session("ui_snapshot", {})
     assert result.isError is True
     assert text(result).startswith("Error: [code=UB-NET-ERROR status=500]")
 
