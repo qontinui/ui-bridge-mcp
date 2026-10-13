@@ -13,21 +13,21 @@ they observe the flag exactly as a client reads it.
 from __future__ import annotations
 
 import ast
-import asyncio
 import inspect
 import socket
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import pytest
 from mcp import types
-from mcp.shared.memory import create_connected_server_and_client_session
 
 import ui_bridge_mcp.server as server_mod
-from ui_bridge_mcp.client import UIBridgeClient, UIBridgeResponse
+from ui_bridge_mcp.client import UIBridgeResponse
+from ui_bridge_mcp.screenshot import BaselineStore
 
-Handler = Callable[[httpx.Request], httpx.Response]
+from .mcp_session import answering, call, install, text
 
 
 def _closed_port() -> int:
@@ -37,47 +37,9 @@ def _closed_port() -> int:
     return port
 
 
-def _client(
-    monkeypatch: pytest.MonkeyPatch, *, port: int = 1, handler: Handler | None = None
-) -> UIBridgeClient:
-    monkeypatch.delenv("QONTINUI_RUNNER_PORT", raising=False)
-    monkeypatch.delenv("QONTINUI_RUNNER_HOST", raising=False)
-    c = UIBridgeClient(host="127.0.0.1", port=port)
-    if handler is not None:
-        c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return c
-
-
-def _answering(routes: dict[str, dict[str, Any]]) -> Handler:
-    """A runner that answers each listed path with its body, and 404s the rest."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = routes.get(request.url.path)
-        if body is None:
-            return httpx.Response(404, json={"success": False, "error": "Not found"})
-        return httpx.Response(200, json=body)
-
-    return handler
-
-
-def _call(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
-    """Call a tool over an MCP client session, as a client would."""
-
-    async def go() -> types.CallToolResult:
-        try:
-            async with create_connected_server_and_client_session(
-                server_mod.server
-            ) as session:
-                return await session.call_tool(name, arguments)
-        finally:
-            if server_mod.client is not None:
-                await server_mod.client.close()
-
-    return asyncio.run(go())
-
-
-def _text(result: types.CallToolResult) -> str:
-    return "\n".join(getattr(item, "text", "") for item in result.content)
+def ok(data: Any) -> dict[str, Any]:
+    """A success envelope carrying ``data``."""
+    return {"success": True, "data": data}
 
 
 # =============================================================================
@@ -86,51 +48,44 @@ def _text(result: types.CallToolResult) -> str:
 
 
 def test_unreachable_runner_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server_mod, "client", _client(monkeypatch, port=_closed_port()))
-    result = _call("ui_health", {})
+    install(monkeypatch, port=_closed_port())
+    result = call("ui_health", {})
     assert result.isError is True
-    assert "code=app_unreachable" in _text(result)
+    assert "code=app_unreachable" in text(result)
 
 
 def test_failed_request_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            500, json={"success": False, "error": "x", "code": "UB-NET-ERROR"}
-        )
-
-    monkeypatch.setattr(server_mod, "client", _client(monkeypatch, handler=handler))
-    result = _call("ui_snapshot", {})
+    failed = httpx.Response(
+        500, json={"success": False, "error": "x", "code": "UB-NET-ERROR"}
+    )
+    answering(monkeypatch, {"/ui-bridge/control/snapshot": failed})
+    result = call("ui_snapshot", {})
     assert result.isError is True
-    assert _text(result).startswith("Error: [code=UB-NET-ERROR status=500]")
+    assert text(result).startswith("Error: [code=UB-NET-ERROR status=500]")
 
 
 def test_unknown_tool_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server_mod, "client", _client(monkeypatch))
-    result = _call("no_such_tool", {})
+    answering(monkeypatch)
+    result = call("no_such_tool", {})
     assert result.isError is True
-    assert _text(result) == "Unknown tool: no_such_tool"
+    assert text(result) == "Unknown tool: no_such_tool"
 
 
 def test_caught_exception_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unknown ref raises before any request; the catch-all reports it."""
-    monkeypatch.setattr(server_mod, "client", _client(monkeypatch))
-    result = _call("ui_click", {"element_id": "@e999"})
+    answering(monkeypatch)
+    result = call("ui_click", {"element_id": "@e999"})
     assert result.isError is True
-    assert _text(result).startswith("Error: Unknown ref @e999")
+    assert text(result).startswith("Error: Unknown ref @e999")
 
 
 def test_unmet_precondition_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """The first sdk_diff has nothing to diff against: no diff was produced."""
     monkeypatch.setattr(server_mod, "sdk_diff_tracker", server_mod.DiffTracker())
-    snapshot = {"success": True, "data": {"elements": [{"id": "save"}]}}
-    monkeypatch.setattr(
-        server_mod,
-        "client",
-        _client(monkeypatch, handler=_answering({"/ui-bridge/sdk/snapshot": snapshot})),
-    )
-    result = _call("sdk_diff", {})
+    answering(monkeypatch, {"/ui-bridge/sdk/snapshot": ok({"elements": [{"id": "s"}]})})
+    result = call("sdk_diff", {})
     assert result.isError is True
-    assert _text(result).startswith("No previous snapshot to diff against.")
+    assert text(result).startswith("No previous snapshot to diff against.")
 
 
 def test_failed_assertion_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,21 +95,14 @@ def test_failed_assertion_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     (ui-bridge ai/assertions.ts returns ``passed: false`` instead of throwing).
     """
     failed = {
-        "success": True,
-        "data": {
-            "passed": False,
-            "failureReason": "Element is hidden",
-            "failureCode": "UB-ASSERT-NOT-VISIBLE",
-        },
+        "passed": False,
+        "failureReason": "Element is hidden",
+        "failureCode": "UB-ASSERT-NOT-VISIBLE",
     }
-    monkeypatch.setattr(
-        server_mod,
-        "client",
-        _client(monkeypatch, handler=_answering({"/ui-bridge/sdk/ai/assert": failed})),
-    )
-    result = _call("sdk_ai_assert", {"text": "Save button", "state": "visible"})
+    answering(monkeypatch, {"/ui-bridge/sdk/ai/assert": ok(failed)})
+    result = call("sdk_ai_assert", {"text": "Save button", "state": "visible"})
     assert result.isError is True
-    assert _text(result).startswith(
+    assert text(result).startswith(
         "Assertion failed: [code=UB-ASSERT-NOT-VISIBLE] expected 'Save button' is visible"
     )
 
@@ -165,41 +113,26 @@ def test_failed_assertion_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_answer_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    healthy = {"success": True, "data": {"status": "ok"}}
-    monkeypatch.setattr(
-        server_mod,
-        "client",
-        _client(monkeypatch, handler=_answering({"/health": healthy})),
-    )
-    result = _call("ui_health", {})
+    answering(monkeypatch, {"/health": ok({"status": "ok"})})
+    result = call("ui_health", {})
     assert result.isError is False
-    assert _text(result) == "Runner is healthy and accessible."
+    assert text(result) == "Runner is healthy and accessible."
 
 
 def test_empty_answer_is_not_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """sdk_status reached the runner and it said: not connected. That is an answer."""
-    status = {"success": True, "data": {"connected": False}}
-    monkeypatch.setattr(
-        server_mod,
-        "client",
-        _client(monkeypatch, handler=_answering({"/ui-bridge/sdk/status": status})),
-    )
-    result = _call("sdk_status", {})
+    answering(monkeypatch, {"/ui-bridge/sdk/status": ok({"connected": False})})
+    result = call("sdk_status", {})
     assert result.isError is False
-    assert _text(result) == "SDK not connected"
+    assert text(result) == "SDK not connected"
 
 
 def test_passed_assertion_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The success path used to read an unbound ``state`` and report an error."""
-    passed = {"success": True, "data": {"passed": True}}
-    monkeypatch.setattr(
-        server_mod,
-        "client",
-        _client(monkeypatch, handler=_answering({"/ui-bridge/sdk/ai/assert": passed})),
-    )
-    result = _call("sdk_ai_assert", {"text": "Save button", "state": "visible"})
+    answering(monkeypatch, {"/ui-bridge/sdk/ai/assert": ok({"passed": True})})
+    result = call("sdk_ai_assert", {"text": "Save button", "state": "visible"})
     assert result.isError is False
-    assert _text(result) == "Assertion passed: 'Save button' is visible"
+    assert text(result) == "Assertion passed: 'Save button' is visible"
 
 
 # =============================================================================
@@ -212,17 +145,37 @@ def test_error_helpers_flag_the_result() -> None:
     result = server_mod._error_result(failed)
     assert isinstance(result, types.CallToolResult)
     assert result.isError is True
-    assert _text(result) == "Error: [code=producer_failed] boom"
+    assert text(result) == "Error: [code=producer_failed] boom"
     assert server_mod._tool_error("nope").isError is True
 
 
+def _module_ast() -> ast.Module:
+    return ast.parse(inspect.getsource(server_mod))
+
+
 def _call_tool_ast() -> ast.AsyncFunctionDef:
-    source = inspect.getsource(server_mod)
-    tree = ast.parse(source)
     return next(
         node
-        for node in ast.walk(tree)
+        for node in ast.walk(_module_ast())
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "call_tool"
+    )
+
+
+def _is_failed_response_test(test: ast.expr) -> bool:
+    """``not <resp>.success``."""
+    return (
+        isinstance(test, ast.UnaryOp)
+        and isinstance(test.op, ast.Not)
+        and isinstance(test.operand, ast.Attribute)
+        and test.operand.attr == "success"
+    )
+
+
+def _is_flagging_call(node: ast.expr | None) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in ("_error_result", "_tool_error")
     )
 
 
@@ -236,54 +189,662 @@ def test_every_failed_response_branch_returns_a_flagged_error() -> None:
     branches = 0
     unflagged: list[int] = []
     for node in ast.walk(fn):
-        if not isinstance(node, ast.If):
-            continue
-        test = node.test
-        if not (
-            isinstance(test, ast.UnaryOp)
-            and isinstance(test.op, ast.Not)
-            and isinstance(test.operand, ast.Attribute)
-            and test.operand.attr == "success"
-        ):
+        if not (isinstance(node, ast.If) and _is_failed_response_test(node.test)):
             continue
         branches += 1
         returns = [n for n in node.body if isinstance(n, ast.Return)]
-        flagged = bool(returns) and all(
-            isinstance(r.value, ast.Call)
-            and isinstance(r.value.func, ast.Name)
-            and r.value.func.id in ("_error_result", "_tool_error")
-            for r in returns
-        )
-        if not flagged:
+        if not (returns and all(_is_flagging_call(r.value) for r in returns)):
             unflagged.append(node.lineno)
     # The scan found the branches, not nothing: a vacuous pass is not a pass.
     assert branches > 100
     assert unflagged == []
 
 
-def test_no_inline_error_text_is_returned_unflagged() -> None:
-    """No ``return [TextContent(text="Error...")]`` survives in call_tool."""
-    fn = _call_tool_ast()
+def _leading_text(value: ast.expr) -> str | None:
+    """The constant text a string or f-string starts with."""
+    head = (
+        value.values[0] if isinstance(value, ast.JoinedStr) and value.values else value
+    )
+    if isinstance(head, ast.Constant) and isinstance(head.value, str):
+        return head.value
+    return None
+
+
+def test_no_error_text_is_returned_unflagged() -> None:
+    """No unflagged answer whose text starts with "Error" survives in the module.
+
+    Covers both answer spellings: an inline ``[TextContent(text=...)]`` and the
+    ``_text(...)`` helper.
+    """
     offenders: list[int] = []
-    for node in ast.walk(fn):
-        if not (isinstance(node, ast.Return) and isinstance(node.value, ast.List)):
+    for node in ast.walk(_module_ast()):
+        if not isinstance(node, ast.Return) or node.value is None:
             continue
-        for element in node.value.elts:
-            if not isinstance(element, ast.Call):
-                continue
-            for keyword in element.keywords:
-                if keyword.arg != "text":
-                    continue
-                value = keyword.value
-                head = (
-                    value.values[0]
-                    if isinstance(value, ast.JoinedStr) and value.values
-                    else value
-                )
-                if (
-                    isinstance(head, ast.Constant)
-                    and isinstance(head.value, str)
-                    and head.value.startswith("Error")
-                ):
-                    offenders.append(node.lineno)
+        texts: list[ast.expr] = []
+        if isinstance(node.value, ast.List):
+            texts = [
+                keyword.value
+                for element in node.value.elts
+                if isinstance(element, ast.Call)
+                for keyword in element.keywords
+                if keyword.arg == "text"
+            ]
+        elif (
+            isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "_text"
+            and node.value.args
+        ):
+            texts = [node.value.args[0]]
+        if any((_leading_text(t) or "").startswith("Error") for t in texts):
+            offenders.append(node.lineno)
     assert offenders == []
+
+
+# =============================================================================
+# Every failure path the ratchets cannot see has a behavioural test
+# =============================================================================
+#
+# The two ratchets reach a failure return only when it is a direct return of an
+# ``if not <resp>.success:`` branch in call_tool, or when its text starts with
+# "Error". Anywhere else -- an unmet precondition, a missing referent, a
+# timeout, a verdict read out of a success envelope -- a failure could lose its
+# flag with both ratchets green. Each such call site is listed below with a
+# scenario that reaches it through an MCP client session, and
+# test_failure_path_census pins that list against the source.
+
+
+def _site_template(arg: ast.expr) -> str:
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.JoinedStr):
+        return "".join(
+            str(v.value) if isinstance(v, ast.Constant) else "{}" for v in arg.values
+        )
+    return ast.unparse(arg)
+
+
+def _unreached_failure_sites() -> list[str]:
+    """``"<tool or helper>: <message template>"`` for every site no ratchet reaches."""
+    tree = _module_ast()
+    parents = {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+
+    def enclosing_function(
+        node: ast.AST,
+    ) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                return node
+        return None
+
+    def tool_branch(node: ast.AST) -> str:
+        while node in parents:
+            parent = parents[node]
+            if isinstance(parent, ast.If) and node in parent.body:
+                test = parent.test
+                if (
+                    isinstance(test, ast.Compare)
+                    and isinstance(test.left, ast.Name)
+                    and test.left.id == "name"
+                    and len(test.ops) == 1
+                ):
+                    target = test.comparators[0]
+                    if isinstance(test.ops[0], ast.Eq) and isinstance(
+                        target, ast.Constant
+                    ):
+                        return str(target.value)
+                    if isinstance(test.ops[0], ast.In) and isinstance(
+                        target, ast.Tuple
+                    ):
+                        return "|".join(
+                            str(e.value)
+                            for e in target.elts
+                            if isinstance(e, ast.Constant)
+                        )
+            node = parent
+        return "call_tool"
+
+    def in_failed_response_branch(node: ast.Call) -> bool:
+        ret = parents.get(node)
+        if not (isinstance(ret, ast.Return) and ret.value is node):
+            return False
+        branch = parents.get(ret)
+        return (
+            isinstance(branch, ast.If)
+            and ret in branch.body
+            and _is_failed_response_test(branch.test)
+        )
+
+    sites: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _is_flagging_call(node)):
+            continue
+        assert isinstance(node.func, ast.Name)
+        function = enclosing_function(node)
+        if function is None or function.name == "_error_result":
+            continue
+        message = _site_template(node.args[0]) if node.args else ""
+        if node.func.id == "_tool_error" and message.startswith("Error"):
+            continue  # test_no_error_text_is_returned_unflagged reaches it
+        if function.name == "call_tool":
+            if in_failed_response_branch(node):
+                continue  # test_every_failed_response_branch_... reaches it
+            scope = tool_branch(node)
+        else:
+            scope = function.name
+        if node.func.id == "_error_result":
+            message = f"_error_result({', '.join(ast.unparse(a) for a in node.args)})"
+        sites.append(f"{scope}: {message}")
+    return sites
+
+
+@dataclass(frozen=True)
+class FailurePath:
+    """A scenario that reaches one failure call site through a client session."""
+
+    site: str
+    tool: str
+    arguments: dict[str, Any]
+    routes: dict[str, Any]
+    expect: str
+    setup: Callable[[pytest.MonkeyPatch], None] | None = None
+
+
+def _fresh(
+    attribute: str, factory: Callable[[], Any]
+) -> Callable[[pytest.MonkeyPatch], None]:
+    def setup(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(server_mod, attribute, factory())
+
+    return setup
+
+
+SDK_ABSENT = {"/ui-bridge/sdk/status": ok({"connected": False})}
+SDK_CONNECTED = {"/ui-bridge/sdk/status": ok({"connected": True})}
+DIFF_TOOLS = {
+    "sdk": ("/ui-bridge/sdk/ai", "sdk"),
+    "ui": ("/ui-bridge/control/ai", "ui"),
+}
+FILL_REQUEST = {"fields": {"email": "a@b.c", "name": "Ann"}}
+FAILED_FILL = {
+    "success": False,
+    "filledCount": 1,
+    "errorCount": 1,
+    "fields": {"email": {"success": True}, "name": {"success": False, "error": "x"}},
+}
+SEMANTIC_DIFF_NO_CHANGE: dict[str, Any] = {
+    "changes": {"appeared": [], "disappeared": [], "modified": []}
+}
+
+ASSERT_SITE = "_assertion_result: "
+UNDO_SITE = "_undo_redo_result: "
+DIFF_SITE = "_diff_result: "
+CATEGORY_SITE = "_categorized_diff_result: "
+
+FAILURE_PATHS: list[FailurePath] = [
+    FailurePath(
+        ASSERT_SITE + "Assertion result UNKNOWN: expected {}, but the response carried "
+        "no boolean 'passed' (got {}). This is not a pass.",
+        "sdk_ai_assert",
+        {"text": "Save"},
+        {"/ui-bridge/sdk/ai/assert": ok({})},
+        "Assertion result UNKNOWN",
+    ),
+    FailurePath(
+        ASSERT_SITE + "'\\n'.join(lines)",
+        "sdk_ai_assert",
+        {"text": "Save"},
+        {"/ui-bridge/sdk/ai/assert": ok({"passed": False})},
+        "Assertion failed:",
+    ),
+    FailurePath(
+        "_nl_action_result: Action outcome UNKNOWN for '{}': the response carried no "
+        "boolean 'success' (got {}). This is not a success.",
+        "sdk_ai_execute",
+        {"instruction": "click Save"},
+        {"/ui-bridge/sdk/ai/execute": ok({})},
+        "Action outcome UNKNOWN",
+    ),
+    *[
+        FailurePath(
+            UNDO_SITE + "{} was not available: nothing was {}.",
+            tool,
+            {},
+            {path: ok({"executed": False})},
+            "Undo was not available" if "undo" in tool else "Redo was not available",
+        )
+        for tool, path in (
+            ("sdk_undo", "/ui-bridge/sdk/undo"),
+            ("sdk_redo", "/ui-bridge/sdk/redo"),
+            ("ui_undo", "/ui-bridge/control/undo"),
+            ("ui_redo", "/ui-bridge/control/redo"),
+        )
+    ],
+    *[
+        FailurePath(
+            UNDO_SITE + "{} outcome UNKNOWN: the response carried no boolean "
+            "'executed' (got {}). Whether anything was {} is not known.",
+            tool,
+            {},
+            {path: ok({})},
+            f"{verb} outcome UNKNOWN",
+        )
+        for tool, path, verb in (
+            ("sdk_undo", "/ui-bridge/sdk/undo", "Undo"),
+            ("ui_redo", "/ui-bridge/control/redo", "Redo"),
+        )
+    ],
+    *[
+        FailurePath(
+            "_wait_for_change_result: Timed out waiting for change: the condition "
+            "was not met before the timeout.",
+            tool,
+            {"predicate_type": "anyChange"},
+            {path: ok({"changed": False, "timedOut": True})},
+            "Timed out waiting for change",
+        )
+        for tool, path in (
+            ("sdk_wait_for_change", "/ui-bridge/sdk/ai/wait-for-change"),
+            ("ui_wait_for_change", "/ui-bridge/control/ai/wait-for-change"),
+        )
+    ],
+    *[
+        FailurePath(
+            "_native_capture_result: text",
+            tool,
+            {},
+            {
+                "/ui-bridge/control/snapshot": ok(
+                    {"source": "native_capture", "elements": []}
+                )
+            },
+            "No element tree:",
+            setup=_fresh("control_diff_tracker", server_mod.DiffTracker),
+        )
+        for tool in ("ui_snapshot", "ui_diff")
+    ],
+    *[
+        FailurePath(
+            "_bookmark_deleted_result: Bookmark '{}' was not deleted: no bookmark has "
+            "that name.",
+            f"{prefix}_delete_bookmark",
+            {"name": "home"},
+            {f"{base}/bookmark/home": ok({"deleted": False})},
+            "Bookmark 'home' was not deleted",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            "_bookmark_deleted_result: Bookmark '{}': whether it was deleted is UNKNOWN; "
+            "the response carried no boolean 'deleted' (got {}).",
+            f"{prefix}_delete_bookmark",
+            {"name": "home"},
+            {f"{base}/bookmark/home": ok({"name": "home"})},
+            "Bookmark 'home': whether it was deleted is UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            DIFF_SITE + "{}: no diff. {}",
+            f"{prefix}_diff_from_bookmark",
+            {"name": "home"},
+            {f"{base}/bookmark/home/diff": ok(None)},
+            "Diff from bookmark 'home': no diff.",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            DIFF_SITE + "{}: no diff. {}",
+            f"{prefix}_scoped_diff",
+            {"scope": "#main"},
+            {f"{base}/scoped-diff": ok(None)},
+            "Scoped diff ('#main'): no diff.",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            DIFF_SITE + "{}: what changed is UNKNOWN. This transport sends element "
+            "counts, not a diff: {} elements then, {} now.",
+            f"{prefix}_diff_from_bookmark",
+            {"name": "home"},
+            {f"{base}/bookmark/home/diff": ok({"beforeCount": 1, "afterCount": 2})},
+            "Diff from bookmark 'home': what changed is UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            DIFF_SITE + "{}: UNKNOWN; the response carried no diff, so this transport "
+            "does not compute one.",
+            f"{prefix}_scoped_diff",
+            {"scope": "#main"},
+            {f"{base}/scoped-diff": ok({"changes": [], "scope": "#main"})},
+            "Scoped diff ('#main'): UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            CATEGORY_SITE + "No previous diff to categorize.",
+            f"{prefix}_categorize_last_diff",
+            {},
+            {f"{base}/categorize-last-diff": ok(None)},
+            "No previous diff to categorize.",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            CATEGORY_SITE + "Diff category UNKNOWN: the response named no category "
+            "the SDK defines (got {}).",
+            f"{prefix}_categorize_last_diff",
+            {},
+            {f"{base}/categorize-last-diff": ok({"category": "unknown"})},
+            "Diff category UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            "_diff_summary_result: Diff summary UNKNOWN: the response carried no "
+            "summary (got {}).",
+            f"{prefix}_summarize_diff",
+            {},
+            {f"{base}/summarize-diff": ok({})},
+            "Diff summary UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            "_structured_changes_result: Structured change analysis UNKNOWN: the "
+            "response carried no 'hasStructuredData'; this transport does not "
+            "analyze structured changes.",
+            f"{prefix}_structured_changes",
+            {},
+            {f"{base}/structured-changes": ok({"changes": []})},
+            "Structured change analysis UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    *[
+        FailurePath(
+            "_execute_with_diff_result: '\\n'.join(lines)",
+            f"{prefix}_execute_with_diff",
+            {"element_id": "save", "action": "click"},
+            {f"{base}/execute-with-diff": ok({"diff": SEMANTIC_DIFF_NO_CHANGE})},
+            "Execute with diff: click on save\n  Action success: UNKNOWN",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    FailurePath(
+        "_fill_form_result: {}\n  Not found: {}",
+        "sdk_fill_form",
+        FILL_REQUEST,
+        {"/ui-bridge/sdk/fill": ok({"filledFields": ["email"], "totalFields": 2})},
+        "Fill result: 1/2 fields set\n  Not found: name",
+    ),
+    *[
+        FailurePath(
+            "_fill_form_result: Fill result UNKNOWN: the response said neither which "
+            "fields were set nor whether the fill succeeded.",
+            tool,
+            FILL_REQUEST,
+            {path: ok({})},
+            "Fill result UNKNOWN",
+        )
+        for tool, path in (
+            ("sdk_fill_form", "/ui-bridge/sdk/fill"),
+            ("ui_fill_form", "/ui-bridge/control/fill"),
+        )
+    ],
+    *[
+        FailurePath(
+            f"{tool}: _format_fill_result(failed_fill)",
+            tool,
+            FILL_REQUEST,
+            {path: ok(FAILED_FILL)},
+            "Fill result: 1/2 fields set\nFailed fields:",
+        )
+        for tool, path in (
+            ("sdk_fill_form", "/ui-bridge/sdk/fill"),
+            ("ui_fill_form", "/ui-bridge/control/fill"),
+        )
+    ],
+    *[
+        FailurePath(
+            "_undo_state_result: Undo/redo state UNKNOWN{}: the response said neither "
+            "whether undo nor whether redo is available.",
+            tool,
+            {},
+            {path: ok({"note": "UndoTracker not installed"})},
+            "Undo/redo state UNKNOWN",
+        )
+        for tool, path in (
+            ("sdk_undo_state", "/ui-bridge/sdk/undo-state"),
+            ("ui_undo_state", "/ui-bridge/control/undo-state"),
+        )
+    ],
+    *[
+        FailurePath(
+            "_idle_result: Idle status UNKNOWN for {}: the response carried no boolean "
+            "'idle' (got {}).",
+            "get_idle_status",
+            arguments,
+            {**status, path: ok({})},
+            "Idle status UNKNOWN",
+        )
+        for arguments, status, path in (
+            ({"signal": "dom"}, SDK_CONNECTED, "/ui-bridge/sdk/idle-status/dom"),
+            ({}, SDK_ABSENT, "/ui-bridge/control/idle-status"),
+        )
+    ],
+    FailurePath(
+        "_wait_for_targets_result: Targets wait failed: {}",
+        "wait_for_targets",
+        {"targets": ["network"]},
+        {**SDK_ABSENT, "/ui-bridge/control/wait-for-targets": ok({"_error": "late"})},
+        "Targets wait failed: late",
+    ),
+    *[
+        FailurePath(
+            "_wait_for_targets_result: f'Targets wait{mode_label} did not confirm "
+            "every target idle; ' + '; '.join(problems)",
+            "wait_for_targets",
+            {"targets": ["network"]},
+            {**status, path: ok({"network": {"idle": False}})},
+            "Targets wait",
+        )
+        for status, path in (
+            (SDK_CONNECTED, "/ui-bridge/sdk/wait-for-targets"),
+            (SDK_ABSENT, "/ui-bridge/control/wait-for-targets"),
+        )
+    ],
+    *[
+        FailurePath(
+            "_network_wait_result: '\\n'.join(lines)",
+            tool,
+            {},
+            {path: ok({"timedOut": True})},
+            "Wait timed out",
+        )
+        for tool, path in (
+            ("sdk_wait_for_network_request", "/ui-bridge/sdk/network-requests/wait"),
+            ("ui_wait_for_network_request", "/ui-bridge/control/network-requests/wait"),
+        )
+    ],
+    FailurePath(
+        "ui_health: Runner not accessible: {}",
+        "ui_health",
+        {},
+        {"/health": {"success": False, "error": "down"}},
+        "Runner not accessible:",
+    ),
+    FailurePath(
+        "sdk_page_refresh: Page was not refreshed: {}",
+        "sdk_page_refresh",
+        {},
+        {"/ui-bridge/sdk/page/refresh": ok({"reloaded": False, "message": "no-op"})},
+        "Page was not refreshed: no-op",
+    ),
+    FailurePath(
+        "sdk_cross_app_compare: Cross-app comparison UNKNOWN: the response carried "
+        "no scores; this transport does not compare apps.",
+        "sdk_cross_app_compare",
+        {"source_url": "http://a", "target_url": "http://b"},
+        {
+            "/ui-bridge/sdk/connect": ok({"connected": True}),
+            "/ui-bridge/sdk/ai/snapshot": ok({"elements": []}),
+            "/ui-bridge/sdk/ai/analyze/cross-app-compare": ok({"comparison": "stub"}),
+        },
+        "Cross-app comparison UNKNOWN",
+    ),
+    FailurePath(
+        "ui_diff: No previous snapshot to diff against. Call ui_snapshot first.",
+        "ui_diff",
+        {},
+        {"/ui-bridge/control/snapshot": ok({"elements": [{"id": "s"}]})},
+        "No previous snapshot to diff against.",
+        setup=_fresh("control_diff_tracker", server_mod.DiffTracker),
+    ),
+    FailurePath(
+        "sdk_diff: No previous snapshot to diff against. Call sdk_snapshot first.",
+        "sdk_diff",
+        {},
+        {"/ui-bridge/sdk/snapshot": ok({"elements": [{"id": "s"}]})},
+        "No previous snapshot to diff against.",
+        setup=_fresh("sdk_diff_tracker", server_mod.DiffTracker),
+    ),
+    *[
+        FailurePath(
+            "ui_element_screenshot|sdk_element_screenshot: Element '{}' not found in "
+            "snapshot.",
+            tool,
+            {"element_id": "gone"},
+            {snapshot: ok({"elements": [{"id": "other"}]})},
+            "Element 'gone' not found in snapshot.",
+        )
+        for tool, snapshot in (
+            ("ui_element_screenshot", "/ui-bridge/control/snapshot"),
+            ("sdk_element_screenshot", "/ui-bridge/sdk/snapshot"),
+        )
+    ],
+    *[
+        FailurePath(
+            "ui_element_screenshot|sdk_element_screenshot: Element '{}' has no "
+            "bounding rect.",
+            tool,
+            {"element_id": "box"},
+            {
+                snapshot: ok({"elements": [{"id": "box"}]}),
+                shot: ok({"screenshot": "aGk=", "width": 10, "height": 10}),
+            },
+            "Element 'box' has no bounding rect.",
+        )
+        for tool, snapshot, shot in (
+            (
+                "ui_element_screenshot",
+                "/ui-bridge/control/snapshot",
+                "/ui-bridge/control/annotated-screenshot",
+            ),
+            (
+                "sdk_element_screenshot",
+                "/ui-bridge/sdk/snapshot",
+                "/ui-bridge/sdk/screenshot",
+            ),
+        )
+    ],
+    FailurePath(
+        "sdk_screenshot_diff: No baseline found for '{}'. Save one first with "
+        "sdk_screenshot_baseline_save.",
+        "sdk_screenshot_diff",
+        {"baseline_key": "home"},
+        {},
+        "No baseline found for 'home'.",
+        setup=_fresh("baseline_store", BaselineStore),
+    ),
+    FailurePath(
+        "sdk_screenshot_after: No 'before' screenshot saved. Call "
+        "sdk_screenshot_before first.",
+        "sdk_screenshot_after",
+        {},
+        {},
+        "No 'before' screenshot saved.",
+        setup=_fresh("baseline_store", BaselineStore),
+    ),
+    FailurePath(
+        "sdk_design_state_styles: State styles for {} UNKNOWN: the response carried "
+        "no per-state list; this transport cannot compute state styles.",
+        "sdk_design_state_styles",
+        {"element_id": "save"},
+        {
+            "/ui-bridge/sdk/design/element/save/state-styles": ok(
+                {"stateStyles": {"hover": "Requires interaction"}}
+            )
+        },
+        "State styles for save UNKNOWN",
+    ),
+    *[
+        FailurePath(
+            f"{prefix}_get_bookmark: Bookmark '{{}}' not found.",
+            f"{prefix}_get_bookmark",
+            {"name": "home"},
+            {f"{base}/bookmark/home": ok(None)},
+            "Bookmark 'home' not found.",
+        )
+        for base, prefix in DIFF_TOOLS.values()
+    ],
+    FailurePath(
+        "ui_query_selector: Nothing clicked: '{}' matched {} element(s), so there is "
+        "no element at index {}.",
+        "ui_query_selector",
+        {"selector": "a", "action": "click", "index": 2},
+        {"/ui-bridge/sdk/control/query-selector": ok({"count": 1, "elements": []})},
+        "Nothing clicked:",
+    ),
+    FailurePath(
+        "call_tool: Unknown tool: {}",
+        "no_such_tool",
+        {},
+        {},
+        "Unknown tool: no_such_tool",
+    ),
+]
+
+
+def test_failure_path_census() -> None:
+    """Every failure site no ratchet reaches has a scenario below, and no more.
+
+    A new site fails this until it gets a scenario; a deleted one fails it
+    until its scenario goes.
+    """
+    sites = _unreached_failure_sites()
+    assert len(sites) == len(set(sites)), "two sites share a key: reword one"
+    # The census read the source, not nothing.
+    assert len(sites) > 30
+    assert sorted(sites) == sorted({path.site for path in FAILURE_PATHS})
+
+
+@pytest.mark.parametrize(
+    "path",
+    FAILURE_PATHS,
+    ids=[
+        f"{p.tool}:{p.site.split(': ', 1)[0]}:{i}" for i, p in enumerate(FAILURE_PATHS)
+    ],
+)
+def test_failure_path_is_flagged(
+    path: FailurePath, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if path.setup is not None:
+        path.setup(monkeypatch)
+    answering(monkeypatch, path.routes)
+    result = call(path.tool, path.arguments)
+    assert text(result).startswith(path.expect), text(result)
+    assert result.isError is True
