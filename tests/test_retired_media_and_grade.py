@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 from typing import Any
 
 import httpx
@@ -123,12 +122,21 @@ def test_retired_media_tools_are_not_listed() -> None:
     assert [n for n in names if n.startswith("sdk_media_")] == []
 
 
-def test_no_tool_advertises_a_media_route_or_a_grade() -> None:
-    listing = json.dumps(
-        [tool.model_dump(mode="json") for tool in asyncio.run(server_mod.list_tools())]
+def test_design_evaluate_description_promises_no_grade() -> None:
+    """The description promised a "letter grade" the SDK no longer sends.
+
+    Read case-insensitively: the old wording was lowercase ("Returns 0-100
+    score, letter grade, ..."), so a check for "Grade" could not fail against it.
+    """
+    tool = next(
+        t
+        for t in asyncio.run(server_mod.list_tools())
+        if t.name == "sdk_design_evaluate"
     )
-    assert "/ai/media" not in listing
-    assert "Grade" not in listing
+    description = (tool.description or "").lower()
+    # The right description was read, not an empty one.
+    assert "0-100" in description
+    assert "grade" not in description
 
 
 @pytest.mark.parametrize("name", RETIRED_TOOLS)

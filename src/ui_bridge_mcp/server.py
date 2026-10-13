@@ -2932,8 +2932,8 @@ individual design tools separately.""",
         name="sdk_design_evaluate",
         description="""Run holistic UI quality evaluation. Returns the 0-100 overall and UX scores,
 per-metric scores across ux/density/spacing/color/typography/consistency,
-and actionable recommendations. These are values, not a verdict: there is no
-letter grade, so judge the scores against the standard you are applying.
+and actionable recommendations. These are values, not a verdict: judge the
+scores against the standard you are applying.
 
 Contexts adjust what's measured and how strictly:
 - general: Balanced evaluation for most web apps
