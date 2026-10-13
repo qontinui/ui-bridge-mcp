@@ -100,6 +100,25 @@ def _network_wait_body(
     return body
 
 
+def _wait_for_change_body(
+    predicate: dict[str, Any], options: dict[str, Any] | None
+) -> tuple[dict[str, Any], float]:
+    """The body of a wait-for-change call, and an HTTP timeout that outlasts it.
+
+    A wait longer than the default HTTP timeout would otherwise be cut off by
+    this client and reported as a transport failure while the app was still
+    waiting.
+    """
+    body: dict[str, Any] = {"predicate": predicate}
+    if options:
+        body["options"] = options
+    wait_ms = (options or {}).get("timeout")
+    http_timeout = DEFAULT_TIMEOUT
+    if isinstance(wait_ms, int | float) and not isinstance(wait_ms, bool):
+        http_timeout = max(DEFAULT_TIMEOUT, wait_ms / 1000 + 10.0)
+    return body, http_timeout
+
+
 @dataclass
 class UIBridgeResponse:
     """Response from the UI Bridge API.
@@ -1581,14 +1600,16 @@ class UIBridgeClient:
         """Wait for a change matching a predicate (control mode).
 
         Args:
-            predicate: Change predicate (e.g. {"type": "anyChange"}).
-            options: Optional wait options (timeout, pollInterval, etc.).
+            predicate: A ui-bridge ``ChangePredicate`` (``ai/types.ts``), e.g.
+                ``{"anySignificantChange": True}``.
+            options: ``WaitForChangeOptions``: ``timeout``, ``interval`` (ms).
         """
-        body: dict[str, Any] = {"predicate": predicate}
-        if options:
-            body["options"] = options
+        body, http_timeout = _wait_for_change_body(predicate, options)
         return await self._request(
-            "POST", "/ui-bridge/control/ai/wait-for-change", body
+            "POST",
+            "/ui-bridge/control/ai/wait-for-change",
+            body,
+            timeout=http_timeout,
         )
 
     async def control_categorize_last_diff(self) -> UIBridgeResponse:
@@ -1707,13 +1728,14 @@ class UIBridgeClient:
         """Wait for a change matching a predicate (SDK mode).
 
         Args:
-            predicate: Change predicate (e.g. {"type": "anyChange"}).
-            options: Optional wait options (timeout, pollInterval, etc.).
+            predicate: A ui-bridge ``ChangePredicate`` (``ai/types.ts``), e.g.
+                ``{"anySignificantChange": True}``.
+            options: ``WaitForChangeOptions``: ``timeout``, ``interval`` (ms).
         """
-        body: dict[str, Any] = {"predicate": predicate}
-        if options:
-            body["options"] = options
-        return await self._request("POST", "/ui-bridge/sdk/ai/wait-for-change", body)
+        body, http_timeout = _wait_for_change_body(predicate, options)
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/wait-for-change", body, timeout=http_timeout
+        )
 
     async def sdk_categorize_last_diff(self) -> UIBridgeResponse:
         """Categorize the last computed diff (SDK mode)."""
