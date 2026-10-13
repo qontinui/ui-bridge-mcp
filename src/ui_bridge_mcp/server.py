@@ -18,7 +18,7 @@ from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from .client import UIBridgeClient, UIBridgeResponse
+from .client import AI_ASSERT_STATES, UIBridgeClient, UIBridgeResponse
 from .elements import element_state
 from .screenshot import (
     AnnotationOptions,
@@ -88,6 +88,164 @@ def get_client() -> UIBridgeClient:
     if client is None:
         client = UIBridgeClient()
     return client
+
+
+# =============================================================================
+# Failures that arrive inside a success envelope
+# =============================================================================
+#
+# Some producers answer a failure with ``success: true``: the request worked,
+# but what it asked for did not happen. Each helper below reads the producer's
+# own verdict field and flags the failure. A verdict field that is absent or not
+# a boolean is UNKNOWN, and UNKNOWN is never reported as a success.
+
+
+def _as_dict(data: Any) -> dict[str, Any]:
+    """``data`` when it is a JSON object, else an empty one."""
+    return data if isinstance(data, dict) else {}
+
+
+def _code_tag(code: Any) -> str:
+    """A ``[code=...]`` prefix for a producer's own failure code, if it sent one."""
+    return f"[code={code}] " if isinstance(code, str) and code else ""
+
+
+def _assertion_result(text: str, state: str, data: Any) -> ToolResult:
+    """sdk_ai_assert's verdict, read from the SDK's own ``passed`` field.
+
+    A failed assertion arrives as ``{success: true, data: {passed: false,
+    failureReason, failureCode}}``: the SDK's executor returns ``passed: false``
+    instead of throwing (ui-bridge ``ai/assertions.ts`` assert; ``server/
+    handlers.ts`` aiAssert; ``AssertionResult`` in ``ai/types.ts``).
+    """
+    result = _as_dict(data)
+    passed = result.get("passed")
+    stated = f"'{text}' {AI_ASSERT_STATES[state].claim}"
+    if passed is True:
+        return [types.TextContent(type="text", text=f"Assertion passed: {stated}")]
+    if passed is not False:
+        return _tool_error(
+            f"Assertion result UNKNOWN: expected {stated}, but the response "
+            f"carried no boolean 'passed' (got {passed!r}). This is not a pass."
+        )
+    lines = [
+        f"Assertion failed: {_code_tag(result.get('failureCode'))}expected {stated}"
+    ]
+    for label, key in (
+        ("Reason", "failureReason"),
+        ("Actual", "actual"),
+        ("Suggestion", "suggestion"),
+    ):
+        value = result.get(key)
+        if value is not None and value != "":
+            lines.append(f"  {label}: {value}")
+    return _tool_error("\n".join(lines))
+
+
+def _nl_action_result(instruction: str, data: Any) -> ToolResult:
+    """sdk_ai_execute's outcome, read from the action result's own ``success``.
+
+    A failed action arrives as ``{success: true, data: {success: false, error,
+    errorCode}}``: the request worked, the action did not (``NLActionResponse``
+    in ui-bridge ``ai/types.ts``; ``server/handlers.ts`` aiExecute answers
+    ``success(result)`` whatever the result says).
+    """
+    result = _as_dict(data)
+    outcome = result.get("success")
+    if outcome is True:
+        text = f"Executed: {instruction}" + format_action_error_info(result)
+        return [types.TextContent(type="text", text=text)]
+    if outcome is not False:
+        return _tool_error(
+            f"Action outcome UNKNOWN for '{instruction}': the response carried no "
+            f"boolean 'success' (got {outcome!r}). This is not a success."
+        )
+    lines = [f"Action failed: {_code_tag(result.get('errorCode'))}{instruction}"]
+    error = result.get("error")
+    if error:
+        lines.append(f"  Error: {error}")
+    suggestions = result.get("suggestions")
+    if isinstance(suggestions, list) and suggestions:
+        lines.append("  Suggestions: " + "; ".join(str(s) for s in suggestions[:3]))
+    return _tool_error("\n".join(lines) + format_action_error_info(result))
+
+
+def _undo_redo_result(verb: str, past: str, data: Any) -> ToolResult:
+    """An undo or redo outcome. ``executed: false`` means nothing was ``past``.
+
+    Over HTTP the SDK answers ``success({executed: false})`` when there was
+    nothing to undo or redo (ui-bridge ``server/handlers.ts`` executeUndo). The
+    browser relay sends the same outcome as ``success: false`` (``react/
+    commandHandlers.ts`` executeUndo), which reaches the tool as a failed
+    request. The runner's own UI names the outcome ``success`` rather than
+    ``executed`` (runner ``useDebugInspectEvents.ts``, case "undo").
+    """
+    result = _as_dict(data)
+    executed = result.get("executed")
+    if not isinstance(executed, bool):
+        executed = result.get("success")
+    if executed is True:
+        return [types.TextContent(type="text", text=f"{verb} executed.")]
+    if executed is False:
+        return _tool_error(f"{verb} was not available: nothing was {past}.")
+    return _tool_error(
+        f"{verb} outcome UNKNOWN: the response carried no boolean 'executed' "
+        f"(got {executed!r}). Whether anything was {past} is not known."
+    )
+
+
+def _change_count(changes: dict[str, Any], key: str) -> str:
+    """How many entries a diff lists under ``key``; UNKNOWN when it is no list."""
+    value = changes.get(key)
+    return str(len(value)) if isinstance(value, list) else "UNKNOWN"
+
+
+def _wait_for_change_result(data: Any) -> ToolResult:
+    """A wait_for_change answer: the change that ended the wait, or a timeout.
+
+    Producers answer a MATCH with success, in one of two shapes:
+
+    - the SDK and the runner's own UI resolve the matching ``SemanticDiff``
+      itself (``{summary, changes: {appeared, disappeared, modified}}``,
+      ui-bridge ``ai/change-tracker.ts`` waitForChange) and throw on timeout,
+      which reaches the tool as a failed request;
+    - the browser relay resolves ``{changed: true}`` on any DOM mutation,
+      without evaluating the predicate, and ``{changed: false, timedOut: true}``
+      on timeout (``react/commandHandlers.ts`` waitForChange).
+    """
+    result = _as_dict(data)
+    if result.get("timedOut") is True or result.get("changed") is False:
+        return _tool_error(
+            "Timed out waiting for change: the condition was not met before "
+            "the timeout."
+        )
+    changes = result.get("changes")
+    if isinstance(changes, dict):
+        lines = [
+            f"Change detected! Appeared: {_change_count(changes, 'appeared')}, "
+            f"Disappeared: {_change_count(changes, 'disappeared')}, "
+            f"Modified: {_change_count(changes, 'modified')}"
+        ]
+        summary = result.get("summary")
+        if isinstance(summary, str) and summary:
+            lines.append(summary)
+        return [types.TextContent(type="text", text="\n".join(lines))]
+    if result.get("changed") is True:
+        return [
+            types.TextContent(
+                type="text",
+                text=(
+                    "Change detected: the page's DOM changed. This transport ends "
+                    "the wait on any DOM mutation; it did not evaluate the "
+                    "predicate and sent no diff."
+                ),
+            )
+        ]
+    return [
+        types.TextContent(
+            type="text", text="Change detected. The response carried no diff."
+        )
+    ]
 
 
 # =============================================================================
@@ -685,47 +843,82 @@ def _format_network_requests_response(data: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _format_wait_result(data: dict[str, Any] | None) -> str:
-    """Format wait-for-network-request result into LLM-readable text."""
-    if not data:
-        return "No wait result data available."
-
-    timed_out = data.get("timedOut", data.get("timed_out", False))
-    matched = data.get("request") or data.get("matched")
-
-    if timed_out:
-        lines = ["Wait timed out - no matching request completed in time."]
-        if matched:
-            method = matched.get("method", "?")
-            url = matched.get("url", "?")
-            lines.append(f"  Closest match: {method} {url}")
-        return "\n".join(lines)
-
-    if not matched:
-        return "Wait completed but no request details available."
-
-    status = matched.get("status", "?").upper()
-    method = matched.get("method", "?")
-    url = matched.get("url", "?")
-    status_code = matched.get("statusCode") or matched.get("status_code")
-    duration = matched.get("durationMs") or matched.get("duration_ms")
-
-    parts = [f"[{status}]", method, url]
-    if status_code is not None:
-        parts.append(f"\u2192 {status_code}")
-    if duration is not None:
-        parts.append(f"({duration}ms)")
-
+def _format_network_entry(entry: dict[str, Any]) -> str:
+    """Render the SDK's ``NetworkRequestEntry`` (ui-bridge ``network/types.ts``)."""
+    request = _as_dict(entry.get("request"))
+    response = _as_dict(entry.get("response"))
+    parts = [
+        f"[{str(request.get('status') or '?').upper()}]",
+        str(request.get("method", "?")),
+        str(request.get("url", "?")),
+    ]
+    if response.get("statusCode") is not None:
+        parts.append(f"\u2192 {response['statusCode']}")
+    if response.get("durationMs") is not None:
+        parts.append(f"({response['durationMs']}ms)")
     lines = [f"Matched request: {' '.join(parts)}"]
-
-    req_id = matched.get("requestId") or matched.get("id")
-    if req_id:
-        lines.append(f"  Request ID: {req_id}")
-    error = matched.get("error")
-    if error:
-        lines.append(f"  Error: {error}")
-
+    request_id = entry.get("requestId") or request.get("id")
+    if request_id:
+        lines.append(f"  Request ID: {request_id}")
+    if entry.get("error"):
+        lines.append(f"  Error: {entry['error']}")
     return "\n".join(lines)
+
+
+def _format_relayed_request(request: dict[str, Any]) -> str:
+    """Render the browser relay's tracked request, whose ``status`` is the HTTP code."""
+    parts = [str(request.get("method", "?")), str(request.get("url", "?"))]
+    if request.get("status") is not None:
+        status_text = request.get("statusText")
+        parts.append(
+            f"\u2192 {request['status']}" + (f" {status_text}" if status_text else "")
+        )
+    if request.get("duration") is not None:
+        parts.append(f"({request['duration']}ms)")
+    lines = [f"Matched request: {' '.join(parts)}"]
+    if request.get("id"):
+        lines.append(f"  Request ID: {request['id']}")
+    if request.get("error"):
+        lines.append(f"  Error: {request['error']}")
+    return "\n".join(lines)
+
+
+def _network_wait_result(data: Any) -> ToolResult:
+    """A wait-for-network-request answer: the matched request, or a timeout.
+
+    - The SDK answers ``{entry, timedOut}`` (``WaitForRequestResult``, ui-bridge
+      ``network/types.ts``). ``timedOut: true`` with an ``entry`` means a
+      matching request was still in flight when the wait ended (``network/
+      tracker.ts`` waitForRequest); no match at all throws, which reaches the
+      tool as a failed request.
+    - The browser relay answers ``{request}`` or ``{timedOut: true}`` (``react/
+      commandHandlers.ts`` waitForNetworkRequest).
+    """
+    result = _as_dict(data)
+    entry = result.get("entry")
+    if result.get("timedOut") is True:
+        lines = ["Wait timed out: no matching request completed in time."]
+        in_flight = _as_dict(entry).get("request")
+        if isinstance(in_flight, dict):
+            lines.append(
+                "  Still in flight when the wait ended: "
+                f"{in_flight.get('method', '?')} {in_flight.get('url', '?')}"
+            )
+        return _tool_error("\n".join(lines))
+    if isinstance(entry, dict):
+        return [types.TextContent(type="text", text=_format_network_entry(entry))]
+    relayed = result.get("request")
+    if isinstance(relayed, dict):
+        return [types.TextContent(type="text", text=_format_relayed_request(relayed))]
+    return [
+        types.TextContent(
+            type="text",
+            text=(
+                "Wait completed, but the response named no request, so which "
+                "request matched is UNKNOWN."
+            ),
+        )
+    ]
 
 
 def format_page_header(page: dict[str, Any]) -> list[str]:
@@ -2223,20 +2416,26 @@ Example: 'click the Submit button' or 'type hello into the search field'""",
     ),
     types.Tool(
         name="sdk_ai_assert",
-        description="""Assert element state using natural language.
+        description="""Assert that an element is in a state.
 
-Verifies that an element matches the expected state.
-Example: assert 'error message' is 'hidden'""",
+Finds the element by ID or description and checks the state. A failed
+assertion returns an error carrying the SDK's failure reason and code.
+Example: assert 'error message' is 'hidden'
+
+With no SDK app connected, the runner checks its own UI instead, and reads
+the assertion as a sentence: a description containing "no", "not" or a state
+word can then be read as a different assertion.""",
         inputSchema={
             "type": "object",
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "Element description or text to find",
+                    "description": "Element ID or description to find",
                 },
                 "state": {
                     "type": "string",
-                    "description": "Expected state (e.g., 'visible', 'hidden', 'enabled', 'disabled')",
+                    "enum": list(AI_ASSERT_STATES),
+                    "description": "State to assert (default: exists)",
                 },
             },
             "required": ["text"],
@@ -5070,22 +5269,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_ai_execute(instruction)
             if not response.success:
                 return _error_result(response)
-            msg = f"Executed: {instruction}"
-            msg += format_action_error_info(response.data)
-            return [types.TextContent(type="text", text=msg)]
+            return _nl_action_result(instruction, response.data)
 
         elif name == "sdk_ai_assert":
             text = arguments["text"]
-            assert_state = arguments.get("state")
+            assert_state = arguments.get("state", "exists")
             response = await ui_client.sdk_ai_assert(text, assert_state)
             if not response.success:
-                return _tool_error(f"Assertion failed: {response.describe_error()}")
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Assertion passed: '{text}' is {assert_state or 'as expected'}",
+                return _tool_error(
+                    f"Assertion could not be evaluated: {response.describe_error()}"
                 )
-            ]
+            return _assertion_result(text, assert_state, response.data)
 
         elif name == "sdk_page_summary":
             response = await ui_client.sdk_ai_summary()
@@ -6765,9 +6959,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(
                     f"Network request wait failed: {response.describe_error()}"
                 )
-            return [
-                types.TextContent(type="text", text=_format_wait_result(response.data))
-            ]
+            return _network_wait_result(response.data)
 
         elif name == "ui_wait_for_network_request":
             url_pattern = arguments.get("url_pattern")
@@ -6782,9 +6974,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(
                     f"Network request wait failed: {response.describe_error()}"
                 )
-            return [
-                types.TextContent(type="text", text=_format_wait_result(response.data))
-            ]
+            return _network_wait_result(response.data)
 
         # =============================================================
         # Change Tracking - SDK Mode
@@ -6921,19 +7111,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_wait_for_change(predicate, options or None)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            if data.get("matched"):
-                diff = data.get("diff", {})
-                changes = diff.get("changes", {})
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Change detected! Appeared: {len(changes.get('appeared', []))}, "
-                        f"Disappeared: {len(changes.get('disappeared', []))}, "
-                        f"Modified: {len(changes.get('modified', []))}",
-                    )
-                ]
-            return _tool_error("Timed out waiting for change.")
+            return _wait_for_change_result(response.data)
 
         elif name == "sdk_scoped_diff":
             scope = arguments["scope"]
@@ -7200,19 +7378,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            if data.get("matched"):
-                diff = data.get("diff", {})
-                changes = diff.get("changes", {})
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Change detected! Appeared: {len(changes.get('appeared', []))}, "
-                        f"Disappeared: {len(changes.get('disappeared', []))}, "
-                        f"Modified: {len(changes.get('modified', []))}",
-                    )
-                ]
-            return _tool_error("Timed out waiting for change.")
+            return _wait_for_change_result(response.data)
 
         elif name == "ui_scoped_diff":
             scope = arguments["scope"]
@@ -7355,19 +7521,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_undo()
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            executed = data.get("executed", False)
-            msg = "Undo executed." if executed else "Undo was not available."
-            return [types.TextContent(type="text", text=msg)]
+            return _undo_redo_result("Undo", "undone", response.data)
 
         elif name == "ui_redo":
             response = await ui_client.control_redo()
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            executed = data.get("executed", False)
-            msg = "Redo executed." if executed else "Redo was not available."
-            return [types.TextContent(type="text", text=msg)]
+            return _undo_redo_result("Redo", "redone", response.data)
 
         elif name == "sdk_undo_state":
             response = await ui_client.sdk_undo_state()
@@ -7381,19 +7541,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_undo()
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            executed = data.get("executed", False)
-            msg = "Undo executed." if executed else "Undo was not available."
-            return [types.TextContent(type="text", text=msg)]
+            return _undo_redo_result("Undo", "undone", response.data)
 
         elif name == "sdk_redo":
             response = await ui_client.sdk_redo()
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            executed = data.get("executed", False)
-            msg = "Redo executed." if executed else "Redo was not available."
-            return [types.TextContent(type="text", text=msg)]
+            return _undo_redo_result("Redo", "redone", response.data)
 
         # DOM Query & JS Evaluation
         elif name == "ui_query_selector":
