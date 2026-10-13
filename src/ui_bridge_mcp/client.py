@@ -305,6 +305,8 @@ class UIBridgeClient:
         json_data: dict[str, Any] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         params: dict[str, str] | None = None,
+        *,
+        lift_nested_failure: bool = True,
     ) -> UIBridgeResponse:
         """Make an HTTP request to the UI Bridge API.
 
@@ -314,6 +316,10 @@ class UIBridgeClient:
             json_data: Optional JSON body for POST requests.
             timeout: Request timeout in seconds.
             params: Optional query parameters for GET requests.
+            lift_nested_failure: Report a success envelope whose ``data`` says
+                ``success: false`` as a failed request (the default). Off for a
+                route whose ``data`` is foreign, where that field can belong to
+                the payload rather than being a verdict.
         """
         client = await self._get_client()
         url = f"{self.base_url}{endpoint}"
@@ -348,7 +354,12 @@ class UIBridgeClient:
             success = data.get("success", False) is True
             code = extract_code(data)
             inner = data.get("data")
-            if success and isinstance(inner, dict) and inner.get("success") is False:
+            if (
+                lift_nested_failure
+                and success
+                and isinstance(inner, dict)
+                and inner.get("success") is False
+            ):
                 # A failure inside a success envelope: the request worked, the
                 # operation did not. The SDK in-process handlers return
                 # success(result) whatever the result says (aiExecute's
@@ -1872,6 +1883,10 @@ class UIBridgeClient:
             "POST",
             "/ui-bridge/sdk/control/page-evaluate",
             {"expression": expression},
+            # The evaluated value is foreign data. A runner built before
+            # 0dbc0bace (2026-08-07) answers it as the bare `data`, so a value
+            # that has its own `success: false` is an answer, not a verdict.
+            lift_nested_failure=False,
         )
 
     async def sdk_screenshot_raw(self, monitor: int | None = None) -> UIBridgeResponse:

@@ -574,6 +574,15 @@ FAILURE_PATHS: list[FailurePath] = [
         )
         for base, prefix in DIFF_TOOLS.values()
     ],
+    FailurePath(
+        "_diff_summary_result: Diff summary UNKNOWN: '{}' is the browser relay's "
+        "fixed answer, not a summary of any diff (the SDK answers a missing diff "
+        "with NO_DIFF).",
+        "sdk_summarize_diff",
+        {},
+        {"/ui-bridge/sdk/ai/summarize-diff": ok({"summary": "No diff data available"})},
+        "Diff summary UNKNOWN: 'No diff data available'",
+    ),
     *[
         FailurePath(
             "_diff_summary_result: Diff summary UNKNOWN: the response carried no "
@@ -803,9 +812,7 @@ FAILURE_PATHS: list[FailurePath] = [
         setup=_fresh("baseline_store", BaselineStore),
     ),
     FailurePath(
-        "sdk_design_audit: Style audit UNKNOWN: the response is not an audit against "
-        "the style guide (no passedCount/failedCount); this transport does not audit "
-        "against the loaded guide.",
+        "sdk_design_audit: _style_audit_unknown(report)",
         "sdk_design_audit",
         {},
         {

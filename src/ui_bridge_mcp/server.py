@@ -356,6 +356,41 @@ def _is_style_audit(data: Any) -> bool:
     return _number(report.get("passedCount")) and _number(report.get("failedCount"))
 
 
+def _style_audit_unknown(report: dict[str, Any]) -> str:
+    """Why an audit is UNKNOWN, with the relay's own findings, which are not lost.
+
+    The relay's scan answers ``{issues: [{element, issue, severity, fix?}],
+    checkedElements}`` (``react/commandHandlers.ts`` runDesignAudit): contrast
+    and size checks, not the loaded guide's rules, so they say nothing about
+    passing the guide. They are still findings about the page.
+    """
+    lines = [
+        "Style audit UNKNOWN: the response is not an audit against the style "
+        "guide (no passedCount/failedCount); this transport does not audit "
+        "against the loaded guide."
+    ]
+    issues = report.get("issues")
+    if isinstance(issues, list) and issues:
+        checked = report.get("checkedElements")
+        over = f" over {checked} elements" if _number(checked) else ""
+        lines.append(
+            f"The relay's own contrast and size scan reported {len(issues)} "
+            f"issue(s){over}:"
+        )
+        for raw in issues[:20]:
+            issue = _as_dict(raw)
+            line = (
+                f"  [{issue.get('severity', '?')}] {issue.get('element', '?')}: "
+                f"{issue.get('issue', '?')}"
+            )
+            if issue.get("fix"):
+                line += f" (fix: {issue['fix']})"
+            lines.append(line)
+        if len(issues) > 20:
+            lines.append(f"  ... and {len(issues) - 20} more")
+    return "\n".join(lines)
+
+
 def _percent(value: Any) -> str:
     """A 0-1 score as a percentage; UNKNOWN when the producer sent none."""
     return f"{value:.0%}" if _number(value) else "UNKNOWN"
@@ -481,9 +516,21 @@ def _categorized_diff_result(data: Any) -> ToolResult:
     return _text(f"Category: {category} (confidence: {shown})")
 
 
+# The browser relay answers every summarizeDiff with this fixed text
+# (react/commandHandlers.ts): it summarizes no diff. The SDK answers a missing
+# diff with an error, NO_DIFF.
+_RELAY_SUMMARY_STUB = "No diff data available"
+
+
 def _diff_summary_result(data: Any) -> ToolResult:
     """A diff summary. No ``summary`` in the response is UNKNOWN, not "No changes"."""
     summary = _as_dict(data).get("summary")
+    if summary == _RELAY_SUMMARY_STUB:
+        return _tool_error(
+            f"Diff summary UNKNOWN: '{_RELAY_SUMMARY_STUB}' is the browser relay's "
+            "fixed answer, not a summary of any diff (the SDK answers a missing "
+            "diff with NO_DIFF)."
+        )
     if isinstance(summary, str):
         return _text(summary or "(empty summary)")
     return _tool_error(
@@ -6919,11 +6966,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _error_result(response)
             report = response.data or {}
             if not _is_style_audit(report):
-                return _tool_error(
-                    "Style audit UNKNOWN: the response is not an audit against the "
-                    "style guide (no passedCount/failedCount); this transport does "
-                    "not audit against the loaded guide."
-                )
+                return _tool_error(_style_audit_unknown(report))
             result_lines = [
                 f"Style Audit: {report.get('guideName', '?')}",
                 f"Elements: {report.get('totalElements', 0)} | Rules: {report.get('totalRules', 0)}",
@@ -7079,9 +7122,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             # 4. Style audit (if guide loaded)
             audit_resp = await ui_client.sdk_design_audit(element_ids=element_ids)
             if audit_resp.success and not _is_style_audit(audit_resp.data):
+                relay_issues = _as_dict(audit_resp.data).get("issues")
+                found = (
+                    f"; the relay's own scan reported {len(relay_issues)} issue(s)"
+                    if isinstance(relay_issues, list)
+                    else ""
+                )
                 result_lines.append(
                     "\nStyle audit: UNKNOWN (the response is not an audit against "
-                    "the style guide)"
+                    f"the style guide{found})"
                 )
             elif audit_resp.success:
                 report = audit_resp.data or {}
@@ -8387,12 +8436,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_page_evaluate(expression)
             if not response.success:
                 return _error_result(response)
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps(response.data, indent=2, default=str),
+            evaluated = json.dumps(response.data, indent=2, default=str)
+            answer = _as_dict(response.data)
+            if answer.get("success") is False and "value" not in answer:
+                # The client does not lift this route's nested success:false
+                # (its data is foreign), so say what cannot be told.
+                evaluated += (
+                    "\n\nNote: whether this evaluation succeeded is UNKNOWN. A "
+                    "runner built since 0dbc0bace (2026-08-07) answers {value, "
+                    "type}, so this shape is a refused evaluation; from an older "
+                    "runner it is the expression's own value."
                 )
-            ]
+            return [types.TextContent(type="text", text=evaluated)]
 
         else:
             return _tool_error(f"Unknown tool: {name}")
