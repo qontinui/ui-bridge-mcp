@@ -194,6 +194,68 @@ def _undo_redo_result(verb: str, past: str, data: Any) -> ToolResult:
     )
 
 
+# predicate_type -> the tool arguments it reads. Any other argument is refused,
+# so a wait never runs on a different condition than the caller asked for.
+_CHANGE_PREDICATE_ARGS: dict[str, frozenset[str]] = {
+    "anyChange": frozenset(),
+    "elementAppeared": frozenset({"element_id"}),
+    "elementDisappeared": frozenset({"element_id"}),
+    "elementChanged": frozenset({"element_id", "property"}),
+    "countChanged": frozenset({"min_count"}),
+}
+# Arguments a predicate_type may leave out.
+_CHANGE_PREDICATE_OPTIONAL = frozenset({"min_count"})
+
+
+def _change_predicate(arguments: dict[str, Any]) -> dict[str, Any] | str:
+    """The ui-bridge ``ChangePredicate`` a wait_for_change call asks for.
+
+    ``ChangePredicate`` (ui-bridge ``ai/types.ts``) has one optional field per
+    condition, and ``ai/change-tracker.ts`` matchesPredicate reads only those
+    fields. These tools used to send ``{"type": "anyChange", ...}``, a key no
+    matcher reads, so nothing ever matched and every wait answered by the SDK
+    or by the runner's own UI timed out.
+
+    Returns the predicate, or why the arguments cannot be expressed as one.
+    """
+    kind = arguments["predicate_type"]
+    takes = _CHANGE_PREDICATE_ARGS[kind]
+    given = {key for key in ("element_id", "property", "min_count") if key in arguments}
+    stray = sorted(given - takes)
+    if stray:
+        return f"predicate_type {kind} does not take {', '.join(stray)}"
+    missing = sorted(takes - given - _CHANGE_PREDICATE_OPTIONAL)
+    if missing:
+        return f"predicate_type {kind} needs {', '.join(missing)}"
+    if kind == "anyChange":
+        return {"anySignificantChange": True}
+    if kind == "countChanged":
+        return {"elementCount": {"min": arguments.get("min_count", 1)}}
+    element_id = ref_manager.resolve(arguments["element_id"])
+    if kind == "elementChanged":
+        return {
+            "propertyChanged": {
+                "elementId": element_id,
+                "property": arguments["property"],
+            }
+        }
+    # elementAppeared / elementDisappeared: the field is named for the type.
+    return {kind: element_id}
+
+
+def _wait_for_change_options(arguments: dict[str, Any]) -> dict[str, Any]:
+    """The ui-bridge ``WaitForChangeOptions`` (``ai/types.ts``) for a call.
+
+    ``timeout`` is always sent so the documented 5000 ms default holds whoever
+    answers: the SDK's own default is 10000 ms. The SDK reads the poll interval
+    as ``interval``; the ``pollInterval`` sent before was read by nothing.
+    """
+    options: dict[str, Any] = {"timeout": arguments.get("timeout", 5000)}
+    if "poll_interval" in arguments:
+        options["interval"] = arguments["poll_interval"]
+    return options
+
+
 def _change_count(changes: dict[str, Any], key: str) -> str:
     """How many entries a diff lists under ``key``; UNKNOWN when it is no list."""
     value = changes.get(key)
@@ -1162,6 +1224,53 @@ def _normalize_components(raw: Any) -> list[dict[str, Any]]:
 # -----------------------------------------------------------------------------
 # Tool Definitions
 # -----------------------------------------------------------------------------
+
+# The input of sdk_wait_for_change and ui_wait_for_change. Each predicate_type
+# maps onto one ui-bridge ChangePredicate field (see ``_change_predicate``).
+_WAIT_FOR_CHANGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "predicate_type": {
+            "type": "string",
+            "enum": list(_CHANGE_PREDICATE_ARGS),
+            "description": (
+                "What ends the wait. anyChange: any significant change (an "
+                "element appeared or disappeared, a significant property "
+                "changed, or the URL or page text changed). elementAppeared / "
+                "elementDisappeared: the element_id element appeared or "
+                "disappeared. elementChanged: element_id's property changed. "
+                "countChanged: at least min_count elements appeared."
+            ),
+        },
+        "element_id": {
+            "type": "string",
+            "description": (
+                "Element ID or ref; required by elementAppeared, "
+                "elementDisappeared and elementChanged. For elementAppeared and "
+                "elementDisappeared it also matches a description substring."
+            ),
+        },
+        "property": {
+            "type": "string",
+            "description": "Property to watch; required by elementChanged",
+        },
+        "min_count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "countChanged: how many elements must appear (default: 1)",
+        },
+        "timeout": {
+            "type": "integer",
+            "description": "Max ms to wait (default: 5000)",
+        },
+        "poll_interval": {
+            "type": "integer",
+            "description": "Poll interval in ms (default: 200)",
+        },
+    },
+    "required": ["predicate_type"],
+}
+
 
 TOOLS = [
     # Health check
@@ -3722,44 +3831,10 @@ Returns the matched request details once it completes, or an error on timeout.""
     ),
     types.Tool(
         name="sdk_wait_for_change",
-        description="Wait for the UI to change matching a predicate. Polls until a matching change is detected or timeout.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "predicate_type": {
-                    "type": "string",
-                    "enum": [
-                        "anyChange",
-                        "elementAppeared",
-                        "elementDisappeared",
-                        "elementChanged",
-                        "countChanged",
-                    ],
-                    "description": "Type of change to wait for",
-                },
-                "element_id": {
-                    "type": "string",
-                    "description": "Element ID for elementAppeared/Disappeared/Changed predicates",
-                },
-                "property": {
-                    "type": "string",
-                    "description": "Property to watch for elementChanged predicate",
-                },
-                "min_count": {
-                    "type": "integer",
-                    "description": "Minimum element count change for countChanged predicate",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Max ms to wait (default: 5000)",
-                },
-                "poll_interval": {
-                    "type": "integer",
-                    "description": "Poll interval in ms (default: 200)",
-                },
-            },
-            "required": ["predicate_type"],
-        },
+        description="""Wait until the SDK app's UI changes in the way predicate_type names.
+
+Returns what changed, or an error if the timeout passes first.""",
+        inputSchema=_WAIT_FOR_CHANGE_SCHEMA,
     ),
     types.Tool(
         name="sdk_scoped_diff",
@@ -3942,44 +4017,10 @@ Returns the matched request details once it completes, or an error on timeout.""
     ),
     types.Tool(
         name="ui_wait_for_change",
-        description="Wait for the runner's own UI to change matching a predicate (Control mode).",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "predicate_type": {
-                    "type": "string",
-                    "enum": [
-                        "anyChange",
-                        "elementAppeared",
-                        "elementDisappeared",
-                        "elementChanged",
-                        "countChanged",
-                    ],
-                    "description": "Type of change to wait for",
-                },
-                "element_id": {
-                    "type": "string",
-                    "description": "Element ID for elementAppeared/Disappeared/Changed predicates",
-                },
-                "property": {
-                    "type": "string",
-                    "description": "Property to watch for elementChanged predicate",
-                },
-                "min_count": {
-                    "type": "integer",
-                    "description": "Minimum element count change for countChanged predicate",
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Max ms to wait (default: 5000)",
-                },
-                "poll_interval": {
-                    "type": "integer",
-                    "description": "Poll interval in ms (default: 200)",
-                },
-            },
-            "required": ["predicate_type"],
-        },
+        description="""Wait until the runner's own UI changes in the way predicate_type names (Control mode).
+
+Returns what changed, or an error if the timeout passes first.""",
+        inputSchema=_WAIT_FOR_CHANGE_SCHEMA,
     ),
     types.Tool(
         name="ui_scoped_diff",
@@ -7272,19 +7313,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_wait_for_change":
-            predicate: dict[str, Any] = {"type": arguments["predicate_type"]}
-            if "element_id" in arguments:
-                predicate["elementId"] = ref_manager.resolve(arguments["element_id"])
-            if "property" in arguments:
-                predicate["property"] = arguments["property"]
-            if "min_count" in arguments:
-                predicate["minCount"] = arguments["min_count"]
-            options: dict[str, Any] = {}
-            if "timeout" in arguments:
-                options["timeout"] = arguments["timeout"]
-            if "poll_interval" in arguments:
-                options["pollInterval"] = arguments["poll_interval"]
-            response = await ui_client.sdk_wait_for_change(predicate, options or None)
+            predicate = _change_predicate(arguments)
+            if isinstance(predicate, str):
+                return _tool_error(f"Error: {predicate}")
+            response = await ui_client.sdk_wait_for_change(
+                predicate, _wait_for_change_options(arguments)
+            )
             if not response.success:
                 return _error_result(response)
             return _wait_for_change_result(response.data)
@@ -7537,20 +7571,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "ui_wait_for_change":
-            predicate = {"type": arguments["predicate_type"]}
-            if "element_id" in arguments:
-                predicate["elementId"] = ref_manager.resolve(arguments["element_id"])
-            if "property" in arguments:
-                predicate["property"] = arguments["property"]
-            if "min_count" in arguments:
-                predicate["minCount"] = arguments["min_count"]
-            options = {}
-            if "timeout" in arguments:
-                options["timeout"] = arguments["timeout"]
-            if "poll_interval" in arguments:
-                options["pollInterval"] = arguments["poll_interval"]
+            predicate = _change_predicate(arguments)
+            if isinstance(predicate, str):
+                return _tool_error(f"Error: {predicate}")
             response = await ui_client.control_wait_for_change(
-                predicate, options or None
+                predicate, _wait_for_change_options(arguments)
             )
             if not response.success:
                 return _error_result(response)
