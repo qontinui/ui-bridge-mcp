@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 import pytest
+from mcp import types
 
 import ui_bridge_mcp.server as server_mod
 from ui_bridge_mcp.client import UIBridgeClient
@@ -98,11 +99,14 @@ def _client(monkeypatch: pytest.MonkeyPatch) -> UIBridgeClient:
 def _call_tool(name: str, arguments: dict[str, Any]) -> str:
     async def go() -> str:
         try:
-            result = await server_mod.call_tool(name, arguments)
+            result: Any = await server_mod.call_tool(name, arguments)
         finally:
             if server_mod.client is not None:
                 await server_mod.client.close()
-        return "\n".join(getattr(item, "text", "") for item in result)
+        # A failure flagged with isError arrives as a CallToolResult rather than
+        # a content list (the ui-bridge-mcp isError fix); read either shape.
+        items = result.content if isinstance(result, types.CallToolResult) else result
+        return "\n".join(getattr(item, "text", "") for item in items)
 
     return asyncio.run(go())
 
