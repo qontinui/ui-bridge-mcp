@@ -12,7 +12,8 @@ import asyncio
 import base64
 import json
 import logging
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, TypeGuard
 
 from mcp import types
 from mcp.server import Server
@@ -51,8 +52,10 @@ delta_encoder = DeltaEncoder()
 ToolResult = list[types.TextContent | types.ImageContent] | types.CallToolResult
 
 
-def _tool_error(text: str) -> types.CallToolResult:
-    """A failed tool call, flagged as one.
+def _tool_error(
+    text: str, images: Sequence[types.ImageContent] = ()
+) -> types.CallToolResult:
+    """A failed tool call, flagged as one; ``images`` ride along after the text.
 
     The MCP spec reports a tool's own failure inside the result with
     ``isError: true``, so a client can tell a failure from an answer without
@@ -66,7 +69,7 @@ def _tool_error(text: str) -> types.CallToolResult:
     changes) is still an answer and is not an error.
     """
     return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)], isError=True
+        content=[types.TextContent(type="text", text=text), *images], isError=True
     )
 
 
@@ -148,26 +151,19 @@ def _nl_action_result(instruction: str, data: Any) -> ToolResult:
     A failed action arrives as ``{success: true, data: {success: false, error,
     errorCode}}``: the request worked, the action did not (``NLActionResponse``
     in ui-bridge ``ai/types.ts``; ``server/handlers.ts`` aiExecute answers
-    ``success(result)`` whatever the result says).
+    ``success(result)`` whatever the result says). The client reports that
+    shape as a failed request (``UIBridgeClient._request``), so what reaches
+    here either says ``success: true`` or says nothing.
     """
     result = _as_dict(data)
     outcome = result.get("success")
     if outcome is True:
         text = f"Executed: {instruction}" + format_action_error_info(result)
         return [types.TextContent(type="text", text=text)]
-    if outcome is not False:
-        return _tool_error(
-            f"Action outcome UNKNOWN for '{instruction}': the response carried no "
-            f"boolean 'success' (got {outcome!r}). This is not a success."
-        )
-    lines = [f"Action failed: {_code_tag(result.get('errorCode'))}{instruction}"]
-    error = result.get("error")
-    if error:
-        lines.append(f"  Error: {error}")
-    suggestions = result.get("suggestions")
-    if isinstance(suggestions, list) and suggestions:
-        lines.append("  Suggestions: " + "; ".join(str(s) for s in suggestions[:3]))
-    return _tool_error("\n".join(lines) + format_action_error_info(result))
+    return _tool_error(
+        f"Action outcome UNKNOWN for '{instruction}': the response carried no "
+        f"boolean 'success' (got {outcome!r}). This is not a success."
+    )
 
 
 def _undo_redo_result(verb: str, past: str, data: Any) -> ToolResult:
@@ -308,6 +304,441 @@ def _wait_for_change_result(data: Any) -> ToolResult:
             type="text", text="Change detected. The response carried no diff."
         )
     ]
+
+
+def _text(text: str) -> list[types.TextContent | types.ImageContent]:
+    """An answer: one text block."""
+    return [types.TextContent(type="text", text=text)]
+
+
+def _number(value: Any) -> TypeGuard[int | float]:
+    """``value`` is a JSON number (a bool is not)."""
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _relay_payload_error(data: Any, expected: str) -> str | None:
+    """The browser relay's failure message, when ``data`` is one, not a payload.
+
+    Some relay design commands answer a failure as a bare ``{error}`` with no
+    ``success`` field (``react/commandHandlers.ts`` getElementStyles,
+    getElementStateStyles, getResponsiveSnapshots), so it arrives as a success.
+    ``expected`` is a key every real payload carries.
+    """
+    result = _as_dict(data)
+    error = result.get("error")
+    if expected not in result and isinstance(error, str) and error:
+        return error
+    return None
+
+
+def _state_style_entries(data: Any) -> list[dict[str, Any]] | None:
+    """The per-state style entries, or ``None`` when the response has no list.
+
+    The browser relay answers ``stateStyles`` as a map of placeholders
+    (``{hover: 'Requires interaction'}``, ``react/commandHandlers.ts``): it
+    cannot compute state styles without real interaction.
+    """
+    entries = _as_dict(data).get("stateStyles")
+    if not isinstance(entries, list):
+        return None
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _percent(value: Any) -> str:
+    """A 0-1 score as a percentage; UNKNOWN when the producer sent none."""
+    return f"{value:.0%}" if _number(value) else "UNKNOWN"
+
+
+def _native_capture_result(data: dict[str, Any]) -> ToolResult | None:
+    """The runner's own-UI snapshot fallback, which carries no element tree.
+
+    With its UI Bridge SDK not connected, the runner answers a control snapshot
+    with a window capture, ``{source: "native_capture", elements: [], reason,
+    screenshot}`` (runner ``ui_bridge/elements.rs``). That empty list is not
+    "no elements": the element tree is UNKNOWN. ``None`` for any other snapshot.
+    """
+    if data.get("source") != "native_capture":
+        return None
+    text = (
+        "No element tree: the runner's UI Bridge SDK was not connected, so the "
+        "runner answered with a capture of its window instead."
+    )
+    if data.get("reason"):
+        text += f"\n  Reason: {data['reason']}"
+    screenshot = data.get("screenshot")
+    images = (
+        [types.ImageContent(type="image", data=screenshot, mimeType="image/png")]
+        if isinstance(screenshot, str) and screenshot
+        else []
+    )
+    return _tool_error(text, images)
+
+
+def _bookmark_deleted_result(name: str, data: Any) -> ToolResult:
+    """A bookmark deletion. ``deleted: false`` means no bookmark had that name.
+
+    The SDK and the runner's own UI answer ``{deleted}`` (ui-bridge ``server/
+    handlers.ts`` deleteBookmark; runner ``changeTrackingHandler.ts``). The
+    browser relay names the outcome ``success`` (``react/commandHandlers.ts``).
+    """
+    result = _as_dict(data)
+    deleted = result.get("deleted")
+    if not isinstance(deleted, bool):
+        deleted = result.get("success")
+    if deleted is True:
+        return _text(f"Bookmark '{name}' deleted.")
+    if deleted is False:
+        return _tool_error(
+            f"Bookmark '{name}' was not deleted: no bookmark has that name."
+        )
+    return _tool_error(
+        f"Bookmark '{name}': whether it was deleted is UNKNOWN; the response "
+        f"carried no boolean 'deleted' (got {deleted!r})."
+    )
+
+
+def _diff_result(title: str, data: Any, missing: str) -> ToolResult:
+    """A change-tracking diff, or why there is none.
+
+    The SDK and the runner's own UI send a ``SemanticDiff`` (``changes:
+    {appeared, disappeared, modified}``, ui-bridge ``ai/types.ts``), or
+    ``null`` when there is nothing to diff against; ``missing`` says what that
+    means for the calling tool. The browser relay sends only element counts for
+    a bookmark diff (``{beforeCount, afterCount}``) and a stub for a scoped
+    diff (``{changes: []}``) (``react/commandHandlers.ts``). Neither says what
+    changed, so neither is rendered as a diff.
+    """
+    if data is None:
+        return _tool_error(f"{title}: no diff. {missing}")
+    result = _as_dict(data)
+    changes = result.get("changes")
+    if isinstance(changes, dict):
+        lines = [
+            f"{title}:",
+            f"  Appeared: {_change_count(changes, 'appeared')} elements",
+            f"  Disappeared: {_change_count(changes, 'disappeared')} elements",
+            f"  Modified: {_change_count(changes, 'modified')} elements",
+        ]
+        appeared = changes.get("appeared")
+        if isinstance(appeared, list) and appeared:
+            lines.append("  New elements:")
+            for element in appeared[:10]:
+                el = _as_dict(element)
+                label = el.get("description", el.get("elementId", "?"))
+                lines.append(f"    - {el.get('type', '?')} '{label}'")
+            if len(appeared) > 10:
+                lines.append(f"    ... and {len(appeared) - 10} more")
+        return _text("\n".join(lines))
+    before, after = result.get("beforeCount"), result.get("afterCount")
+    if _number(before) and _number(after):
+        return _tool_error(
+            f"{title}: what changed is UNKNOWN. This transport sends element "
+            f"counts, not a diff: {before} elements then, {after} now."
+        )
+    return _tool_error(
+        f"{title}: UNKNOWN; the response carried no diff, so this transport "
+        "does not compute one."
+    )
+
+
+# ui-bridge ai/types.ts ChangeCategory: every category the SDK's categorizer
+# produces.
+_CHANGE_CATEGORIES = frozenset(
+    {"navigation", "feedback", "data-update", "ui-state", "loading", "no-op"}
+)
+
+
+def _categorized_diff_result(data: Any) -> ToolResult:
+    """A diff categorization. A category outside ``ChangeCategory`` is UNKNOWN.
+
+    ``null`` means there was no diff to categorize. The browser relay answers
+    a stub, ``{category: 'unknown'}`` (``react/commandHandlers.ts``), which is
+    not a category the SDK produces.
+    """
+    result = _as_dict(data)
+    if not result:
+        return _tool_error("No previous diff to categorize.")
+    category = result.get("category")
+    if category not in _CHANGE_CATEGORIES:
+        return _tool_error(
+            "Diff category UNKNOWN: the response named no category the SDK "
+            f"defines (got {category!r})."
+        )
+    confidence = result.get("confidence")
+    shown = f"{confidence * 100:.0f}%" if _number(confidence) else "UNKNOWN"
+    return _text(f"Category: {category} (confidence: {shown})")
+
+
+def _diff_summary_result(data: Any) -> ToolResult:
+    """A diff summary. No ``summary`` in the response is UNKNOWN, not "No changes"."""
+    summary = _as_dict(data).get("summary")
+    if isinstance(summary, str):
+        return _text(summary or "(empty summary)")
+    return _tool_error(
+        f"Diff summary UNKNOWN: the response carried no summary (got {summary!r})."
+    )
+
+
+def _structured_changes_result(data: Any) -> ToolResult:
+    """A structured-change analysis (``StructuredChangeAnalysis``, ui-bridge ``ai``).
+
+    The browser relay answers a stub, ``{changes: []}``, with no
+    ``hasStructuredData`` (``react/commandHandlers.ts``): that is UNKNOWN, not
+    "no structured data".
+    """
+    result = _as_dict(data)
+    has_structured = result.get("hasStructuredData")
+    if not isinstance(has_structured, bool):
+        return _tool_error(
+            "Structured change analysis UNKNOWN: the response carried no "
+            "'hasStructuredData'; this transport does not analyze structured "
+            "changes."
+        )
+    lines = ["Structured change analysis:", f"  Has structured data: {has_structured}"]
+    tables = result.get("tableChanges")
+    if isinstance(tables, list) and tables:
+        lines.append(f"  Table changes: {len(tables)}")
+        for table in tables[:5]:
+            t = _as_dict(table)
+            lines.append(
+                f"    - {t.get('tableId', '?')}: "
+                f"+{len(t.get('addedRows') or [])} -{len(t.get('removedRows') or [])} rows"
+            )
+    lists = result.get("listChanges")
+    if isinstance(lists, list) and lists:
+        lines.append(f"  List changes: {len(lists)}")
+        for listed in lists[:5]:
+            lst = _as_dict(listed)
+            lines.append(
+                f"    - {lst.get('listId', '?')}: "
+                f"+{len(lst.get('addedItems') or [])} -{len(lst.get('removedItems') or [])} items"
+            )
+    return _text("\n".join(lines))
+
+
+def _execute_with_diff_result(action: str, element_id: str, data: Any) -> ToolResult:
+    """An execute-with-diff outcome, read from the producer's ``actionSuccess``.
+
+    ``actionSuccess: false`` reaches the tool as a failed request (the runner
+    and the relay both lift it). An absent ``actionSuccess`` is the runner's
+    ``verdict: "indeterminate"`` case: whether the action happened is UNKNOWN.
+    The SDK's diff is a ``SemanticDiff``; the browser relay's is element counts,
+    ``{before, after}`` (``react/commandHandlers.ts`` executeWithDiff).
+    """
+    result = _as_dict(data)
+    action_success = result.get("actionSuccess")
+    lines = [f"Execute with diff: {action} on {element_id}"]
+    if isinstance(action_success, bool):
+        lines.append(f"  Action success: {action_success}")
+    else:
+        lines.append(
+            "  Action success: UNKNOWN (the response carried no boolean "
+            f"'actionSuccess', got {action_success!r})"
+        )
+    diff = _as_dict(result.get("diff"))
+    changes = diff.get("changes")
+    if isinstance(changes, dict):
+        lines.append(f"  Appeared: {_change_count(changes, 'appeared')}")
+        lines.append(f"  Disappeared: {_change_count(changes, 'disappeared')}")
+        lines.append(f"  Modified: {_change_count(changes, 'modified')}")
+    elif _number(diff.get("before")) and _number(diff.get("after")):
+        lines.append(
+            f"  Elements: {diff['before']} before, {diff['after']} after (this "
+            "transport sends counts, not a diff)"
+        )
+    else:
+        lines.append("  Diff: UNKNOWN (the response carried none)")
+    categorized = _as_dict(result.get("categorized"))
+    if categorized:
+        confidence = categorized.get("confidence")
+        shown = f"{confidence * 100:.0f}%" if _number(confidence) else "UNKNOWN"
+        lines.append(f"  Category: {categorized.get('category')} ({shown})")
+    if result.get("budgetSummary"):
+        lines.append(f"  Summary: {result['budgetSummary']}")
+    if _number(result.get("durationMs")):
+        lines.append(f"  Duration: {result['durationMs']:.0f}ms")
+    action_result = result.get("actionResult")
+    if isinstance(action_result, dict):
+        error_info = format_action_error_info(action_result)
+        if error_info:
+            lines.append(error_info)
+    if action_success is True:
+        return _text("\n".join(lines))
+    return _tool_error("\n".join(lines))
+
+
+def _format_fill_result(data: dict[str, Any]) -> str:
+    """Render a ``FillResult`` (ui-bridge ``core/types.ts``)."""
+    fields = _as_dict(data.get("fields"))
+    filled = data.get("filledCount")
+    errors = data.get("errorCount")
+    total = filled + errors if _number(filled) and _number(errors) else len(fields)
+    lines = [
+        f"Fill result: {filled if _number(filled) else 'UNKNOWN'}/{total} fields set"
+    ]
+    failed = {
+        k: _as_dict(v)
+        for k, v in fields.items()
+        if _as_dict(v).get("success") is not True
+    }
+    if failed:
+        lines.append("Failed fields:")
+        for field_id, outcome in failed.items():
+            lines.append(f"  {field_id}: {outcome.get('error') or 'no error message'}")
+    # A field that was set can still fail validation: the SDK says so in
+    # `validationError`, the runner's own UI in `error`.
+    invalid = {
+        k: _as_dict(v).get("validationError") or _as_dict(v).get("error")
+        for k, v in fields.items()
+        if k not in failed
+    }
+    invalid = {k: v for k, v in invalid.items() if v}
+    if invalid:
+        lines.append("Validation errors:")
+        for field_id, message in invalid.items():
+            lines.append(f"  {field_id}: {message}")
+    return "\n".join(lines)
+
+
+def _fill_form_result(requested: dict[str, Any], data: Any) -> ToolResult:
+    """A form fill: every requested field set, or which were not.
+
+    The SDK and the runner's own UI answer a ``FillResult``; one with
+    ``success: false`` reaches the tool as a failed request (see the fill
+    tools). The browser relay answers ``{filledFields, totalFields}`` and does
+    not name the fields it could not find (``react/commandHandlers.ts``
+    fillForm), so those are worked out from the request.
+    """
+    result = _as_dict(data)
+    if result.get("success") is True and isinstance(result.get("fields"), dict):
+        return _text(_format_fill_result(result))
+    filled_fields = result.get("filledFields")
+    if isinstance(filled_fields, list):
+        missing = [name for name in requested if name not in filled_fields]
+        text = f"Fill result: {len(filled_fields)}/{len(requested)} fields set"
+        if missing:
+            return _tool_error(f"{text}\n  Not found: {', '.join(missing)}")
+        return _text(text)
+    return _tool_error(
+        "Fill result UNKNOWN: the response said neither which fields were set "
+        "nor whether the fill succeeded."
+    )
+
+
+def _undo_state_result(data: Any) -> ToolResult:
+    """Undo/redo availability, or UNKNOWN when the response cannot say.
+
+    The SDK answers an ``UndoRedoState`` (``undoAvailable``/``redoAvailable``,
+    ui-bridge ``undo/types.ts``); the runner's own UI answers a
+    ``SnapshotUndoContext`` (``canUndo``/``canRedo``), or ``{note: "UndoTracker
+    not installed"}`` when it has no tracker (runner
+    ``useDebugInspectEvents.ts``). Reading only ``undoAvailable`` reported
+    every runner state as "not available".
+    """
+    result = _as_dict(data)
+    undo = result.get("undoAvailable", result.get("canUndo"))
+    redo = result.get("redoAvailable", result.get("canRedo"))
+    if not isinstance(undo, bool) or not isinstance(redo, bool):
+        note = f" ({result['note']})" if result.get("note") else ""
+        return _tool_error(
+            f"Undo/redo state UNKNOWN{note}: the response said neither whether "
+            "undo nor whether redo is available."
+        )
+    return _text(
+        _format_undo_state({**result, "undoAvailable": undo, "redoAvailable": redo})
+    )
+
+
+def _idle_result(data: Any, mode_label: str, signal: str | None) -> ToolResult:
+    """An idle-status answer. No boolean ``idle`` is UNKNOWN, not "Idle: False".
+
+    The browser relay answers nothing at all for a signal it does not know
+    (``react/commandHandlers.ts`` getIdleSignalStatus).
+    """
+    result = _as_dict(data)
+    idle = result.get("idle")
+    if not isinstance(idle, bool):
+        target = f"{mode_label}, signal {signal}" if signal else mode_label
+        return _tool_error(
+            f"Idle status UNKNOWN for {target}: the response carried no boolean "
+            f"'idle' (got {idle!r})."
+        )
+    if signal:
+        stable = result.get("stableForMs")
+        lines = [
+            f"Target: {mode_label}",
+            f"Signal: {signal}",
+            f"Idle: {idle}",
+            f"Stable for: {f'{stable}ms' if _number(stable) else 'UNKNOWN'}",
+        ]
+        details = result.get("details")
+        if details:
+            lines.append(f"Details: {json.dumps(details)}")
+        return _text("\n".join(lines))
+    lines = [f"{mode_label} Idle: {idle}", ""]
+    signals = _as_dict(result.get("signals"))
+    if signals:
+        lines.append("Signals:")
+        for sig_name, sig_info in signals.items():
+            if not isinstance(sig_info, dict):
+                lines.append(f"  {sig_name}: {sig_info}")
+                continue
+            sig_idle = sig_info.get("idle")
+            status = (
+                ("idle" if sig_idle else "busy")
+                if isinstance(sig_idle, bool)
+                else "UNKNOWN"
+            )
+            sig_stable = sig_info.get("stableForMs")
+            stable_text = f"{sig_stable}ms" if _number(sig_stable) else "UNKNOWN"
+            lines.append(f"  {sig_name}: {status} (stable {stable_text})")
+    return _text("\n".join(lines))
+
+
+def _wait_for_targets_result(
+    targets: list[Any], data: Any, mode_label: str
+) -> ToolResult:
+    """Whether every requested target is idle; a target not reported is UNKNOWN.
+
+    The SDK answers a map keyed by target: a signal name, or
+    ``indicator:<selector>`` (ui-bridge ``idle/composite-idle.ts`` waitFor) and
+    leaves a signal it does not know out. The runner's own UI records a target
+    whose wait failed under ``_error`` and also leaves an unknown target out
+    (runner ``useNetworkIdleEvents.ts``, case "wait_for_targets"). Neither map
+    carries a ``waitedMs``, which the old rendering read as 0.
+    """
+    result = _as_dict(data)
+    if result.get("_error"):
+        return _tool_error(f"Targets wait failed: {result['_error']}")
+    idle: list[str] = []
+    busy: list[str] = []
+    unknown: list[str] = []
+    for target in targets:
+        key = (
+            target
+            if isinstance(target, str)
+            else f"indicator:{_as_dict(target).get('indicator', '?')}"
+        )
+        status = _as_dict(result.get(key)).get("idle")
+        if status is True:
+            idle.append(key)
+        elif status is False:
+            busy.append(key)
+        else:
+            unknown.append(key)
+    if busy or unknown:
+        problems = []
+        if busy:
+            problems.append(f"not idle: {', '.join(busy)}")
+        if unknown:
+            problems.append(
+                f"UNKNOWN (the response did not report them): {', '.join(unknown)}"
+            )
+        return _tool_error(
+            f"Targets wait{mode_label} did not confirm every target idle; "
+            + "; ".join(problems)
+        )
+    return _text(f"All targets idle{mode_label}: {', '.join(idle)}")
 
 
 # =============================================================================
@@ -759,37 +1190,6 @@ def _format_forms_response(data: dict[str, Any] | None) -> str:
         if submit_btn:
             lines.append(f"  Submit: {submit_btn}")
         lines.append("")
-
-    return "\n".join(lines)
-
-
-def _format_fill_form_response(data: dict[str, Any] | None) -> str:
-    """Format fill form response into LLM-readable text."""
-    if not data:
-        return "No fill result data available."
-
-    results = data.get("results", {})
-    errors = data.get("errors", {})
-    total = len(results)
-    succeeded = sum(1 for v in results.values() if v)
-    failed = total - succeeded
-
-    lines = [f"Fill result: {succeeded}/{total} fields set successfully"]
-
-    if failed > 0:
-        lines.append("")
-        lines.append("Failed fields:")
-        for field_id, success in results.items():
-            if not success:
-                error_msg = errors.get(field_id, "unknown error")
-                lines.append(f"  {field_id}: {error_msg}")
-
-    validation_errors = data.get("validationErrors", {})
-    if validation_errors:
-        lines.append("")
-        lines.append("Validation errors:")
-        for field_id, error in validation_errors.items():
-            lines.append(f"  {field_id}: {error}")
 
     return "\n".join(lines)
 
@@ -4344,7 +4744,8 @@ registered with the UI Bridge.""",
                 },
                 "action": {
                     "type": "string",
-                    "description": "Optional action to perform on matched element (e.g., 'click')",
+                    "enum": ["click"],
+                    "description": "Optional action to perform on the matched element at index",
                 },
                 "index": {
                     "type": "integer",
@@ -4417,6 +4818,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _error_result(response)
 
             data = response.data or {}
+            fallback = _native_capture_result(data)
+            if fallback is not None:
+                return fallback
             elements = data.get("elements", [])
 
             # Extract page context if present
@@ -5001,12 +5405,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 clear_first=clear_first,
             )
             if not response.success:
+                # A FillResult with success: false (the client lifts it) still
+                # names the fields that failed; show them.
+                failed_fill = response.data
+                if isinstance(failed_fill, dict) and isinstance(
+                    failed_fill.get("fields"), dict
+                ):
+                    return _tool_error(_format_fill_result(failed_fill))
                 return _error_result(response)
-            return [
-                types.TextContent(
-                    type="text", text=_format_fill_form_response(response.data)
-                )
-            ]
+            return _fill_form_result(fields, response.data)
 
         elif name == "ui_fill_form":
             fields = arguments.get("fields", {})
@@ -5018,12 +5425,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 clear_first=clear_first,
             )
             if not response.success:
+                # A FillResult with success: false (the client lifts it) still
+                # names the fields that failed; show them.
+                failed_fill = response.data
+                if isinstance(failed_fill, dict) and isinstance(
+                    failed_fill.get("fields"), dict
+                ):
+                    return _tool_error(_format_fill_result(failed_fill))
                 return _error_result(response)
-            return [
-                types.TextContent(
-                    type="text", text=_format_fill_form_response(response.data)
-                )
-            ]
+            return _fill_form_result(fields, response.data)
 
         elif name == "sdk_form_snapshot":
             response = await ui_client.sdk_form_snapshot()
@@ -5293,6 +5703,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not response.success:
                 return _error_result(response)
             msg = f"Scrolled element: {element_id}"
+            scroll_info = _as_dict(_as_dict(response.data).get("scrollInfo"))
+            if scroll_info.get("changed") is False:
+                # An answer, not a failure: scrolling at the limit is a no-op.
+                msg += (
+                    " (the scroll position did not change: it was already at "
+                    "the limit, or the element does not scroll)"
+                )
             msg += format_action_error_info(response.data)
             return [types.TextContent(type="text", text=msg)]
 
@@ -5487,7 +5904,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             instruction = arguments["instruction"]
             response = await ui_client.sdk_ai_execute(instruction)
             if not response.success:
-                return _error_result(response)
+                return _error_result(response, f"Action failed: '{instruction}'")
             return _nl_action_result(instruction, response.data)
 
         elif name == "sdk_ai_assert":
@@ -5512,6 +5929,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_page_refresh()
             if not response.success:
                 return _error_result(response)
+            refreshed = response.data or {}
+            if refreshed.get("reloaded") is False:
+                # No SDK app connected: the runner answered for its own UI,
+                # where a refresh is a deliberate no-op (runner page.rs
+                # augment_refresh_response).
+                return _tool_error(
+                    "Page was not refreshed: "
+                    f"{refreshed.get('message') or 'the producer reports reloaded: false'}"
+                )
             return [types.TextContent(type="text", text="Page refreshed successfully")]
 
         elif name == "sdk_page_navigate":
@@ -5672,7 +6098,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(f"Error comparing: {compare_resp.describe_error()}")
 
             data = compare_resp.data or {}
-            scores = data.get("scores", {})
+            scores = data.get("scores")
+            if not isinstance(scores, dict):
+                # The browser relay answers a stub with no scores
+                # (react/commandHandlers.ts crossAppCompare).
+                return _tool_error(
+                    "Cross-app comparison UNKNOWN: the response carried no "
+                    "scores; this transport does not compare apps."
+                )
             issues = data.get("issues", [])
             summary = data.get("summary", "")
             components = data.get("components")
@@ -5684,12 +6117,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 f"Target: {target_url}",
                 "",
                 "Scores:",
-                f"  Data completeness:      {scores.get('dataCompleteness', 0):.0%}",
-                f"  Format alignment:       {scores.get('formatAlignment', 0):.0%}",
-                f"  Presentation alignment: {scores.get('presentationAlignment', 0):.0%}",
-                f"  Navigation parity:      {scores.get('navigationParity', 0):.0%}",
-                f"  Action parity:          {scores.get('actionParity', 0):.0%}",
-                f"  Overall score:          {scores.get('overallScore', 0):.0%}",
+                f"  Data completeness:      {_percent(scores.get('dataCompleteness'))}",
+                f"  Format alignment:       {_percent(scores.get('formatAlignment'))}",
+                f"  Presentation alignment: {_percent(scores.get('presentationAlignment'))}",
+                f"  Navigation parity:      {_percent(scores.get('navigationParity'))}",
+                f"  Action parity:          {_percent(scores.get('actionParity'))}",
+                f"  Overall score:          {_percent(scores.get('overallScore'))}",
             ]
 
             if components:
@@ -5883,6 +6316,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not response.success:
                 return _error_result(response)
             data = response.data or {}
+            fallback = _native_capture_result(data)
+            if fallback is not None:
+                return fallback
             elements = data.get("elements", [])
             diff = control_diff_tracker.update_and_diff(elements)
             if diff is None:
@@ -6322,8 +6758,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 response = await ui_client.sdk_design_element_styles(element_id)
                 if not response.success:
                     return _tool_error(f"Error: {response.describe_error()}")
-                result_lines = [f"Design styles for {element_id}:"]
                 data = response.data or {}
+                relay_error = _relay_payload_error(data, "styles")
+                if relay_error is not None:
+                    return _tool_error(f"Error: {relay_error}")
+                result_lines = [f"Design styles for {element_id}:"]
                 styles = data.get("styles", {})
                 for prop, val in styles.items():
                     if val and val != "none" and val != "normal" and val != "0px":
@@ -6338,8 +6777,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 if include_state_variations:
                     sv_resp = await ui_client.sdk_design_state_styles(element_id)
                     if sv_resp.success:
-                        sv_data = sv_resp.data or {}
-                        for state_info in sv_data.get("stateStyles", []):
+                        sv_entries = _state_style_entries(sv_resp.data)
+                        if sv_entries is None:
+                            result_lines.append(
+                                "\n  State variations: UNKNOWN (the response "
+                                "carried no per-state styles)"
+                            )
+                        for state_info in sv_entries or []:
                             state_name = state_info.get("state", "?")
                             diffs = state_info.get("diffFromDefault", [])
                             if diffs:
@@ -6380,9 +6824,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_design_state_styles(element_id, states)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
+            relay_error = _relay_payload_error(response.data, "stateStyles")
+            if relay_error is not None:
+                return _tool_error(f"Error: {relay_error}")
+            entries = _state_style_entries(response.data)
+            if entries is None:
+                return _tool_error(
+                    f"State styles for {element_id} UNKNOWN: the response carried no "
+                    "per-state list; this transport cannot compute state styles."
+                )
             result_lines = [f"State styles for {element_id}:"]
-            for state_info in data.get("stateStyles", []):
+            for state_info in entries:
                 state_name = state_info.get("state", "?")
                 diffs = state_info.get("diffFromDefault", [])
                 if state_name == "default":
@@ -6403,6 +6855,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_design_responsive(viewports, element_ids)
             if not response.success:
                 return _error_result(response)
+            relay_error = _relay_payload_error(response.data, "elements")
+            if relay_error is not None:
+                return _tool_error(f"Error: {relay_error}")
             snapshots: list[dict[str, object]] = (
                 response.data if isinstance(response.data, list) else []
             )
@@ -6551,8 +7006,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     for eid in interactive_ids[:10]:
                         sv_resp = await ui_client.sdk_design_state_styles(eid)
                         if sv_resp.success:
-                            sv_data = sv_resp.data or {}
-                            for state_info in sv_data.get("stateStyles", []):
+                            sv_entries = _state_style_entries(sv_resp.data)
+                            if sv_entries is None:
+                                result_lines.append(
+                                    f"  {eid}: UNKNOWN (the response carried no "
+                                    "per-state styles)"
+                                )
+                            for state_info in sv_entries or []:
                                 diffs = state_info.get("diffFromDefault", [])
                                 if diffs:
                                     state_name = state_info.get("state", "?")
@@ -6573,7 +7033,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 resp_resp = await ui_client.sdk_design_responsive(
                     element_ids=element_ids
                 )
-                if resp_resp.success:
+                resp_error = (
+                    _relay_payload_error(resp_resp.data, "elements")
+                    if resp_resp.success
+                    else None
+                )
+                if resp_error is not None:
+                    result_lines.append(f"\nResponsive: UNKNOWN ({resp_error})")
+                elif resp_resp.success:
                     resp_snaps: list[dict[str, object]] = (
                         resp_resp.data if isinstance(resp_resp.data, list) else []
                     )
@@ -6843,39 +7310,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 response = await ui_client.control_idle_status(signal=signal)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
             mode_label = "SDK app" if use_sdk else "Runner"
-            if signal:
-                # Single signal response
-                idle = data.get("idle", False)
-                stable_ms = data.get("stableForMs", 0)
-                lines = [
-                    f"Target: {mode_label}",
-                    f"Signal: {signal}",
-                    f"Idle: {idle}",
-                    f"Stable for: {stable_ms}ms",
-                ]
-                details = data.get("details")
-                if details:
-                    lines.append(f"Details: {json.dumps(details)}")
-            else:
-                # Composite response
-                idle = data.get("idle", False)
-                lines = [f"{mode_label} Idle: {idle}", ""]
-                signals = data.get("signals", {})
-                if signals:
-                    lines.append("Signals:")
-                    for sig_name, sig_info in signals.items():
-                        if isinstance(sig_info, dict):
-                            sig_idle = sig_info.get("idle", False)
-                            sig_stable = sig_info.get("stableForMs", 0)
-                            status = "idle" if sig_idle else "busy"
-                            lines.append(
-                                f"  {sig_name}: {status} (stable {sig_stable}ms)"
-                            )
-                        else:
-                            lines.append(f"  {sig_name}: {sig_info}")
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _idle_result(response.data, mode_label, signal)
 
         elif name == "wait_for_idle":
             timeout = arguments.get("timeout", 30000)
@@ -6980,18 +7416,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 )
             if not response.success:
                 return _tool_error(f"Targets wait failed: {response.describe_error()}")
-            data = response.data or {}
-            waited_ms = data.get("waitedMs", 0)
-            target_results = data.get("targets", [])
             mode_label = " (SDK)" if use_sdk else ""
-            lines = [f"All targets idle{mode_label} (waited {waited_ms}ms)"]
-            if target_results:
-                for t in target_results:
-                    if isinstance(t, dict):
-                        t_name = t.get("target", t.get("name", "?"))
-                        t_stable = t.get("stableForMs", 0)
-                        lines.append(f"  {t_name}: stable {t_stable}ms")
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _wait_for_targets_result(targets, response.data, mode_label)
 
         # =====================================================================
         # Stuck Screen Diagnosis
@@ -7231,38 +7657,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_delete_bookmark(bookmark_name)
             if not response.success:
                 return _error_result(response)
-            return [
-                types.TextContent(
-                    type="text", text=f"Bookmark '{bookmark_name}' deleted."
-                )
-            ]
+            return _bookmark_deleted_result(bookmark_name, response.data)
 
         elif name == "sdk_diff_from_bookmark":
             bookmark_name = arguments["name"]
             response = await ui_client.sdk_diff_from_bookmark(bookmark_name)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            changes = data.get("changes", {})
-            appeared = changes.get("appeared", [])
-            disappeared = changes.get("disappeared", [])
-            modified = changes.get("modified", [])
-            lines = [f"Diff from bookmark '{bookmark_name}':"]
-            lines.append(f"  Appeared: {len(appeared)} elements")
-            lines.append(f"  Disappeared: {len(disappeared)} elements")
-            lines.append(f"  Modified: {len(modified)} elements")
-            if appeared:
-                lines.append("  New elements:")
-                for el in appeared[:10]:
-                    if isinstance(el, dict):
-                        lines.append(
-                            f"    - {el.get('type', '?')} '{el.get('label', el.get('id', '?'))}'"
-                        )
-                    else:
-                        lines.append(f"    - {el}")
-                if len(appeared) > 10:
-                    lines.append(f"    ... and {len(appeared) - 10} more")
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _diff_result(
+                f"Diff from bookmark '{bookmark_name}'",
+                response.data,
+                f"Bookmark '{bookmark_name}' was not found.",
+            )
 
         elif name == "sdk_execute_with_diff":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -7287,30 +7693,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_execute_with_diff(request_body)
             if not response.success:
                 return _error_result(response)
-
-            data = response.data or {}
-            lines = [f"Execute with diff: {action_name} on {element_id}"]
-            lines.append(f"  Action success: {data.get('actionSuccess', False)}")
-            diff = data.get("diff", {})
-            changes = diff.get("changes", {})
-            lines.append(f"  Appeared: {len(changes.get('appeared', []))}")
-            lines.append(f"  Disappeared: {len(changes.get('disappeared', []))}")
-            lines.append(f"  Modified: {len(changes.get('modified', []))}")
-            if data.get("categorized"):
-                cat = data["categorized"]
-                lines.append(
-                    f"  Category: {cat.get('category')} ({cat.get('confidence', 0) * 100:.0f}%)"
-                )
-            if data.get("budgetSummary"):
-                lines.append(f"  Summary: {data['budgetSummary']}")
-            lines.append(f"  Duration: {data.get('durationMs', 0):.0f}ms")
-            # Include error info from the underlying action response
-            action_result = data.get("actionResult")
-            if isinstance(action_result, dict):
-                error_info = format_action_error_info(action_result)
-                if error_info:
-                    lines.append(error_info)
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _execute_with_diff_result(action_name, element_id, response.data)
 
         elif name == "sdk_wait_for_change":
             predicate = _change_predicate(arguments)
@@ -7325,22 +7708,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         elif name == "sdk_scoped_diff":
             scope = arguments["scope"]
-            response = await ui_client.sdk_scoped_diff(
-                scope, arguments.get("from_bookmark")
-            )
+            from_bookmark = arguments.get("from_bookmark")
+            response = await ui_client.sdk_scoped_diff(scope, from_bookmark)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            changes = data.get("changes", {})
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Scoped diff ('{scope}'): "
-                    f"Appeared: {len(changes.get('appeared', []))}, "
-                    f"Disappeared: {len(changes.get('disappeared', []))}, "
-                    f"Modified: {len(changes.get('modified', []))}",
-                )
-            ]
+            return _diff_result(
+                f"Scoped diff ('{scope}')",
+                response.data,
+                (
+                    f"Bookmark '{from_bookmark}' was not found."
+                    if from_bookmark
+                    else "There is no earlier snapshot to diff against: take a "
+                    "snapshot or pass from_bookmark first."
+                ),
+            )
 
         elif name == "sdk_get_bookmark":
             bookmark_name = arguments["name"]
@@ -7362,15 +7743,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_categorize_last_diff()
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            if not data:
-                return _tool_error("No previous diff to categorize.")
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Category: {data.get('category', '?')} (confidence: {data.get('confidence', 0) * 100:.0f}%)",
-                )
-            ]
+            return _categorized_diff_result(response.data)
 
         elif name == "sdk_summarize_diff":
             budget = arguments.get("budget", 300)
@@ -7382,8 +7755,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_summarize_diff(body)
             if not response.success:
                 return _error_result(response)
-            summary = (response.data or {}).get("summary", "No changes")
-            return [types.TextContent(type="text", text=summary)]
+            return _diff_summary_result(response.data)
 
         elif name == "sdk_structured_changes":
             body = {}
@@ -7392,28 +7764,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_structured_changes(body or None)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            lines = ["Structured change analysis:"]
-            lines.append(
-                f"  Has structured data: {data.get('hasStructuredData', False)}"
-            )
-            tables = data.get("tableChanges", [])
-            lists = data.get("listChanges", [])
-            if tables:
-                lines.append(f"  Table changes: {len(tables)}")
-                for t in tables[:5]:
-                    lines.append(
-                        f"    - {t.get('tableId', '?')}: "
-                        f"+{len(t.get('addedRows', []))} -{len(t.get('removedRows', []))} rows"
-                    )
-            if lists:
-                lines.append(f"  List changes: {len(lists)}")
-                for lst in lists[:5]:
-                    lines.append(
-                        f"    - {lst.get('listId', '?')}: "
-                        f"+{len(lst.get('addedItems', []))} -{len(lst.get('removedItems', []))} items"
-                    )
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _structured_changes_result(response.data)
 
         elif name == "sdk_change_buffer_enable":
             response = await ui_client.sdk_enable_change_buffer()
@@ -7489,38 +7840,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_delete_bookmark(bookmark_name)
             if not response.success:
                 return _error_result(response)
-            return [
-                types.TextContent(
-                    type="text", text=f"Bookmark '{bookmark_name}' deleted."
-                )
-            ]
+            return _bookmark_deleted_result(bookmark_name, response.data)
 
         elif name == "ui_diff_from_bookmark":
             bookmark_name = arguments["name"]
             response = await ui_client.control_diff_from_bookmark(bookmark_name)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            changes = data.get("changes", {})
-            appeared = changes.get("appeared", [])
-            disappeared = changes.get("disappeared", [])
-            modified = changes.get("modified", [])
-            lines = [f"Diff from bookmark '{bookmark_name}':"]
-            lines.append(f"  Appeared: {len(appeared)} elements")
-            lines.append(f"  Disappeared: {len(disappeared)} elements")
-            lines.append(f"  Modified: {len(modified)} elements")
-            if appeared:
-                lines.append("  New elements:")
-                for el in appeared[:10]:
-                    if isinstance(el, dict):
-                        lines.append(
-                            f"    - {el.get('type', '?')} '{el.get('label', el.get('id', '?'))}'"
-                        )
-                    else:
-                        lines.append(f"    - {el}")
-                if len(appeared) > 10:
-                    lines.append(f"    ... and {len(appeared) - 10} more")
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _diff_result(
+                f"Diff from bookmark '{bookmark_name}'",
+                response.data,
+                f"Bookmark '{bookmark_name}' was not found.",
+            )
 
         elif name == "ui_execute_with_diff":
             element_id = ref_manager.resolve(arguments["element_id"])
@@ -7545,30 +7876,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_execute_with_diff(request_body)
             if not response.success:
                 return _error_result(response)
-
-            data = response.data or {}
-            lines = [f"Execute with diff: {action_name} on {element_id}"]
-            lines.append(f"  Action success: {data.get('actionSuccess', False)}")
-            diff = data.get("diff", {})
-            changes = diff.get("changes", {})
-            lines.append(f"  Appeared: {len(changes.get('appeared', []))}")
-            lines.append(f"  Disappeared: {len(changes.get('disappeared', []))}")
-            lines.append(f"  Modified: {len(changes.get('modified', []))}")
-            if data.get("categorized"):
-                cat = data["categorized"]
-                lines.append(
-                    f"  Category: {cat.get('category')} ({cat.get('confidence', 0) * 100:.0f}%)"
-                )
-            if data.get("budgetSummary"):
-                lines.append(f"  Summary: {data['budgetSummary']}")
-            lines.append(f"  Duration: {data.get('durationMs', 0):.0f}ms")
-            # Include error info from the underlying action response
-            action_result = data.get("actionResult")
-            if isinstance(action_result, dict):
-                error_info = format_action_error_info(action_result)
-                if error_info:
-                    lines.append(error_info)
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _execute_with_diff_result(action_name, element_id, response.data)
 
         elif name == "ui_wait_for_change":
             predicate = _change_predicate(arguments)
@@ -7583,22 +7891,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         elif name == "ui_scoped_diff":
             scope = arguments["scope"]
-            response = await ui_client.control_scoped_diff(
-                scope, arguments.get("from_bookmark")
-            )
+            from_bookmark = arguments.get("from_bookmark")
+            response = await ui_client.control_scoped_diff(scope, from_bookmark)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            changes = data.get("changes", {})
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Scoped diff ('{scope}'): "
-                    f"Appeared: {len(changes.get('appeared', []))}, "
-                    f"Disappeared: {len(changes.get('disappeared', []))}, "
-                    f"Modified: {len(changes.get('modified', []))}",
-                )
-            ]
+            return _diff_result(
+                f"Scoped diff ('{scope}')",
+                response.data,
+                (
+                    f"Bookmark '{from_bookmark}' was not found."
+                    if from_bookmark
+                    else "The runner's own UI diffs a scope only from a bookmark: "
+                    "pass from_bookmark."
+                ),
+            )
 
         elif name == "ui_get_bookmark":
             bookmark_name = arguments["name"]
@@ -7620,15 +7926,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_categorize_last_diff()
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            if not data:
-                return _tool_error("No previous diff to categorize.")
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Category: {data.get('category', '?')} (confidence: {data.get('confidence', 0) * 100:.0f}%)",
-                )
-            ]
+            return _categorized_diff_result(response.data)
 
         elif name == "ui_summarize_diff":
             budget = arguments.get("budget", 300)
@@ -7640,8 +7938,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_summarize_diff(body)
             if not response.success:
                 return _error_result(response)
-            summary = (response.data or {}).get("summary", "No changes")
-            return [types.TextContent(type="text", text=summary)]
+            return _diff_summary_result(response.data)
 
         elif name == "ui_structured_changes":
             body = {}
@@ -7650,28 +7947,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_structured_changes(body or None)
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            lines = ["Structured change analysis:"]
-            lines.append(
-                f"  Has structured data: {data.get('hasStructuredData', False)}"
-            )
-            tables = data.get("tableChanges", [])
-            lists = data.get("listChanges", [])
-            if tables:
-                lines.append(f"  Table changes: {len(tables)}")
-                for t in tables[:5]:
-                    lines.append(
-                        f"    - {t.get('tableId', '?')}: "
-                        f"+{len(t.get('addedRows', []))} -{len(t.get('removedRows', []))} rows"
-                    )
-            if lists:
-                lines.append(f"  List changes: {len(lists)}")
-                for lst in lists[:5]:
-                    lines.append(
-                        f"    - {lst.get('listId', '?')}: "
-                        f"+{len(lst.get('addedItems', []))} -{len(lst.get('removedItems', []))} items"
-                    )
-            return [types.TextContent(type="text", text="\n".join(lines))]
+            return _structured_changes_result(response.data)
 
         elif name == "ui_change_buffer_enable":
             response = await ui_client.control_enable_change_buffer()
@@ -7714,9 +7990,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_undo_state()
             if not response.success:
                 return _error_result(response)
-            return [
-                types.TextContent(type="text", text=_format_undo_state(response.data))
-            ]
+            return _undo_state_result(response.data)
 
         elif name == "ui_undo":
             response = await ui_client.control_undo()
@@ -7734,9 +8008,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_undo_state()
             if not response.success:
                 return _error_result(response)
-            return [
-                types.TextContent(type="text", text=_format_undo_state(response.data))
-            ]
+            return _undo_state_result(response.data)
 
         elif name == "sdk_undo":
             response = await ui_client.sdk_undo()
@@ -8073,6 +8345,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not response.success:
                 return _error_result(response)
+            matched = _as_dict(response.data).get("count")
+            clicked_index = 0 if index is None else index
+            if action == "click" and _number(matched) and clicked_index >= matched:
+                return _tool_error(
+                    f"Nothing clicked: '{selector}' matched {matched} element(s), "
+                    f"so there is no element at index {clicked_index}."
+                )
             return [
                 types.TextContent(
                     type="text",

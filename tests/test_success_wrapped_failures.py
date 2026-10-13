@@ -170,13 +170,14 @@ FAILED_ACTION = {
 
 
 def test_failed_action_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client lifts the nested success:false, keeping errorCode and suggestions."""
     answering(monkeypatch, {EXECUTE: ok(FAILED_ACTION)})
     result = call("sdk_ai_execute", {"instruction": "click the Save button"})
     assert result.isError is True
     assert text(result) == (
-        "Action failed: [code=ELEMENT_NOT_FOUND] click the Save button\n"
-        "  Error: No element matched 'Save button'\n"
-        "  Suggestions: Take a snapshot; Use an element id"
+        "Action failed: 'click the Save button': "
+        "[code=ELEMENT_NOT_FOUND status=200] No element matched 'Save button'\n"
+        "suggestions: Take a snapshot; Use an element id"
     )
 
 

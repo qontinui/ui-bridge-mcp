@@ -184,6 +184,7 @@ def extract_code(body: Any) -> str | None:
 
     - SDK ``APIResponse`` — top-level ``code``;
     - legacy / recovery bodies — top-level ``error_code``;
+    - SDK action results (``NLActionResponse``) — top-level ``errorCode``;
     - runner ``ApiResponse`` — ``error_detail.code``;
     - a bare Observation envelope — ``unknown.code`` when ``status == "unknown"``;
     - an ``ApiResponse`` wrapping an envelope — ``data.unknown.code``.
@@ -196,6 +197,7 @@ def extract_code(body: Any) -> str | None:
     return (
         _str_field(body, "code")
         or _str_field(body, "error_code")
+        or _str_field(body, "errorCode")
         or _str_field(body.get("error_detail"), "code")
         or _envelope_unknown_code(body)
         or _envelope_unknown_code(body.get("data"))
@@ -345,6 +347,22 @@ class UIBridgeClient:
             # Absent `success` is a failure, never a success.
             success = data.get("success", False) is True
             code = extract_code(data)
+            inner = data.get("data")
+            if success and isinstance(inner, dict) and inner.get("success") is False:
+                # A failure inside a success envelope: the request worked, the
+                # operation did not. The SDK in-process handlers return
+                # success(result) whatever the result says (aiExecute's
+                # NLActionResponse, fillForm's FillResult), and runner routes
+                # wrap their own UI's {success: false} in {success: true}.
+                # ui-bridge's relay already treats an inner `success: false`
+                # as the failure (relay-handlers.ts relayCommand); so does this.
+                return UIBridgeResponse(
+                    success=False,
+                    data=inner,
+                    error=render_body_error(inner, response.text),
+                    code=extract_code(inner) or code or CODE_PRODUCER_FAILED,
+                    status=response.status_code,
+                )
             if success:
                 return UIBridgeResponse(
                     success=True,
@@ -1830,7 +1848,11 @@ class UIBridgeClient:
         """
         body: dict[str, Any] = {"selector": selector}
         if action is not None:
-            body["action"] = action
+            # The runner flattens this body into the event its own UI handles,
+            # which reads the action as `params.action` (runner
+            # usePageEvents.ts, case "query_selector"). A top-level `action`
+            # was never read, so no click ever happened.
+            body["params"] = {"action": action}
         if index is not None:
             body["index"] = index
         return await self._request(
