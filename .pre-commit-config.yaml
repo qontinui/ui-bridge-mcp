@@ -16,7 +16,7 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies:
-          - mcp>=1.0.0
+          - mcp>=1.19.0
           - httpx>=0.28.0
           - types-Pillow>=10.2.0
         args: ["--strict"]

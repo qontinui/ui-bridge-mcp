@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 import pytest
+from mcp import types
 
 import ui_bridge_mcp.server as server_mod
 from ui_bridge_mcp.client import (
@@ -505,7 +506,10 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> str:
         finally:
             if server_mod.client is not None:
                 await server_mod.client.close()
-        return "\n".join(getattr(item, "text", "") for item in result)
+        # A failure comes back as a CallToolResult carrying isError; read its
+        # content. tests/test_tool_error_flag.py pins the flag itself.
+        items = result.content if isinstance(result, types.CallToolResult) else result
+        return "\n".join(getattr(item, "text", "") for item in items)
 
     return asyncio.run(go())
 

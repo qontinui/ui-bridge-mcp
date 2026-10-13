@@ -23,7 +23,9 @@ ui-bridge-mcp = "ui_bridge_mcp.server:run"
 
 [tool.poetry.dependencies]
 python = "^3.12"
-mcp = "^1.0.0"
+# 1.19.0 is the first release whose call_tool decorator passes a returned
+# CallToolResult through, which is how a failure carries isError (server.py).
+mcp = "^1.19.0"
 httpx = "^0.28.0"
 Pillow = "^11.0"
 

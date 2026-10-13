@@ -46,18 +46,40 @@ baseline_store = BaselineStore()
 delta_encoder = DeltaEncoder()
 
 
+# What a tool returns: content blocks for an answer, or a CallToolResult that
+# carries the protocol's isError flag for a failure (see ``_tool_error``).
+ToolResult = list[types.TextContent | types.ImageContent] | types.CallToolResult
+
+
+def _tool_error(text: str) -> types.CallToolResult:
+    """A failed tool call, flagged as one.
+
+    The MCP spec reports a tool's own failure inside the result with
+    ``isError: true``, so a client can tell a failure from an answer without
+    parsing text. A plain content list always reaches the client as
+    ``isError: false``, and so did every failure here until 2026-10-13.
+
+    Use this when the tool could not do what was asked: the runner or app was
+    unreachable or answered with a failure, an argument was missing or bad, a
+    precondition was unmet, a referenced thing was not there, or a wait timed
+    out. An answer that happens to be empty (no matches, an empty clipboard, no
+    changes) is still an answer and is not an error.
+    """
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], isError=True
+    )
+
+
 def _error_result(
     response: UIBridgeResponse, prefix: str = "Error"
-) -> list[types.TextContent | types.ImageContent]:
-    """Tool result for a failed UI Bridge call.
+) -> types.CallToolResult:
+    """Tool result for a failed UI Bridge call, flagged ``isError: true``.
 
     Carries the typed ``code`` and HTTP ``status`` (see
     ``UIBridgeResponse.describe_error``) so the MCP consumer can branch on the
     cause instead of parsing English.
     """
-    return [
-        types.TextContent(type="text", text=f"{prefix}: {response.describe_error()}")
-    ]
+    return _tool_error(f"{prefix}: {response.describe_error()}")
 
 
 def get_client() -> UIBridgeClient:
@@ -3946,10 +3968,8 @@ async def list_tools() -> list[types.Tool]:
 
 
 @server.call_tool()  # type: ignore
-async def call_tool(
-    name: str, arguments: dict[str, Any]
-) -> list[types.TextContent | types.ImageContent]:
-    """Handle tool calls."""
+async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
+    """Handle tool calls. A failure is returned via ``_tool_error`` (isError)."""
     ui_client = get_client()
 
     try:
@@ -3963,12 +3983,9 @@ async def call_tool(
                     )
                 ]
             else:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Runner not accessible: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Runner not accessible: {response.describe_error()}"
+                )
 
         # Control Mode Tools
         elif name == "ui_snapshot":
@@ -4330,12 +4347,7 @@ async def call_tool(
         elif name == "sdk_status":
             response = await ui_client.sdk_status()
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"SDK not connected: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(f"SDK not connected: {response.describe_error()}")
             data = response.data or {}
             connected = data.get("connected", False)
             app_url = data.get("app_url", "unknown")
@@ -5067,16 +5079,11 @@ async def call_tool(
             assert_state = arguments.get("state")
             response = await ui_client.sdk_ai_assert(text, assert_state)
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Assertion failed: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(f"Assertion failed: {response.describe_error()}")
             return [
                 types.TextContent(
                     type="text",
-                    text=f"Assertion passed: '{text}' is {state or 'as expected'}",
+                    text=f"Assertion passed: '{text}' is {assert_state or 'as expected'}",
                 )
             ]
 
@@ -5097,7 +5104,7 @@ async def call_tool(
         elif name == "sdk_page_navigate":
             url = arguments.get("url", "")
             if not url:
-                return [types.TextContent(type="text", text="Error: url is required")]
+                return _tool_error("Error: url is required")
             response = await ui_client.sdk_page_navigate(url)
             if not response.success:
                 return _error_result(response)
@@ -5185,21 +5192,15 @@ async def call_tool(
             # Step 1: Connect to source and get snapshot
             connect_resp = await ui_client.sdk_connect(source_url)
             if not connect_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error connecting to source {source_url}: {connect_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error connecting to source {source_url}: {connect_resp.describe_error()}"
+                )
 
             source_snap_resp = await ui_client.sdk_ai_snapshot()
             if not source_snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting source snapshot: {source_snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting source snapshot: {source_snap_resp.describe_error()}"
+                )
             source_snapshot = source_snap_resp.data
 
             # Optionally fetch source components
@@ -5217,21 +5218,15 @@ async def call_tool(
             # Step 2: Connect to target and get snapshot
             connect_resp = await ui_client.sdk_connect(target_url)
             if not connect_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error connecting to target {target_url}: {connect_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error connecting to target {target_url}: {connect_resp.describe_error()}"
+                )
 
             target_snap_resp = await ui_client.sdk_ai_snapshot()
             if not target_snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting target snapshot: {target_snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting target snapshot: {target_snap_resp.describe_error()}"
+                )
             target_snapshot = target_snap_resp.data
 
             # Optionally fetch target components
@@ -5261,12 +5256,7 @@ async def call_tool(
                 compare_body,
             )
             if not compare_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error comparing: {compare_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(f"Error comparing: {compare_resp.describe_error()}")
 
             data = compare_resp.data or {}
             scores = data.get("scores", {})
@@ -5483,12 +5473,9 @@ async def call_tool(
             elements = data.get("elements", [])
             diff = control_diff_tracker.update_and_diff(elements)
             if diff is None:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="No previous snapshot to diff against. Call ui_snapshot first.",
-                    )
-                ]
+                return _tool_error(
+                    "No previous snapshot to diff against. Call ui_snapshot first."
+                )
             return [
                 types.TextContent(type="text", text=_format_diff(diff, ref_manager))
             ]
@@ -5501,12 +5488,9 @@ async def call_tool(
             elements = data.get("elements", [])
             diff = sdk_diff_tracker.update_and_diff(elements)
             if diff is None:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="No previous snapshot to diff against. Call sdk_snapshot first.",
-                    )
-                ]
+                return _tool_error(
+                    "No previous snapshot to diff against. Call sdk_snapshot first."
+                )
             return [
                 types.TextContent(type="text", text=_format_diff(diff, ref_manager))
             ]
@@ -5518,12 +5502,9 @@ async def call_tool(
             # Get full snapshot for element positions + modal/viewport context
             snap_resp = await ui_client.control_snapshot()
             if not snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting snapshot: {snap_resp.describe_error()}"
+                )
             snap_data = snap_resp.data or {}
             snap_elements = snap_data.get("elements", [])
 
@@ -5539,22 +5520,15 @@ async def call_tool(
                 monitor=monitor, runner=True
             )
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             ss_width = ss_data.get("width", 0)
             ss_height = ss_data.get("height", 0)
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
             annotated_b64 = annotate_screenshot(
                 screenshot_b64,
                 snap_elements,
@@ -5590,12 +5564,9 @@ async def call_tool(
             # Get full snapshot
             snap_resp = await ui_client.sdk_snapshot()
             if not snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting snapshot: {snap_resp.describe_error()}"
+                )
             snap_data = snap_resp.data or {}
             snap_elements = snap_data.get("elements", [])
 
@@ -5609,22 +5580,15 @@ async def call_tool(
             # Get screenshot
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             ss_width = ss_data.get("width", 0)
             ss_height = ss_data.get("height", 0)
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
             annotated_b64 = annotate_screenshot(
                 screenshot_b64,
                 snap_elements,
@@ -5670,23 +5634,15 @@ async def call_tool(
                 else await ui_client.sdk_snapshot()
             )
             if not snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting snapshot: {snap_resp.describe_error()}"
+                )
             snap_elements = (snap_resp.data or {}).get("elements", [])
             target_el = next(
                 (e for e in snap_elements if e.get("id") == element_id), None
             )
             if not target_el:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Element '{element_id}' not found in snapshot.",
-                    )
-                ]
+                return _tool_error(f"Element '{element_id}' not found in snapshot.")
 
             screenshot_resp = (
                 await ui_client.control_annotated_screenshot(
@@ -5696,22 +5652,15 @@ async def call_tool(
                 else await ui_client.sdk_screenshot_raw(monitor=monitor)
             )
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             ss_width = ss_data.get("width", 0)
             ss_height = ss_data.get("height", 0)
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
 
             cropped = crop_to_element(
                 screenshot_b64,
@@ -5723,12 +5672,7 @@ async def call_tool(
                 fmt=fmt,
             )
             if not cropped:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Element '{element_id}' has no bounding rect.",
-                    )
-                ]
+                return _tool_error(f"Element '{element_id}' has no bounding rect.")
             return [
                 types.ImageContent(
                     type="image",
@@ -5743,20 +5687,13 @@ async def call_tool(
             monitor = arguments.get("monitor")
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
             baseline_store.save_baseline(key, base64.b64decode(screenshot_b64))
             return [types.TextContent(type="text", text=f"Baseline saved: '{key}'")]
 
@@ -5776,29 +5713,19 @@ async def call_tool(
 
             baseline_bytes = baseline_store.get_baseline(key)
             if baseline_bytes is None:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"No baseline found for '{key}'. Save one first with sdk_screenshot_baseline_save.",
-                    )
-                ]
+                return _tool_error(
+                    f"No baseline found for '{key}'. Save one first with sdk_screenshot_baseline_save."
+                )
 
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
 
             baseline_b64 = base64.b64encode(baseline_bytes).decode()
             result = diff_screenshots(baseline_b64, screenshot_b64, threshold=threshold)
@@ -5825,20 +5752,13 @@ async def call_tool(
             monitor = arguments.get("monitor")
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
             baseline_store.save_before(base64.b64decode(screenshot_b64))
             return [
                 types.TextContent(
@@ -5853,29 +5773,19 @@ async def call_tool(
 
             before_bytes = baseline_store.get_before()
             if before_bytes is None:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="No 'before' screenshot saved. Call sdk_screenshot_before first.",
-                    )
-                ]
+                return _tool_error(
+                    "No 'before' screenshot saved. Call sdk_screenshot_before first."
+                )
 
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
 
             before_b64 = base64.b64encode(before_bytes).decode()
 
@@ -5912,12 +5822,9 @@ async def call_tool(
         elif name == "sdk_visual_description":
             snap_resp = await ui_client.sdk_snapshot()
             if not snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting snapshot: {snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting snapshot: {snap_resp.describe_error()}"
+                )
             snap_data = snap_resp.data or {}
             # None (not []) when the snapshot carried no elements array, so the
             # description says UNKNOWN instead of "0 visible".
@@ -5934,20 +5841,13 @@ async def call_tool(
 
             screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
             if not screenshot_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting screenshot: {screenshot_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
+                )
             ss_data = screenshot_resp.data or {}
             screenshot_b64 = ss_data.get("screenshot", "")
             if not screenshot_b64:
-                return [
-                    types.TextContent(
-                        type="text", text="Error: No screenshot data returned"
-                    )
-                ]
+                return _tool_error("Error: No screenshot data returned")
 
             delta = delta_encoder.encode_delta(screenshot_b64)
 
@@ -6008,11 +5908,7 @@ async def call_tool(
                 element_id = ref_manager.resolve(element_id)
                 response = await ui_client.sdk_design_element_styles(element_id)
                 if not response.success:
-                    return [
-                        types.TextContent(
-                            type="text", text=f"Error: {response.describe_error()}"
-                        )
-                    ]
+                    return _tool_error(f"Error: {response.describe_error()}")
                 result_lines = [f"Design styles for {element_id}:"]
                 data = response.data or {}
                 styles = data.get("styles", {})
@@ -6045,11 +5941,7 @@ async def call_tool(
                 # Get snapshot of all elements
                 response = await ui_client.sdk_design_snapshot()
                 if not response.success:
-                    return [
-                        types.TextContent(
-                            type="text", text=f"Error: {response.describe_error()}"
-                        )
-                    ]
+                    return _tool_error(f"Error: {response.describe_error()}")
                 data = response.data or {}
                 elements = data.get("elements", [])
                 result_lines = [f"Design snapshot ({len(elements)} elements):"]
@@ -6201,12 +6093,9 @@ async def call_tool(
             # 1. Get design snapshot
             snap_resp = await ui_client.sdk_design_snapshot(element_ids)
             if not snap_resp.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Error getting design snapshot: {snap_resp.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Error getting design snapshot: {snap_resp.describe_error()}"
+                )
             snap_data = snap_resp.data or {}
             elements = snap_data.get("elements", [])
             result_lines.append(f"\nSnapshot: {len(elements)} elements")
@@ -6380,12 +6269,9 @@ async def call_tool(
             )
 
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Quality evaluation error: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Quality evaluation error: {response.describe_error()}"
+                )
 
             report = response.data or {}
             lines = [
@@ -6447,12 +6333,9 @@ async def call_tool(
                     label=label, element_ids=element_ids
                 )
                 if not response.success:
-                    return [
-                        types.TextContent(
-                            type="text",
-                            text=f"Save baseline error: {response.describe_error()}",
-                        )
-                    ]
+                    return _tool_error(
+                        f"Save baseline error: {response.describe_error()}"
+                    )
                 data = response.data or {}
                 return [
                     types.TextContent(
@@ -6466,12 +6349,9 @@ async def call_tool(
                     element_ids=element_ids
                 )
                 if not response.success:
-                    return [
-                        types.TextContent(
-                            type="text",
-                            text=f"Diff baseline error: {response.describe_error()}",
-                        )
-                    ]
+                    return _tool_error(
+                        f"Diff baseline error: {response.describe_error()}"
+                    )
 
                 diff_report = response.data or {}
                 added = diff_report.get("added", [])
@@ -6610,12 +6490,7 @@ async def call_tool(
                     exclude=exclude,
                 )
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Idle wait failed: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(f"Idle wait failed: {response.describe_error()}")
             data = response.data or {}
             waited_ms = data.get("waitedMs", 0)
             mode_label = "SDK app" if use_sdk else "App"
@@ -6652,12 +6527,9 @@ async def call_tool(
                     min_stable_ms=min_stable_ms,
                 )
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Signal wait failed ({signal}): {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Signal wait failed ({signal}): {response.describe_error()}"
+                )
             data = response.data or {}
             waited_ms = data.get("waitedMs", 0)
             stable_ms = data.get("stableForMs", 0)
@@ -6696,12 +6568,7 @@ async def call_tool(
                     min_stable_ms=min_stable_ms,
                 )
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Targets wait failed: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(f"Targets wait failed: {response.describe_error()}")
             data = response.data or {}
             waited_ms = data.get("waitedMs", 0)
             target_results = data.get("targets", [])
@@ -6739,12 +6606,7 @@ async def call_tool(
                     observation_window_ms=observation_window_ms,
                 )
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Diagnosis failed: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(f"Diagnosis failed: {response.describe_error()}")
             data = response.data or {}
             verdict = data.get("verdict", "unknown")
             confidence = data.get("confidence", 0)
@@ -6900,12 +6762,9 @@ async def call_tool(
                 timeout=timeout,
             )
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Network request wait failed: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Network request wait failed: {response.describe_error()}"
+                )
             return [
                 types.TextContent(type="text", text=_format_wait_result(response.data))
             ]
@@ -6920,12 +6779,9 @@ async def call_tool(
                 timeout=timeout,
             )
             if not response.success:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=f"Network request wait failed: {response.describe_error()}",
-                    )
-                ]
+                return _tool_error(
+                    f"Network request wait failed: {response.describe_error()}"
+                )
             return [
                 types.TextContent(type="text", text=_format_wait_result(response.data))
             ]
@@ -7077,9 +6933,7 @@ async def call_tool(
                         f"Modified: {len(changes.get('modified', []))}",
                     )
                 ]
-            return [
-                types.TextContent(type="text", text="Timed out waiting for change.")
-            ]
+            return _tool_error("Timed out waiting for change.")
 
         elif name == "sdk_scoped_diff":
             scope = arguments["scope"]
@@ -7107,11 +6961,7 @@ async def call_tool(
                 return _error_result(response)
             data = response.data or {}
             if not data:
-                return [
-                    types.TextContent(
-                        type="text", text=f"Bookmark '{bookmark_name}' not found."
-                    )
-                ]
+                return _tool_error(f"Bookmark '{bookmark_name}' not found.")
             elements = data.get("snapshot", {}).get("elements", [])
             return [
                 types.TextContent(
@@ -7126,11 +6976,7 @@ async def call_tool(
                 return _error_result(response)
             data = response.data or {}
             if not data:
-                return [
-                    types.TextContent(
-                        type="text", text="No previous diff to categorize."
-                    )
-                ]
+                return _tool_error("No previous diff to categorize.")
             return [
                 types.TextContent(
                     type="text",
@@ -7366,9 +7212,7 @@ async def call_tool(
                         f"Modified: {len(changes.get('modified', []))}",
                     )
                 ]
-            return [
-                types.TextContent(type="text", text="Timed out waiting for change.")
-            ]
+            return _tool_error("Timed out waiting for change.")
 
         elif name == "ui_scoped_diff":
             scope = arguments["scope"]
@@ -7396,11 +7240,7 @@ async def call_tool(
                 return _error_result(response)
             data = response.data or {}
             if not data:
-                return [
-                    types.TextContent(
-                        type="text", text=f"Bookmark '{bookmark_name}' not found."
-                    )
-                ]
+                return _tool_error(f"Bookmark '{bookmark_name}' not found.")
             elements = data.get("snapshot", {}).get("elements", [])
             return [
                 types.TextContent(
@@ -7415,11 +7255,7 @@ async def call_tool(
                 return _error_result(response)
             data = response.data or {}
             if not data:
-                return [
-                    types.TextContent(
-                        type="text", text="No previous diff to categorize."
-                    )
-                ]
+                return _tool_error("No previous diff to categorize.")
             return [
                 types.TextContent(
                     type="text",
@@ -7589,11 +7425,11 @@ async def call_tool(
             ]
 
         else:
-            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+            return _tool_error(f"Unknown tool: {name}")
 
     except Exception as e:
         logger.exception(f"Error calling tool {name}")
-        return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+        return _tool_error(f"Error: {str(e)}")
 
 
 # =============================================================================
