@@ -8436,18 +8436,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.control_page_evaluate(expression)
             if not response.success:
                 return _error_result(response)
-            evaluated = json.dumps(response.data, indent=2, default=str)
-            answer = _as_dict(response.data)
-            if answer.get("success") is False and "value" not in answer:
-                # The client does not lift this route's nested success:false
-                # (its data is foreign), so say what cannot be told.
-                evaluated += (
-                    "\n\nNote: whether this evaluation succeeded is UNKNOWN. A "
-                    "runner built since 0dbc0bace (2026-08-07) answers {value, "
-                    "type}, so this shape is a refused evaluation; from an older "
-                    "runner it is the expression's own value."
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(response.data, indent=2, default=str),
                 )
-            return [types.TextContent(type="text", text=evaluated)]
+            ]
 
         else:
             return _tool_error(f"Unknown tool: {name}")

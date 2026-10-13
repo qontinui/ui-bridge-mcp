@@ -70,6 +70,11 @@ def test_client_lifts_a_nested_failure_with_its_code() -> None:
         ("sdk_page_navigate", {"url": "http://x"}, "/ui-bridge/sdk/page/navigate"),
         # Runner routes that wrap their own UI's answer in {success: true}.
         (
+            "ui_page_evaluate",
+            {"expression": "1"},
+            "/ui-bridge/sdk/control/page-evaluate",
+        ),
+        (
             "ui_query_selector",
             {"selector": "a"},
             "/ui-bridge/sdk/control/query-selector",
@@ -90,49 +95,54 @@ def test_nested_failure_is_an_error(
 EVALUATE = "/ui-bridge/sdk/control/page-evaluate"
 
 
-def test_page_evaluate_is_not_lifted_by_the_client() -> None:
-    """Its data is foreign: the lift is off for this one route."""
-    runner = FakeRunner({EVALUATE: ok({"success": False, "error": "page data"})})
-    client = UIBridgeClient(host="127.0.0.1", port=1)
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(runner))
-
-    async def go() -> Any:
-        try:
-            return await client.control_page_evaluate("window.result")
-        finally:
-            await client.close()
-
-    response = asyncio.run(go())
-    assert response.success is True
-    assert response.data == {"success": False, "error": "page data"}
-
-
-def test_page_evaluate_bare_value_with_its_own_success_false_is_an_answer(
-    monkeypatch: pytest.MonkeyPatch,
+# page_evaluate always NESTS the evaluated value (qontinui-runner
+# usePageEvents.ts): {result: ...} on builds before 0dbc0bace (2026-08-07),
+# {value, type} since. A refusal is the webview's own reply, with no `data`;
+# the runner forwards it whole and the route wraps it as success:true. So on
+# this route a nested success:false has only ever meant a refused evaluation.
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"value": {"success": False, "error": "from the page"}, "type": "object"},
+        {"result": {"success": False, "error": "from the page"}},
+    ],
+    ids=["value-type", "result"],
+)
+def test_evaluated_value_with_its_own_success_false_is_an_answer(
+    data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A runner built before 0dbc0bace answers the evaluated value as bare `data`.
-
-    That value can carry its own ``success: false``; it is the page's data, not
-    a verdict, so it stays an answer, said to be UNKNOWN.
-    """
-    value = {"success": False, "error": "from the page", "items": 2}
-    answering(monkeypatch, {EVALUATE: ok(value)})
+    """Positive control: the value's own ``success: false`` is nested, never lifted."""
+    answering(monkeypatch, {EVALUATE: ok(data)})
     result = call("ui_page_evaluate", {"expression": "window.result"})
     assert result.isError is False
     assert '"error": "from the page"' in text(result)
-    assert "Note: whether this evaluation succeeded is UNKNOWN." in text(result)
 
 
-def test_page_evaluate_value_and_type_shape_is_an_answer(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "error",
+    [
+        "ReferenceError: foo is not defined",
+        "Error: Expression rejected: contains prohibited pattern (fetch\\()",
+        "expression is required",
+    ],
+    ids=["thrown", "blocklisted", "no-expression"],
+)
+def test_refused_evaluation_is_an_error(
+    error: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Since 0dbc0bace the value arrives as {value, type} (runner utils.ts)."""
-    shaped = {"value": {"success": False, "error": "from the page"}, "type": "object"}
-    answering(monkeypatch, {EVALUATE: ok(shaped)})
-    result = call("ui_page_evaluate", {"expression": "window.result"})
-    assert result.isError is False
-    assert '"type": "object"' in text(result)
-    assert "UNKNOWN" not in text(result)
+    """Negative control: the webview's refusal, wrapped as success by the route."""
+    refusal = {
+        "requestId": "r1",
+        "type": "page_evaluate",
+        "success": False,
+        "error": error,
+        "timestamp": 1,
+    }
+    answering(monkeypatch, {EVALUATE: ok(refusal)})
+    result = call("ui_page_evaluate", {"expression": "x"})
+    assert result.isError is True
+    assert text(result).startswith("Error: [code=producer_failed status=200] ")
+    assert error in text(result)
 
 
 def test_nested_success_is_still_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
