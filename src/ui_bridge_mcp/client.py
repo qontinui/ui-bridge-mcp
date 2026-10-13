@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -37,6 +37,67 @@ def get_windows_host() -> str:
 # assigns itself when the failure happened before any body could carry a code.
 CODE_APP_UNREACHABLE = "app_unreachable"
 CODE_PRODUCER_FAILED = "producer_failed"
+
+
+class AssertState(NamedTuple):
+    """One element state ``sdk_ai_assert`` can assert (see ``AI_ASSERT_STATES``)."""
+
+    claim: str
+    """How a result states the assertion after the target, e.g. ``is visible``."""
+    sentence: str
+    """The natural-language form of the assertion; ``{target}`` is substituted."""
+
+
+# The states sdk_ai_assert offers: every ui-bridge ``AssertionType`` that needs no
+# expected value (``ai/types.ts``). A request carries two forms of one assertion.
+#
+# - ``target`` + ``type``: the SDK's parser passes these through verbatim when
+#   both are present (``ai/nl-assertion-parser.ts`` parseNLAssertion, and the
+#   server's own guard in ``server/handlers.ts``), so a connected SDK app checks
+#   exactly the element and state that were asked.
+# - ``assertion``: the only field the runner's own UI reads, which is what
+#   answers when no SDK app is connected (runner ``useAISearchEvents.ts``
+#   ``ai_assert``). Each sentence below was run through that parser on
+#   2026-10-13 and parses back to its own state for a plain target. "{T} does
+#   not exist" is not used: it parses with the whole sentence as the target,
+#   which no element matches, so notExists would pass vacuously. The parser
+#   still lowercases the target, drops words such as "a"/"the"/"page", and reads
+#   a target containing "no"/"not" or a state word as part of the assertion, so
+#   on the runner's own UI such a target can be checked as a different state.
+AI_ASSERT_STATES: dict[str, AssertState] = {
+    "visible": AssertState("is visible", "{target} is visible"),
+    "hidden": AssertState("is hidden", "{target} is hidden"),
+    "enabled": AssertState("is enabled", "{target} is enabled"),
+    "disabled": AssertState("is disabled", "{target} is disabled"),
+    "focused": AssertState("is focused", "{target} is focused"),
+    "checked": AssertState("is checked", "{target} is checked"),
+    "unchecked": AssertState("is unchecked", "{target} is unchecked"),
+    "exists": AssertState("exists", "{target} exists"),
+    "notExists": AssertState("does not exist", "there is no {target} on the page"),
+}
+
+
+def _network_wait_body(
+    url_pattern: str | None, method: str | None, timeout: int
+) -> dict[str, Any]:
+    """The body of a wait-for-network-request call, in every reader's field names.
+
+    The SDK server reads ``urlPattern`` (``network/types.ts``
+    WaitForRequestOptions); the browser relay reads ``url`` (``react/
+    commandHandlers.ts`` waitForNetworkRequest). Both match it as a substring,
+    so the pattern goes under both names: the snake_case ``url_pattern`` this
+    client used to send is read by neither, so every wait matched any request.
+    ``timeout`` is always sent, because the two readers' defaults differ (30 s
+    and 10 s) and the tool documents 30 s. The SDK server also refuses an empty
+    body (its route is ``bodyRequired``).
+    """
+    body: dict[str, Any] = {"timeout": timeout}
+    if url_pattern:
+        body["urlPattern"] = url_pattern
+        body["url"] = url_pattern
+    if method:
+        body["method"] = method
+    return body
 
 
 @dataclass
@@ -795,18 +856,31 @@ class UIBridgeClient:
             "POST", "/ui-bridge/sdk/ai/execute", {"instruction": instruction}
         )
 
-    async def sdk_ai_assert(
-        self, text: str, state: str | None = None
-    ) -> UIBridgeResponse:
-        """Assert element state using natural language.
+    async def sdk_ai_assert(self, text: str, state: str = "exists") -> UIBridgeResponse:
+        """Assert that the element ``text`` names is in ``state``.
+
+        The body carries the assertion both structured and as a sentence; see
+        ``AI_ASSERT_STATES`` for why, and for which reader takes which form.
 
         Args:
-            text: Element description or text to find.
-            state: Expected state (e.g., 'visible', 'hidden', 'enabled').
+            text: Element ID or description to find.
+            state: A key of ``AI_ASSERT_STATES``.
+
+        Raises:
+            ValueError: ``state`` is not one this client can express. Nothing is
+                sent, so it is never checked as some other state.
         """
-        body: dict[str, Any] = {"text": text}
-        if state:
-            body["state"] = state
+        assert_state = AI_ASSERT_STATES.get(state)
+        if assert_state is None:
+            raise ValueError(
+                f"cannot assert state {state!r}; use one of: "
+                f"{', '.join(AI_ASSERT_STATES)}"
+            )
+        body: dict[str, Any] = {
+            "target": text,
+            "type": state,
+            "assertion": assert_state.sentence.format(target=text),
+        }
         return await self._request("POST", "/ui-bridge/sdk/ai/assert", body)
 
     async def sdk_ai_summary(self) -> UIBridgeResponse:
@@ -1178,19 +1252,11 @@ class UIBridgeClient:
             method: HTTP method to match.
             timeout: Timeout in milliseconds. Defaults to 30000.
         """
-        body: dict[str, Any] = {}
-        if url_pattern:
-            body["url_pattern"] = url_pattern
-        if method:
-            body["method"] = method
-        if timeout != 30000:
-            body["timeout"] = timeout
-        http_timeout = (timeout / 1000) + 10.0
         return await self._request(
             "POST",
             "/ui-bridge/control/network-requests/wait",
-            body or None,
-            timeout=http_timeout,
+            _network_wait_body(url_pattern, method, timeout),
+            timeout=(timeout / 1000) + 10.0,
         )
 
     # -------------------------------------------------------------------------
@@ -1248,19 +1314,11 @@ class UIBridgeClient:
             method: HTTP method to match.
             timeout: Timeout in milliseconds. Defaults to 30000.
         """
-        body: dict[str, Any] = {}
-        if url_pattern:
-            body["url_pattern"] = url_pattern
-        if method:
-            body["method"] = method
-        if timeout != 30000:
-            body["timeout"] = timeout
-        http_timeout = (timeout / 1000) + 10.0
         return await self._request(
             "POST",
             "/ui-bridge/sdk/network-requests/wait",
-            body or None,
-            timeout=http_timeout,
+            _network_wait_body(url_pattern, method, timeout),
+            timeout=(timeout / 1000) + 10.0,
         )
 
     # -------------------------------------------------------------------------

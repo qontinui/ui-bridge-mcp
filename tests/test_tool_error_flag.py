@@ -134,7 +134,19 @@ def test_unmet_precondition_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_failed_assertion_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    failed = {"success": False, "error": "'Save button' is not visible"}
+    """A failed assertion is ``passed: false`` inside a SUCCESS envelope.
+
+    ``success: false`` would be the request failing, not the assertion
+    (ui-bridge ai/assertions.ts returns ``passed: false`` instead of throwing).
+    """
+    failed = {
+        "success": True,
+        "data": {
+            "passed": False,
+            "failureReason": "Element is hidden",
+            "failureCode": "UB-ASSERT-NOT-VISIBLE",
+        },
+    }
     monkeypatch.setattr(
         server_mod,
         "client",
@@ -142,7 +154,9 @@ def test_failed_assertion_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = _call("sdk_ai_assert", {"text": "Save button", "state": "visible"})
     assert result.isError is True
-    assert _text(result).startswith("Assertion failed:")
+    assert _text(result).startswith(
+        "Assertion failed: [code=UB-ASSERT-NOT-VISIBLE] expected 'Save button' is visible"
+    )
 
 
 # =============================================================================
