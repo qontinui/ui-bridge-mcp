@@ -108,6 +108,11 @@ def _as_dict(data: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _as_list(data: Any) -> list[Any]:
+    """``data`` when it is a JSON array, else an empty one."""
+    return data if isinstance(data, list) else []
+
+
 def _code_tag(code: Any) -> str:
     """A ``[code=...]`` prefix for a producer's own failure code, if it sent one."""
     return f"[code={code}] " if isinstance(code, str) and code else ""
@@ -1185,13 +1190,17 @@ def _format_forms_response(data: dict[str, Any] | None) -> str:
     for form in forms:
         form_id = form.get("id", "unknown")
         purpose = form.get("purpose", "")
-        is_valid = form.get("isValid", True)
+        # ui-bridge ai/types.ts FormAnalysis: isValid is a required boolean,
+        # so an absent one is UNKNOWN, never valid.
+        is_valid = form.get("isValid")
         is_dirty = form.get("isDirty", False)
         submit_btn = form.get("submitButton")
 
         status_parts = []
-        if not is_valid:
+        if is_valid is False:
             status_parts.append("INVALID")
+        elif not isinstance(is_valid, bool):
+            status_parts.append("validity UNKNOWN")
         if is_dirty:
             status_parts.append("dirty")
         status = f" [{', '.join(status_parts)}]" if status_parts else ""
@@ -1209,7 +1218,7 @@ def _format_forms_response(data: dict[str, Any] | None) -> str:
             ftype = field.get("type", "text")
             value = field.get("value", "")
             required = field.get("required", False)
-            valid = field.get("valid", True)
+            valid = field.get("valid")
             error = field.get("error")
             checked = field.get("checked")
             dirty = field.get("isDirty", False)
@@ -1235,8 +1244,10 @@ def _format_forms_response(data: dict[str, Any] | None) -> str:
                 flags.append("required")
             if dirty:
                 flags.append("dirty")
-            if not valid:
+            if valid is False:
                 flags.append("INVALID")
+            elif not isinstance(valid, bool):
+                flags.append("validity UNKNOWN")
             if flags:
                 parts.append(f"[{', '.join(flags)}]")
 
@@ -5051,9 +5062,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_status()
             if not response.success:
                 return _tool_error(f"SDK not connected: {response.describe_error()}")
-            data = response.data or {}
-            connected = data.get("connected", False)
-            app_url = data.get("app_url", "unknown")
+            data = _as_dict(response.data)
+            connected = data.get("connected")
+            if not isinstance(connected, bool):
+                return _tool_error(
+                    "SDK connection UNKNOWN: the response carried no boolean "
+                    f"'connected' (got {connected!r}). This is not 'not connected'."
+                )
+            # The runner's SdkStatusResponse is camelCase and names it `url`.
+            app_url = data.get("url") or data.get("app_url") or "unknown"
             if connected:
                 return [
                     types.TextContent(type="text", text=f"SDK connected to {app_url}")
@@ -5727,8 +5744,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            found = data.get("found", False)
+            data = _as_dict(response.data)
+            # ui-bridge ai/find.ts FindResult: `found` and `ambiguous` are
+            # booleans on every variant. An absent `found` is UNKNOWN, and so
+            # is an absent `ambiguous` on a match, where it picks the answer.
+            found = data.get("found")
+            ambiguous = data.get("ambiguous")
+            if not isinstance(found, bool) or (
+                found and not isinstance(ambiguous, bool)
+            ):
+                return _tool_error(
+                    f"Find result UNKNOWN for '{query}': the response did not say "
+                    f"whether, or how unambiguously, it matched (got "
+                    f"found={found!r}, ambiguous={ambiguous!r}). This is not "
+                    "'not found'."
+                )
 
             if not found:
                 reason = data.get("reason", "No matching element found")
@@ -5744,7 +5774,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                         lines.append(f"  - {pid} ({pconf:.0%}) {pdiff}")
                 return [types.TextContent(type="text", text="\n".join(lines))]
 
-            ambiguous = data.get("ambiguous", False)
             if ambiguous:
                 suggestion = data.get("suggestion", "")
                 candidates = data.get("candidates", [])
@@ -7127,19 +7156,44 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                         f"Diff baseline error: {response.describe_error()}"
                     )
 
-                diff_report = response.data or {}
-                added = diff_report.get("added", [])
-                removed = diff_report.get("removed", [])
-                modified = diff_report.get("modified", [])
-                cls = diff_report.get("cumulativeLayoutShift", 0)
-                significant = diff_report.get("hasSignificantChanges", False)
+                # ui-bridge specs/quality-types.ts SnapshotDiffReport: the SDK
+                # server always sends the three lists, the CLS and the boolean
+                # verdict. The browser relay's diffBaseline (react/
+                # commandHandlers.ts) sends only element counts, so each field
+                # it omits is UNKNOWN rather than a zero or a "No".
+                diff_report = _as_dict(response.data)
+                added = _as_list(diff_report.get("added"))
+                removed = _as_list(diff_report.get("removed"))
+                modified = _as_list(diff_report.get("modified"))
+                cls = diff_report.get("cumulativeLayoutShift")
+                significant = diff_report.get("hasSignificantChanges")
 
                 lines = ["=== Snapshot Diff ==="]
                 lines.append(
-                    f"Changes: {len(added)} added, {len(removed)} removed, {len(modified)} modified"
+                    f"Changes: {_change_count(diff_report, 'added')} added, "
+                    f"{_change_count(diff_report, 'removed')} removed, "
+                    f"{_change_count(diff_report, 'modified')} modified"
                 )
-                lines.append(f"Cumulative Layout Shift: {cls}")
-                lines.append(f"Significant Changes: {'Yes' if significant else 'No'}")
+                lines.append(
+                    f"Cumulative Layout Shift: {cls if _number(cls) else 'UNKNOWN'}"
+                )
+                if isinstance(significant, bool):
+                    lines.append(
+                        f"Significant Changes: {'Yes' if significant else 'No'}"
+                    )
+                else:
+                    lines.append(
+                        "Significant Changes: UNKNOWN (the response carried no "
+                        f"boolean 'hasSignificantChanges', got {significant!r})"
+                    )
+                if "baselineElements" in diff_report and "added" not in diff_report:
+                    lines.append(
+                        "Elements: "
+                        f"{diff_report.get('baselineElements')} in the baseline, "
+                        f"{diff_report.get('currentElements')} now. This "
+                        "transport (the browser relay) sends counts only, not a "
+                        "diff."
+                    )
 
                 if added:
                     lines.append(f"\nAdded ({len(added)}):")
@@ -7185,7 +7239,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     if len(modified) > 15:
                         lines.append(f"  ... and {len(modified) - 15} more")
 
-                return [types.TextContent(type="text", text="\n".join(lines))]
+                diff_text = "\n".join(lines)
+                if not isinstance(significant, bool):
+                    return _tool_error(
+                        f"Snapshot diff verdict UNKNOWN: whether the changes are "
+                        f"significant is not known. This is not 'No'.\n{diff_text}"
+                    )
+                return [types.TextContent(type="text", text=diff_text)]
 
         # =====================================================================
         # Idle Detection Tools

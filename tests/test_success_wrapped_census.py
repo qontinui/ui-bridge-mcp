@@ -974,3 +974,173 @@ def test_query_selector_action_other_than_click_is_refused_unsent(
     result = call("ui_query_selector", {"selector": "a", "action": "focus"})
     assert result.isError is True
     assert runner.requests == []
+
+
+# =============================================================================
+# A verdict field the producer always sends is UNKNOWN when it is absent
+# =============================================================================
+
+FIND = "/ui-bridge/sdk/ai/find"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"ambiguous": False, "reason": "x"},
+        {"found": "false", "ambiguous": False},
+        {"found": True, "elementId": "save", "confidence": 0.9},
+    ],
+    ids=["found-absent", "found-string", "ambiguous-absent"],
+)
+def test_find_without_a_verdict_is_unknown_not_not_found(
+    data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answering(monkeypatch, {FIND: ok(data)})
+    result = call("sdk_find", {"query": "Save button"})
+    assert result.isError is True
+    assert text(result).startswith("Find result UNKNOWN for 'Save button':")
+
+
+def test_find_with_no_match_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ui-bridge ai/find.ts FindResultNotFound: zero matches is an answer."""
+    answering(
+        monkeypatch,
+        {
+            FIND: ok(
+                {
+                    "found": False,
+                    "ambiguous": False,
+                    "reason": "No element matched",
+                    "partialMatches": [],
+                }
+            )
+        },
+    )
+    result = call("sdk_find", {"query": "Save button"})
+    assert result.isError is False
+    assert text(result) == "Not found: No element matched"
+
+
+def test_find_with_an_ambiguous_match_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(
+        monkeypatch,
+        {
+            FIND: ok(
+                {
+                    "found": True,
+                    "ambiguous": True,
+                    "candidates": [
+                        {"elementId": "a", "confidence": 0.9, "differentiator": "top"}
+                    ],
+                    "suggestion": "Say which one",
+                }
+            )
+        },
+    )
+    result = call("sdk_find", {"query": "Save"})
+    assert result.isError is False
+    assert text(result).startswith("Ambiguous match for 'Save':")
+
+
+@pytest.mark.parametrize("connected", [None, "yes"], ids=["absent", "string"])
+def test_status_without_a_verdict_is_unknown_not_disconnected(
+    connected: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data: dict[str, Any] = {} if connected is None else {"connected": connected}
+    answering(monkeypatch, {"/ui-bridge/sdk/status": ok(data)})
+    result = call("sdk_status", {})
+    assert result.isError is True
+    assert text(result).startswith("SDK connection UNKNOWN:")
+
+
+def test_status_connected_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    answering(
+        monkeypatch,
+        {"/ui-bridge/sdk/status": ok({"connected": True, "url": "http://x"})},
+    )
+    result = call("sdk_status", {})
+    assert result.isError is False
+    assert text(result) == "SDK connected to http://x"
+
+
+DESIGN_DIFF = "/ui-bridge/sdk/design/evaluate/diff"
+
+
+@pytest.mark.parametrize("significant", [True, False])
+def test_design_diff_with_a_verdict_is_an_answer(
+    significant: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ui-bridge specs/quality-types.ts: hasSignificantChanges is a required boolean."""
+    report = {
+        "added": [],
+        "removed": [],
+        "modified": [],
+        "cumulativeLayoutShift": 0,
+        "hasSignificantChanges": significant,
+    }
+    answering(monkeypatch, {DESIGN_DIFF: ok(report)})
+    result = call("sdk_design_diff", {})
+    assert result.isError is False
+    shown = "Yes" if significant else "No"
+    assert f"Significant Changes: {shown}" in text(result)
+
+
+def test_design_diff_without_a_verdict_is_unknown_not_no(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {"added": [{"elementId": "a"}], "removed": [], "modified": []}
+    answering(monkeypatch, {DESIGN_DIFF: ok(report)})
+    result = call("sdk_design_diff", {})
+    assert result.isError is True
+    body = text(result)
+    assert body.startswith("Snapshot diff verdict UNKNOWN:")
+    assert "Significant Changes: No" not in body
+    assert "  + a" in body
+
+
+def test_design_diff_from_the_relay_is_unknown_not_zero_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ui-bridge react/commandHandlers.ts diffBaseline: the relay sends counts only."""
+    relay_stub = {
+        "baselineTimestamp": 1,
+        "currentElements": 12,
+        "baselineElements": 10,
+        "timestamp": 2,
+    }
+    answering(monkeypatch, {DESIGN_DIFF: ok(relay_stub)})
+    result = call("sdk_design_diff", {})
+    assert result.isError is True
+    body = text(result)
+    assert body.startswith("Snapshot diff verdict UNKNOWN:")
+    assert "Changes: UNKNOWN added, UNKNOWN removed, UNKNOWN modified" in body
+    assert "Cumulative Layout Shift: UNKNOWN" in body
+    assert "Elements: 10 in the baseline, 12 now." in body
+
+
+FORMS = "/ui-bridge/sdk/forms"
+
+
+def test_form_without_a_validity_is_unknown_not_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ui-bridge ai/types.ts: FormAnalysis.isValid and field.valid are booleans."""
+    form = {
+        "id": "login",
+        "fields": [
+            {"id": "email", "label": "Email", "value": "a@b.c"},
+            {"id": "pw", "label": "Password", "value": "x", "valid": False},
+            {"id": "ok", "label": "Name", "value": "y", "valid": True},
+        ],
+    }
+    answering(monkeypatch, {FORMS: ok({"forms": [form]})})
+    result = call("sdk_forms", {})
+    assert result.isError is False
+    lines = text(result).splitlines()
+    assert "Form: login [validity UNKNOWN]" in lines
+    assert any("Email" in ln and "[validity UNKNOWN]" in ln for ln in lines)
+    assert any("Password" in ln and "[INVALID]" in ln for ln in lines)
+    name_line = next(ln for ln in lines if "Name" in ln)
+    assert "INVALID" not in name_line and "UNKNOWN" not in name_line

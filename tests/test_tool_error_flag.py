@@ -853,6 +853,35 @@ FAILURE_PATHS: list[FailurePath] = [
         "Nothing clicked:",
     ),
     FailurePath(
+        "sdk_status: SDK connection UNKNOWN: the response carried no boolean "
+        "'connected' (got {}). This is not 'not connected'.",
+        "sdk_status",
+        {},
+        {"/ui-bridge/sdk/status": ok({"url": "http://x"})},
+        "SDK connection UNKNOWN:",
+    ),
+    FailurePath(
+        "sdk_find: Find result UNKNOWN for '{}': the response did not say "
+        "whether, or how unambiguously, it matched (got found={}, ambiguous={}). "
+        "This is not 'not found'.",
+        "sdk_find",
+        {"query": "Save button"},
+        {"/ui-bridge/sdk/ai/find": ok({"reason": "x"})},
+        "Find result UNKNOWN for 'Save button':",
+    ),
+    FailurePath(
+        "sdk_design_diff: Snapshot diff verdict UNKNOWN: whether the changes are "
+        "significant is not known. This is not 'No'.\n{}",
+        "sdk_design_diff",
+        {},
+        {
+            "/ui-bridge/sdk/design/evaluate/diff": ok(
+                {"added": [], "removed": [], "modified": []}
+            )
+        },
+        "Snapshot diff verdict UNKNOWN:",
+    ),
+    FailurePath(
         "call_tool: Unknown tool: {}",
         "no_such_tool",
         {},

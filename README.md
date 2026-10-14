@@ -98,6 +98,37 @@ Add to your MCP settings:
 
 > **Note:** The MCP server also includes legacy `extension_*` tools for browser tab access via a Chrome extension. These are deprecated and will be removed in a future release. Use the SDK tools instead.
 
+## Tool Results and Errors
+
+A tool that could not do what was asked returns its result with `isError: true`,
+as the MCP spec requires. Branch on that flag, not on the text. This covers:
+
+- the runner or app being unreachable, or answering with a failure (the text
+  carries a `[code=… status=…]` tag when a code or HTTP status is known);
+- a failure wrapped in a success envelope: a failed assertion (`passed: false`),
+  a nested `success: false`, a wait that timed out, or an action that reports it
+  did not run, change or delete anything;
+- a missing or bad argument, an unknown tool, or an unmet precondition;
+- an exception raised inside the tool, returned as `Error: <exception>` with no
+  `[code=…]` tag.
+
+When a response lacks the field that carries its verdict (an assertion's
+`passed`, an action's `executed`, `sdk_status`'s `connected`, `sdk_find`'s
+`found`, a design diff's `hasSignificantChanges`, and so on), the result says
+**UNKNOWN** and is flagged `isError: true`. It is never reported as a pass, a
+"no" or a "not found". Inside an answer that is otherwise complete, a missing
+detail is marked UNKNOWN in place without flagging the call, for example a form
+or field with no `isValid`/`valid` reads `validity UNKNOWN`, never valid.
+
+An answer that happens to be empty is not an error and returns `isError: false`:
+an empty clipboard, zero matches, no saved bookmarks or baselines, or
+`sdk_status` reporting that no app is connected. `sdk_status` is an error only
+when the status request itself fails, and both texts begin "SDK not connected",
+so read the flag.
+
+The flag needs `mcp>=1.19.0`, which `pyproject.toml` requires. Earlier releases
+replace the failure text with an SDK validation error.
+
 ## Usage Examples
 
 ### Inspect Runner UI
@@ -162,9 +193,12 @@ qontinui-runner (port 9876)
 # Install dependencies
 poetry install
 
+# Run tests
+poetry run pytest
+
 # Run linting
 poetry run ruff check .
-poetry run mypy src
+poetry run mypy --strict src tests
 
 # Format code
 poetry run ruff format src
