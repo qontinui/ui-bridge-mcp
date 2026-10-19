@@ -31,7 +31,7 @@ This repository follows the conventions documented in `CLAUDE.md` (project root)
 1. Fork the repository and create a feature branch.
 2. Make your change. Add tests where appropriate.
 3. Run the local checks (lint, format, tests) — the per-repo `README` documents the exact commands.
-4. Open a pull request against `main`. Describe the *why* in the PR body, not the *what* — the diff already shows the *what*.
+4. Open a pull request against `master`. Describe the *why* in the PR body, not the *what* — the diff already shows the *what*.
 5. Sign off every commit (`git commit -s`) — see the DCO section above.
 6. A maintainer will review. Expect feedback; we keep the bar high because every change becomes part of the shipped product.
 
