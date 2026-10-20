@@ -38,6 +38,31 @@ def get_windows_host() -> str:
 CODE_APP_UNREACHABLE = "app_unreachable"
 CODE_PRODUCER_FAILED = "producer_failed"
 
+# The closed Observation ``UnknownCode`` set, in the canonical wire-contract
+# order: ui-bridge ``observation/observation.ts`` ``UNKNOWN_CODES`` and its
+# ``diagnostics/codes.json``, twin of qontinui-schemas
+# ``rust-vision-core/src/observation.rs``. A code outside it still renders as
+# UNKNOWN with the code it carried (``timeline.render_unknown``), flagged as
+# one this server does not know, never as an error.
+UNKNOWN_CODES: tuple[str, ...] = (
+    "app_unreachable",
+    "capability_unavailable_in_build",
+    "producer_failed",
+    "producer_not_run",
+    "input_missing",
+    "below_confidence_floor",
+    "model_reply_unparseable",
+    "needs_multi_frame_input",
+    "stale_input",
+    "frontier_open",
+    "ledger_schema_absent",
+    "ledger_write_failing",
+    "no_observations",
+    "to_node_unobserved",
+    "performance_observer_unsupported",
+    "no_event_before_timeout",
+)
+
 
 class AssertState(NamedTuple):
     """One element state ``sdk_ai_assert`` can assert (see ``AI_ASSERT_STATES``)."""
@@ -117,6 +142,23 @@ def _wait_for_change_body(
     if isinstance(wait_ms, int | float) and not isinstance(wait_ms, bool):
         http_timeout = max(DEFAULT_TIMEOUT, wait_ms / 1000 + 10.0)
     return body, http_timeout
+
+
+def _execute_with_diff_timeout(request: dict[str, Any]) -> float:
+    """An HTTP timeout that outlasts an execute-with-diff's own recording.
+
+    The SDK records until the UI settles (``settleTimeout``) and, with
+    ``expectStates``, until every expected state has entered or ``withinMs``
+    has elapsed, even past settle. A window longer than the default HTTP
+    timeout would otherwise be cut off here and reported as a transport
+    failure while the app was still recording.
+    """
+    waits = [
+        value
+        for value in (request.get("settleTimeout"), request.get("withinMs"))
+        if isinstance(value, int | float) and not isinstance(value, bool)
+    ]
+    return max(DEFAULT_TIMEOUT, sum(waits) / 1000 + 10.0)
 
 
 @dataclass
@@ -1609,7 +1651,10 @@ class UIBridgeClient:
             request: Request body with elementAction, settleTimeout, etc.
         """
         return await self._request(
-            "POST", "/ui-bridge/control/ai/execute-with-diff", request
+            "POST",
+            "/ui-bridge/control/ai/execute-with-diff",
+            request,
+            timeout=_execute_with_diff_timeout(request),
         )
 
     async def control_wait_for_change(
@@ -1737,7 +1782,10 @@ class UIBridgeClient:
             request: Request body with elementAction, settleTimeout, etc.
         """
         return await self._request(
-            "POST", "/ui-bridge/sdk/ai/execute-with-diff", request
+            "POST",
+            "/ui-bridge/sdk/ai/execute-with-diff",
+            request,
+            timeout=_execute_with_diff_timeout(request),
         )
 
     async def sdk_wait_for_change(

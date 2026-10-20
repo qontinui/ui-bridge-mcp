@@ -495,6 +495,10 @@ def test_execute_with_diff_success_renders_the_diff(
     assert text(result) == (
         "Execute with diff: click on save\n"
         "  Action success: True\n"
+        # A producer that predates the timeline answers none; the tool asked
+        # for one, so that is UNKNOWN, not "opted out".
+        "  Timeline: UNKNOWN (requested, but the response carried none; the "
+        "transport that answered did not record one)\n"
         "  Appeared: 1\n"
         "  Disappeared: 0\n"
         "  Modified: 0\n"

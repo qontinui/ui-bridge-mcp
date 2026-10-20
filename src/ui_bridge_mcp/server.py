@@ -32,6 +32,7 @@ from .screenshot import (
     generate_visual_description,
     mime_type_for_format,
 )
+from .timeline import format_timeline
 
 # Configure logging
 logging.basicConfig(
@@ -580,7 +581,117 @@ def _structured_changes_result(data: Any) -> ToolResult:
     return _text("\n".join(lines))
 
 
-def _execute_with_diff_result(action: str, element_id: str, data: Any) -> ToolResult:
+_EXECUTE_WITH_DIFF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "element_id": {
+            "type": "string",
+            "description": "Element ID (or @ref) to interact with",
+        },
+        "action": {
+            "type": "string",
+            "description": "Action: click, type, focus, etc.",
+        },
+        "value": {
+            "type": "string",
+            "description": "Value for type/setValue actions",
+        },
+        "settle_timeout": {
+            "type": "integer",
+            "description": "Max ms to wait for UI to settle (default: 3000)",
+        },
+        "categorize": {
+            "type": "boolean",
+            "description": "Whether to categorize the diff (default: true)",
+        },
+        "summary_budget": {
+            "type": "integer",
+            "description": "Max chars for budget summary (default: 300)",
+        },
+        "timeline": {
+            "type": "boolean",
+            "description": (
+                "Record the interaction timeline (default: true). false opts "
+                "out: the UI settles through the idle detector alone and no "
+                "timeline is returned."
+            ),
+        },
+        "timeline_interval": {
+            "type": "integer",
+            "description": "Timeline polling interval while settling, ms (SDK default: 100)",
+        },
+        "expect_states": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Declared UI state ids the action is expected to enter. Each is "
+                "answered in the timeline summary: enteredAtMs, "
+                "notEnteredWithinMs, activeThroughoutWithinMs, or UNKNOWN. "
+                "Requires within_ms and a recorded timeline."
+            ),
+        },
+        "within_ms": {
+            "type": "integer",
+            "description": (
+                "The window (ms from action start) an expected state must be "
+                "entered within. Your threshold; the SDK applies none."
+            ),
+        },
+    },
+    "required": ["element_id", "action"],
+}
+
+
+def _execute_with_diff_request(
+    element_id: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    """The ``ActionDiffRequest`` body (ui-bridge ``ai/types.ts``) for a tool call.
+
+    ``timeline`` is always sent, so the tool's default (on) does not depend on
+    the producer's. ``expectStates`` / ``withinMs`` are forwarded as given; the
+    SDK validates them (and refuses ``expectStates`` with ``timeline: false``).
+    """
+    body: dict[str, Any] = {
+        "elementAction": {
+            "elementId": element_id,
+            "action": arguments["action"],
+        },
+        "settleTimeout": arguments.get("settle_timeout", 3000),
+        "categorize": arguments.get("categorize", True),
+        "summaryBudget": arguments.get("summary_budget", 300),
+        "timeline": arguments.get("timeline", True) is not False,
+    }
+    value = arguments.get("value")
+    if value:
+        body["elementAction"]["value"] = value
+    if arguments.get("timeline_interval") is not None:
+        body["timelineInterval"] = arguments["timeline_interval"]
+    if arguments.get("expect_states") is not None:
+        body["expectStates"] = arguments["expect_states"]
+    if arguments.get("within_ms") is not None:
+        body["withinMs"] = arguments["within_ms"]
+    return body
+
+
+def _execute_with_diff_failure_text(
+    response: UIBridgeResponse, timeline_requested: bool
+) -> str:
+    """A failed execute-with-diff's text, keeping the timeline the producer recorded.
+
+    A failed action still answers its diff and timeline under ``data``
+    (ui-bridge ``ActionDiffResult``): what the UI did around the failure is
+    evidence, so it is printed after the error rather than dropped.
+    """
+    lines = [f"Error: {response.describe_error()}"]
+    data = _as_dict(response.data)
+    if "timeline" in data:
+        lines.extend(format_timeline(data["timeline"], requested=timeline_requested))
+    return "\n".join(lines)
+
+
+def _execute_with_diff_result(
+    action: str, element_id: str, data: Any, *, timeline_requested: bool = True
+) -> ToolResult:
     """An execute-with-diff outcome, read from the producer's ``actionSuccess``.
 
     ``actionSuccess: false`` reaches the tool as a failed request (the runner
@@ -588,6 +699,9 @@ def _execute_with_diff_result(action: str, element_id: str, data: Any) -> ToolRe
     ``verdict: "indeterminate"`` case: whether the action happened is UNKNOWN.
     The SDK's diff is a ``SemanticDiff``; the browser relay's is element counts,
     ``{before, after}`` (``react/commandHandlers.ts`` executeWithDiff).
+
+    The timeline summary is printed right after the action outcome, before the
+    diff and the budget summary, so a truncated result still carries it.
     """
     result = _as_dict(data)
     action_success = result.get("actionSuccess")
@@ -599,6 +713,7 @@ def _execute_with_diff_result(action: str, element_id: str, data: Any) -> ToolRe
             "  Action success: UNKNOWN (the response carried no boolean "
             f"'actionSuccess', got {action_success!r})"
         )
+    lines.extend(format_timeline(result.get("timeline"), requested=timeline_requested))
     diff = _as_dict(result.get("diff"))
     changes = diff.get("changes")
     if isinstance(changes, dict):
@@ -4268,37 +4383,8 @@ Returns the matched request details once it completes, or an error on timeout.""
     ),
     types.Tool(
         name="sdk_execute_with_diff",
-        description="Execute an element action and capture what changed in the UI. Returns before/after diff with categorization.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "element_id": {
-                    "type": "string",
-                    "description": "Element ID (or @ref) to interact with",
-                },
-                "action": {
-                    "type": "string",
-                    "description": "Action: click, type, focus, etc.",
-                },
-                "value": {
-                    "type": "string",
-                    "description": "Value for type/setValue actions",
-                },
-                "settle_timeout": {
-                    "type": "integer",
-                    "description": "Max ms to wait for UI to settle (default: 3000)",
-                },
-                "categorize": {
-                    "type": "boolean",
-                    "description": "Whether to categorize the diff (default: true)",
-                },
-                "summary_budget": {
-                    "type": "integer",
-                    "description": "Max chars for budget summary (default: 300)",
-                },
-            },
-            "required": ["element_id", "action"],
-        },
+        description="Execute an element action and capture what changed in the UI. Returns before/after diff with categorization. plus the interaction timeline (action -> events -> settled, with a summary whose every value is measured, absent or UNKNOWN).",
+        inputSchema=_EXECUTE_WITH_DIFF_SCHEMA,
     ),
     types.Tool(
         name="sdk_wait_for_change",
@@ -4454,37 +4540,8 @@ Returns what changed, or an error if the timeout passes first.""",
     ),
     types.Tool(
         name="ui_execute_with_diff",
-        description="Execute an element action in the runner's own UI and capture what changed (Control mode). Returns before/after diff with categorization.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "element_id": {
-                    "type": "string",
-                    "description": "Element ID (or @ref) to interact with",
-                },
-                "action": {
-                    "type": "string",
-                    "description": "Action: click, type, focus, etc.",
-                },
-                "value": {
-                    "type": "string",
-                    "description": "Value for type/setValue actions",
-                },
-                "settle_timeout": {
-                    "type": "integer",
-                    "description": "Max ms to wait for UI to settle (default: 3000)",
-                },
-                "categorize": {
-                    "type": "boolean",
-                    "description": "Whether to categorize the diff (default: true)",
-                },
-                "summary_budget": {
-                    "type": "integer",
-                    "description": "Max chars for budget summary (default: 300)",
-                },
-            },
-            "required": ["element_id", "action"],
-        },
+        description="Execute an element action in the runner's own UI and capture what changed (Control mode). Returns before/after diff with categorization. plus the interaction timeline (action -> events -> settled, with a summary whose every value is measured, absent or UNKNOWN).",
+        inputSchema=_EXECUTE_WITH_DIFF_SCHEMA,
     ),
     types.Tool(
         name="ui_wait_for_change",
@@ -7628,28 +7685,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         elif name == "sdk_execute_with_diff":
             element_id = ref_manager.resolve(arguments["element_id"])
-            action_name = arguments["action"]
-            value = arguments.get("value")
-            settle_timeout = arguments.get("settle_timeout", 3000)
-            categorize = arguments.get("categorize", True)
-            summary_budget = arguments.get("summary_budget", 300)
-
-            request_body: dict[str, Any] = {
-                "elementAction": {
-                    "elementId": element_id,
-                    "action": action_name,
-                },
-                "settleTimeout": settle_timeout,
-                "categorize": categorize,
-                "summaryBudget": summary_budget,
-            }
-            if value:
-                request_body["elementAction"]["value"] = value
-
+            request_body = _execute_with_diff_request(element_id, arguments)
+            timeline_requested = request_body["timeline"]
             response = await ui_client.sdk_execute_with_diff(request_body)
             if not response.success:
-                return _error_result(response)
-            return _execute_with_diff_result(action_name, element_id, response.data)
+                return _tool_error(
+                    _execute_with_diff_failure_text(response, timeline_requested)
+                )
+            return _execute_with_diff_result(
+                arguments["action"],
+                element_id,
+                response.data,
+                timeline_requested=timeline_requested,
+            )
 
         elif name == "sdk_wait_for_change":
             predicate = _change_predicate(arguments)
@@ -7811,28 +7859,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         elif name == "ui_execute_with_diff":
             element_id = ref_manager.resolve(arguments["element_id"])
-            action_name = arguments["action"]
-            value = arguments.get("value")
-            settle_timeout = arguments.get("settle_timeout", 3000)
-            categorize = arguments.get("categorize", True)
-            summary_budget = arguments.get("summary_budget", 300)
-
-            request_body = {
-                "elementAction": {
-                    "elementId": element_id,
-                    "action": action_name,
-                },
-                "settleTimeout": settle_timeout,
-                "categorize": categorize,
-                "summaryBudget": summary_budget,
-            }
-            if value:
-                request_body["elementAction"]["value"] = value
-
+            request_body = _execute_with_diff_request(element_id, arguments)
+            timeline_requested = request_body["timeline"]
             response = await ui_client.control_execute_with_diff(request_body)
             if not response.success:
-                return _error_result(response)
-            return _execute_with_diff_result(action_name, element_id, response.data)
+                return _tool_error(
+                    _execute_with_diff_failure_text(response, timeline_requested)
+                )
+            return _execute_with_diff_result(
+                arguments["action"],
+                element_id,
+                response.data,
+                timeline_requested=timeline_requested,
+            )
 
         elif name == "ui_wait_for_change":
             predicate = _change_predicate(arguments)
