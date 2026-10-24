@@ -628,3 +628,59 @@ def test_no_value_sends_no_params(monkeypatch: pytest.MonkeyPatch, tool: str) ->
     call(tool, {"element_id": "save", "action": "click"})
     (body,) = runner.bodies(route)
     assert body["elementAction"] == {"elementId": "save", "action": "click"}
+
+
+# =============================================================================
+# Re-review follow-ups on 7466153
+# =============================================================================
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_inner_refusal_prints_no_timeline_line(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    """A refusal unwrapped from a success envelope recorded nothing."""
+    route = ROUTES[tool]
+    refusal = {
+        "success": False,
+        "error": "expectStates requires withinMs",
+        "code": "EXPECT_STATES_REQUIRES_WITHIN_MS",
+    }
+    answering(monkeypatch, {route: {"success": True, "data": refusal}})
+    result = call(
+        tool, {"element_id": "save", "action": "click", "expect_states": ["a"]}
+    )
+    assert result.isError is True
+    out = text(result)
+    assert "expectStates requires withinMs" in out
+    assert "EXPECT_STATES_REQUIRES_WITHIN_MS" in out
+    assert "Timeline" not in out
+
+
+def test_requested_state_the_producer_did_not_answer_is_unknown() -> None:
+    expected = [{"stateId": "a", "outcome": measured({"enteredAtMs": 140})}]
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=expected), expected_state_ids=["a", "b"]
+        )
+    )
+    assert _line(out, "a:") == "a: measured enteredAtMs=140"
+    assert _line(out, "b:") == "b: UNKNOWN (requested, not answered)"
+    assert out.index("a: measured") < out.index("b: UNKNOWN")
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+@pytest.mark.parametrize("action", ["sendKeys", "click", "autocomplete"])
+def test_value_on_an_action_that_does_not_read_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tool: str, action: str
+) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    result = call(tool, {"element_id": "box", "action": action, "value": "x"})
+    assert result.isError is True
+    out = text(result)
+    assert f"'value' is not read by the {action!r} action" in out
+    assert "type, setValue, select" in out
+    assert runner.bodies(route) == []

@@ -595,8 +595,9 @@ _EXECUTE_WITH_DIFF_SCHEMA: dict[str, Any] = {
         "value": {
             "type": "string",
             "description": (
-                "Value for type/setValue/select actions (sent as "
-                "elementAction.params.text for type, params.value otherwise)"
+                "Value for type/setValue/select actions only (sent as "
+                "elementAction.params.text for type, params.value for "
+                "setValue/select); refused on any other action"
             ),
         },
         "settle_timeout": {
@@ -657,10 +658,20 @@ def _element_action_value_key(action: str) -> str:
     return "text" if action == "type" else "value"
 
 
+# The element actions that take this tool's ``value`` (see
+# ``_element_action_value_key``). Any other action reads other params (e.g.
+# ``sendKeys`` reads ``keys``/``text``), so a value on it is refused rather than
+# silently sent where the action never reads it.
+VALUE_ACTIONS: tuple[str, ...] = ("type", "setValue", "select")
+
+
 def _execute_with_diff_request(
     element_id: str, arguments: dict[str, Any]
-) -> dict[str, Any]:
+) -> dict[str, Any] | str:
     """The ``ActionWithDiffRequest`` body (ui-bridge ``ai/types.ts``) for a tool call.
+
+    Returns an error message instead when ``value`` is given for an action
+    outside ``VALUE_ACTIONS``.
 
     ``timeline`` is always sent, so the tool's default (on) does not depend on
     the producer's. ``expectStates`` / ``withinMs`` are forwarded as given; the
@@ -678,6 +689,12 @@ def _execute_with_diff_request(
     }
     value = arguments.get("value")
     if value is not None:
+        if arguments["action"] not in VALUE_ACTIONS:
+            return (
+                f"'value' is not read by the {arguments['action']!r} action; only "
+                f"{', '.join(VALUE_ACTIONS)} take a value. Drop 'value' for "
+                "this action."
+            )
         body["elementAction"]["params"] = {
             _element_action_value_key(arguments["action"]): value
         }
@@ -698,6 +715,11 @@ def _expected_state_ids(request_body: dict[str, Any]) -> list[str] | None:
     return [str(i) for i in ids]
 
 
+def _is_action_diff_result(data: dict[str, Any]) -> bool:
+    """Whether a failure's ``data`` is an ActionDiffResult, not a bare refusal."""
+    return any(key in data for key in ("actionSuccess", "timeline", "diff"))
+
+
 def _execute_with_diff_failure_text(
     response: UIBridgeResponse,
     timeline_requested: bool,
@@ -711,9 +733,12 @@ def _execute_with_diff_failure_text(
     """
     lines = [f"Error: {response.describe_error()}"]
     data = _as_dict(response.data)
-    if data:
-        # A body under ``data`` is an ActionDiffResult: a requested timeline it
-        # lacks is UNKNOWN on failure exactly as on success.
+    if _is_action_diff_result(data):
+        # Only an ActionDiffResult ran the action: a requested timeline it
+        # lacks is UNKNOWN on failure exactly as on success. Any other ``data``
+        # is a refusal unwrapped from a success envelope (the relay's
+        # ``{success: false, error, code}``), answered before anything was
+        # recorded, so no timeline line is owed.
         lines.extend(
             format_timeline(
                 data.get("timeline"),
@@ -7732,6 +7757,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         elif name == "sdk_execute_with_diff":
             element_id = ref_manager.resolve(arguments["element_id"])
             request_body = _execute_with_diff_request(element_id, arguments)
+            if isinstance(request_body, str):
+                return _tool_error(f"Error: {request_body}")
             timeline_requested = request_body["timeline"]
             expected_ids = _expected_state_ids(request_body)
             response = await ui_client.sdk_execute_with_diff(request_body)
@@ -7910,6 +7937,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         elif name == "ui_execute_with_diff":
             element_id = ref_manager.resolve(arguments["element_id"])
             request_body = _execute_with_diff_request(element_id, arguments)
+            if isinstance(request_body, str):
+                return _tool_error(f"Error: {request_body}")
             timeline_requested = request_body["timeline"]
             expected_ids = _expected_state_ids(request_body)
             response = await ui_client.control_execute_with_diff(request_body)

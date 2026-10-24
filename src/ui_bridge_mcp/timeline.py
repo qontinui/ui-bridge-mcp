@@ -186,7 +186,9 @@ def _expected_states_lines(
 
     An empty list is "none requested" only when nothing was requested. When
     states were requested and the producer answered none of them, that is
-    UNKNOWN: it did not say what became of them.
+    UNKNOWN: it did not say what became of them. The SDK promises one entry
+    per requested id (``ai/types.ts`` ``TimelineSummary.expectedStates``), so
+    each requested id it did not answer is listed as UNKNOWN, not dropped.
     """
     if not isinstance(expected, list):
         return [
@@ -200,11 +202,16 @@ def _expected_states_lines(
             ]
         return ["    expectedStates: none requested"]
     lines = ["    expectedStates:"]
+    answered: set[str] = set()
     for entry in expected:
         result = entry if isinstance(entry, dict) else {}
         state_id = result.get("stateId", "?")
+        answered.add(str(state_id))
         outcome = render_observation(result.get("outcome"), _expected_outcome_value)
         lines.append(f"      {state_id}: {outcome}")
+    for state_id in requested_ids or ():
+        if state_id not in answered:
+            lines.append(f"      {state_id}: UNKNOWN (requested, not answered)")
     return lines
 
 
