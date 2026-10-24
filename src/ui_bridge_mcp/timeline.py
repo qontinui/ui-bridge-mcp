@@ -190,8 +190,10 @@ def _expected_states_lines(
     per requested id (``ai/types.ts`` ``TimelineSummary.expectedStates``), so
     each requested id it did not answer is listed as UNKNOWN, not dropped.
     Answers to ids not requested follow in answer order, labelled
-    ``(not requested)``; ``requested_ids=None`` (the caller did not say what
-    it asked for) lists every answer in answer order, unlabelled.
+    ``(not requested)``; with ``requested_ids=None`` (the caller did not say
+    what it asked for) they follow unlabelled. An answer with no usable
+    ``stateId`` is labelled ``(no stateId)`` in every case and never fills a
+    requested id.
     """
     if not isinstance(expected, list):
         return [

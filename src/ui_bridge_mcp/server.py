@@ -676,9 +676,12 @@ VALUE_ACTIONS: tuple[str, ...] = ("type", "setValue", "select")
 # and the error says the refusal is about the built-in: this tool can only send
 # ``params.value``, and it cannot send what the fleet's overrides of built-ins
 # read (qontinui-runner origin/main 8dfed17e809b). The runner terminal's
-# ``sendKeys`` (``TerminalInstance.tsx`` and ``TerminalBridgeProxies.tsx``)
-# reads ``params.keys`` and rejects a missing one (``'keys' is required``,
-# ``terminalKeySequence.ts``); the proxies' ``focus`` and ``blur``
+# ``sendKeys`` (``TerminalInstance.tsx`` and ``TerminalBridgeProxies.tsx``) is
+# wrapped in ``guardedHandler(id, SEND_KEYS_SCHEMA, ...)``
+# (``src/lib/ui-bridge/guardedHandler.ts``), so a ``{value}`` bag is refused
+# first as ``ACTION_PARAMS_INVALID: sendKeys: takes no argument named "value"``;
+# an empty bag then fails its own ``'keys' is required`` check
+# (``terminalKeySequence.ts``). The proxies' ``focus`` and ``blur``
 # (``TerminalBridgeProxies.tsx``) always refuse (no mounted view). Passing the
 # value through would reach a handler that refuses it, so the tool refuses it
 # first with a message that says why.

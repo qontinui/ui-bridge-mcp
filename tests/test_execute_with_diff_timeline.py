@@ -144,8 +144,35 @@ def _line(out: str, label: str) -> str:
     return matches[0]
 
 
+def _state_lines(out: str) -> list[str]:
+    lines = out.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "expectedStates:")
+    block = []
+    for ln in lines[start + 1 :]:
+        if not ln.startswith("        "):
+            break
+        block.append(ln.strip())
+    return block
+
+
+ENTERED = measured({"enteredAtMs": 140})
+
+
+def _states(requested: list[str] | None, answered: list[str]) -> list[str]:
+    expected = [
+        {"stateId": sid, "outcome": measured({"enteredAtMs": 10 * (i + 1)})}
+        for i, sid in enumerate(answered)
+    ]
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=expected), expected_state_ids=requested
+        )
+    )
+    return _state_lines(out)
+
+
 # =============================================================================
-# render_observation: measured vs measured(0) vs absent vs unknown
+# Observation envelopes and UnknownCode
 # =============================================================================
 
 
@@ -184,6 +211,40 @@ def test_degraded_measurement_says_what_went_unmeasured() -> None:
     )
 
 
+def test_count_unknowable_dimension_omits_the_count() -> None:
+    obs = measured(
+        [],
+        unmeasured=[
+            {
+                "dimension": "animations-running-before-action(count-unknowable)",
+                "count": 0,
+                "code": "input_missing",
+            }
+        ],
+    )
+    out = "\n".join(
+        format_timeline(
+            _timeline(animationsUnsettledAtEnd=obs), expected_state_ids=None
+        )
+    )
+    assert _line(out, "animationsUnsettledAtEnd:") == (
+        "animationsUnsettledAtEnd: measured 0 animations [degraded: "
+        "animations-running-before-action(count-unknowable) input_missing]"
+    )
+
+
+def test_non_number_count_renders_as_question_mark() -> None:
+    obs = measured(
+        3,
+        unmeasured=[
+            {"dimension": "timeline-events:layout-shift", "count": "many", "code": "x"}
+        ],
+    )
+    assert render_observation(obs) == (
+        "measured 3 [degraded: timeline-events:layout-shift x? x]"
+    )
+
+
 @pytest.mark.parametrize(
     "obs",
     [
@@ -200,11 +261,6 @@ def test_malformed_envelopes_are_unknown_never_a_value(obs: Any) -> None:
     out = render_observation(obs)
     assert out.startswith("UNKNOWN (")
     assert "measured" not in out.split("(")[0]
-
-
-# =============================================================================
-# UnknownCode: the closed set carries the seven new members
-# =============================================================================
 
 
 def test_unknown_codes_mirror_the_sdk_closed_set() -> None:
@@ -224,6 +280,20 @@ def test_unknown_codes_mirror_the_sdk_closed_set() -> None:
     assert CODE_PRODUCER_FAILED in UNKNOWN_CODES
 
 
+def test_unknown_codes_comment_names_the_sdk_twin_not_schemas_main() -> None:
+    """The comment must not claim schemas main already carries the 16 codes."""
+    import inspect
+
+    import ui_bridge_mcp.client as client_module
+
+    source = inspect.getsource(client_module)
+    start = source.index("# The closed Observation ``UnknownCode`` set")
+    comment = source[start : source.index("UNKNOWN_CODES: tuple", start)]
+    assert "packages/ui-bridge/src/observation/observation.ts" in comment
+    assert "twin of qontinui-schemas" not in comment
+    assert "once it does" in comment
+
+
 @pytest.mark.parametrize("code", NEW_CODES)
 def test_new_codes_render_as_unknown_with_their_code(code: str) -> None:
     out = render_observation(unknown(code, f"detail for {code}"))
@@ -241,23 +311,8 @@ def test_code_outside_the_set_is_unknown_and_says_so() -> None:
     )
 
 
-@pytest.mark.parametrize("code", NEW_CODES)
-def test_new_code_in_a_tool_result_is_not_an_error(
-    monkeypatch: pytest.MonkeyPatch, code: str
-) -> None:
-    timeline = _timeline(firstResponseMs=unknown(code, "nothing responded"))
-    answering(
-        monkeypatch, {SDK_ROUTE: {"success": True, "data": _diff_result(timeline)}}
-    )
-    result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
-    assert result.isError is False
-    assert _line(text(result), "firstResponseMs:") == (
-        f"firstResponseMs: UNKNOWN ({code}: nothing responded)"
-    )
-
-
 # =============================================================================
-# format_timeline
+# The timeline block
 # =============================================================================
 
 
@@ -305,27 +360,6 @@ def test_running_animations_are_named() -> None:
     )
 
 
-def test_expect_states_miss_renders_not_entered_within_ms() -> None:
-    expected = [
-        {"stateId": "saved-toast", "outcome": measured({"notEnteredWithinMs": 2000})},
-        {"stateId": "editor", "outcome": measured({"enteredAtMs": 140})},
-        {"stateId": "shell", "outcome": measured({"activeThroughoutWithinMs": 2000})},
-        {
-            "stateId": "dialog",
-            "outcome": unknown("input_missing", "no state registry"),
-        },
-    ]
-    out = "\n".join(
-        format_timeline(_timeline(expectedStates=expected), expected_state_ids=None)
-    )
-    assert _line(out, "saved-toast:") == (
-        "saved-toast: measured notEnteredWithinMs=2000"
-    )
-    assert _line(out, "editor:") == "editor: measured enteredAtMs=140"
-    assert _line(out, "shell:") == "shell: measured activeThroughoutWithinMs=2000"
-    assert _line(out, "dialog:") == "dialog: UNKNOWN (input_missing: no state registry)"
-
-
 def test_opted_out_timeline_says_so() -> None:
     assert format_timeline(None, requested=False, expected_state_ids=None) == [
         f"  {TIMELINE_OPTED_OUT}"
@@ -348,7 +382,326 @@ def test_missing_parts_of_a_timeline_are_unknown() -> None:
 
 
 # =============================================================================
-# The tools: what they send, and where the summary lands
+# expectedStates: one line per requested id, in request order
+# =============================================================================
+
+
+def test_expect_states_miss_renders_not_entered_within_ms() -> None:
+    expected = [
+        {"stateId": "saved-toast", "outcome": measured({"notEnteredWithinMs": 2000})},
+        {"stateId": "editor", "outcome": measured({"enteredAtMs": 140})},
+        {"stateId": "shell", "outcome": measured({"activeThroughoutWithinMs": 2000})},
+        {
+            "stateId": "dialog",
+            "outcome": unknown("input_missing", "no state registry"),
+        },
+    ]
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=expected), expected_state_ids=None)
+    )
+    assert _line(out, "saved-toast:") == (
+        "saved-toast: measured notEnteredWithinMs=2000"
+    )
+    assert _line(out, "editor:") == "editor: measured enteredAtMs=140"
+    assert _line(out, "shell:") == "shell: measured activeThroughoutWithinMs=2000"
+    assert _line(out, "dialog:") == "dialog: UNKNOWN (input_missing: no state registry)"
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"enteredAtMs": 140, "notEnteredWithinMs": 2000},
+        {},
+        {"enteredAtMs": "soon"},
+    ],
+)
+def test_expected_state_outcome_not_exactly_one_numeric_key_is_unknown(
+    outcome: dict[str, Any],
+) -> None:
+    expected = [{"stateId": "saved-toast", "outcome": measured(outcome)}]
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=expected), expected_state_ids=None)
+    )
+    assert _line(out, "saved-toast:").startswith("saved-toast: UNKNOWN (")
+    assert "measured" not in _line(out, "saved-toast:").split("(")[0]
+
+
+def test_requested_states_answered_with_empty_list_are_unknown() -> None:
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=[]), expected_state_ids=["saved-toast", "editor"]
+        )
+    )
+    line = _line(out, "expectedStates:")
+    assert line.startswith("expectedStates: UNKNOWN (requested saved-toast, editor")
+    assert "none requested" not in out
+
+
+@pytest.mark.parametrize(
+    ("requested", "answered", "expected_lines"),
+    [
+        (
+            ["a", "b", "c"],
+            ["b"],
+            [
+                "a: UNKNOWN (requested, not answered)",
+                "b: measured enteredAtMs=140",
+                "c: UNKNOWN (requested, not answered)",
+            ],
+        ),
+        (
+            ["a", "a"],
+            ["a"],
+            [
+                "a: measured enteredAtMs=140",
+                "a: UNKNOWN (requested, not answered)",
+            ],
+        ),
+        (
+            ["a", "a"],
+            ["x"],
+            [
+                "a: UNKNOWN (requested, not answered)",
+                "a: UNKNOWN (requested, not answered)",
+                "x: measured enteredAtMs=140 (not requested)",
+            ],
+        ),
+    ],
+)
+def test_expected_states_follow_request_order_as_a_multiset(
+    requested: list[str], answered: list[str], expected_lines: list[str]
+) -> None:
+    expected = [{"stateId": sid, "outcome": ENTERED} for sid in answered]
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=expected), expected_state_ids=requested
+        )
+    )
+    assert _state_lines(out) == expected_lines
+
+
+def test_unrequested_answers_keep_their_answer_order() -> None:
+    assert _states(["a"], ["x", "y", "x"]) == [
+        "a: UNKNOWN (requested, not answered)",
+        "x: measured enteredAtMs=10 (not requested)",
+        "y: measured enteredAtMs=20 (not requested)",
+        "x: measured enteredAtMs=30 (not requested)",
+    ]
+
+
+def test_a_second_answer_to_a_single_request_is_labelled_not_requested() -> None:
+    once = _states(["a"], ["a", "a"])
+    twice = _states(["a", "a"], ["a", "a"])
+    assert once == [
+        "a: measured enteredAtMs=10",
+        "a: measured enteredAtMs=20 (not requested)",
+    ]
+    assert twice == ["a: measured enteredAtMs=10", "a: measured enteredAtMs=20"]
+    assert once != twice
+
+
+def test_unrequested_answer_between_requested_ones() -> None:
+    assert _states(["a", "b"], ["x", "a", "b"]) == [
+        "a: measured enteredAtMs=20",
+        "b: measured enteredAtMs=30",
+        "x: measured enteredAtMs=10 (not requested)",
+    ]
+
+
+def test_answers_with_no_requested_ids_keep_arrival_order() -> None:
+    assert _states(None, ["x", "y", "x"]) == [
+        "x: measured enteredAtMs=10",
+        "y: measured enteredAtMs=20",
+        "x: measured enteredAtMs=30",
+    ]
+
+
+def test_answers_to_an_empty_request_are_all_not_requested() -> None:
+    assert _states([], ["b", "a"]) == [
+        "b: measured enteredAtMs=10 (not requested)",
+        "a: measured enteredAtMs=20 (not requested)",
+    ]
+
+
+@pytest.mark.parametrize("requested", [None, [], ["a"]])
+@pytest.mark.parametrize("entry", [{}, {"stateId": ""}, {"stateId": 7}, "garbage"])
+def test_answer_without_a_usable_state_id_says_so(
+    requested: list[str] | None, entry: Any
+) -> None:
+    if isinstance(entry, dict):
+        entry = {**entry, "outcome": measured({"enteredAtMs": 5})}
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=[entry]), expected_state_ids=requested)
+    )
+    line = _line(out, "?:")
+    assert line.endswith(" (no stateId)")
+    assert "(not requested)" not in line
+    if requested == ["a"]:
+        assert _line(out, "a:") == "a: UNKNOWN (requested, not answered)"
+
+
+def test_requested_question_mark_id_is_not_filled_by_an_answer_without_one() -> None:
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=[{}]), expected_state_ids=["?"])
+    )
+    assert _state_lines(out) == [
+        "?: UNKNOWN (requested, not answered)",
+        "?: UNKNOWN (not an Observation envelope: null) (no stateId)",
+    ]
+
+
+# =============================================================================
+# Value routing: elementAction.params, and refusals
+# =============================================================================
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+@pytest.mark.parametrize(
+    ("action", "key"), [("type", "text"), ("setValue", "value"), ("select", "value")]
+)
+def test_value_is_sent_as_the_param_the_sdk_action_reads(
+    monkeypatch: pytest.MonkeyPatch, tool: str, action: str, key: str
+) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    call(tool, {"element_id": "name", "action": action, "value": "Ada"})
+    (body,) = runner.bodies(route)
+    assert body["elementAction"] == {
+        "elementId": "name",
+        "action": action,
+        "params": {key: "Ada"},
+    }
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_no_value_sends_no_params(monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    call(tool, {"element_id": "save", "action": "click"})
+    (body,) = runner.bodies(route)
+    assert body["elementAction"] == {"elementId": "save", "action": "click"}
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+@pytest.mark.parametrize("action", ["sendKeys", "click", "autocomplete"])
+def test_value_on_an_action_that_does_not_read_it_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tool: str, action: str
+) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    result = call(tool, {"element_id": "box", "action": action, "value": "x"})
+    assert result.isError is True
+    out = text(result)
+    assert f"'value' is not read by the built-in {action!r} action" in out
+    assert "custom action registered under this name" in out
+    assert "type, setValue, select" in out
+    assert runner.bodies(route) == []
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+@pytest.mark.parametrize("action", ["openRow", "terminal.paste", "setRating"])
+def test_value_on_a_custom_action_is_passed_through(
+    monkeypatch: pytest.MonkeyPatch, tool: str, action: str
+) -> None:
+    """A registered custom action receives the whole params object."""
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    result = call(tool, {"element_id": "row", "action": action, "value": "42"})
+    assert result.isError is False
+    (body,) = runner.bodies(route)
+    assert body["elementAction"] == {
+        "elementId": "row",
+        "action": action,
+        "params": {"value": "42"},
+    }
+
+
+def test_builtin_refusal_set_is_the_sdk_switch_minus_value_actions() -> None:
+    """The built-in switch in ui-bridge ``control/action-executor.ts``
+    performAction, checked against ui-bridge origin/main d84bfa6ffe67, minus
+    type/setValue/select."""
+    from ui_bridge_mcp import server
+
+    assert server.BUILTIN_ACTIONS_WITHOUT_VALUE == {
+        "click",
+        "hoverClick",
+        "doubleClick",
+        "rightClick",
+        "middleClick",
+        "sendKeys",
+        "clear",
+        "focus",
+        "blur",
+        "hover",
+        "scroll",
+        "scrollIntoView",
+        "check",
+        "uncheck",
+        "toggle",
+        "drag",
+        "autocomplete",
+        "submit",
+        "reset",
+    }
+    assert not server.BUILTIN_ACTIONS_WITHOUT_VALUE & set(server.VALUE_ACTIONS)
+
+
+def test_override_comment_names_every_fleet_override() -> None:
+    import inspect
+
+    from ui_bridge_mcp import server
+
+    source = inspect.getsource(server)
+    start = source.index("# An element may register a custom action")
+    comment = source[start : source.index("BUILTIN_ACTIONS_WITHOUT_VALUE:", start)]
+    assert "the one such override" not in comment
+    for name in ("sendKeys", "focus", "blur", "TerminalBridgeProxies.tsx"):
+        assert name in comment
+    # It names what each override does with a value, not a silent no-op.
+    assert "silent no-op too" not in comment
+    assert 'takes no argument named "value"' in comment
+    assert "'keys' is required" in comment
+    assert "always refuse" in comment
+
+
+# =============================================================================
+# HTTP timeout
+# =============================================================================
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_timeout_covers_two_settles_plus_the_window(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    call(
+        tool,
+        {
+            "element_id": "save",
+            "action": "click",
+            "expect_states": ["saved-toast"],
+            "within_ms": 30000,
+            "settle_timeout": 20000,
+        },
+    )
+    # The relay settles before the action and executeWithDiff again after it:
+    # 2 * 20 s + 30 s + 10 s slack.
+    assert runner.read_timeouts[-1] == pytest.approx(80.0)
+
+
+# =============================================================================
+# Tool wiring: what the tools send, and where the summary lands
 # =============================================================================
 
 
@@ -419,162 +772,19 @@ def test_summary_precedes_the_bulky_detail(monkeypatch: pytest.MonkeyPatch) -> N
     assert out.index("events:") < out.index("Summary: BBB")
 
 
-def test_failed_action_keeps_its_timeline(monkeypatch: pytest.MonkeyPatch) -> None:
-    data = _diff_result(_timeline())
-    data["actionSuccess"] = False
-    body = {"success": False, "error": "element not found", "data": data}
-    answering(monkeypatch, {SDK_ROUTE: body})
-    result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
-    assert result.isError is True
-    out = text(result)
-    assert "element not found" in out
-    assert _line(out, "firstResponseMs:") == "firstResponseMs: measured 42"
-
-
-def test_failed_action_without_timeline_is_the_plain_error(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("code", NEW_CODES)
+def test_new_code_in_a_tool_result_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, code: str
 ) -> None:
-    answering(monkeypatch, {SDK_ROUTE: {"success": False, "error": "boom"}})
-    result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
-    assert result.isError is True
-    assert "Timeline" not in text(result)
-
-
-# =============================================================================
-# Review follow-ups on 1ebcd63
-# =============================================================================
-
-
-def test_unknown_codes_comment_names_the_sdk_twin_not_schemas_main() -> None:
-    """The comment must not claim schemas main already carries the 16 codes."""
-    import inspect
-
-    import ui_bridge_mcp.client as client_module
-
-    source = inspect.getsource(client_module)
-    start = source.index("# The closed Observation ``UnknownCode`` set")
-    comment = source[start : source.index("UNKNOWN_CODES: tuple", start)]
-    assert "packages/ui-bridge/src/observation/observation.ts" in comment
-    assert "twin of qontinui-schemas" not in comment
-    assert "once it does" in comment
-
-
-@pytest.mark.parametrize("tool", sorted(ROUTES))
-def test_failed_action_with_data_but_no_timeline_is_unknown(
-    monkeypatch: pytest.MonkeyPatch, tool: str
-) -> None:
-    route = ROUTES[tool]
-    data = _diff_result(None)
-    data["actionSuccess"] = False
+    timeline = _timeline(firstResponseMs=unknown(code, "nothing responded"))
     answering(
-        monkeypatch, {route: {"success": False, "error": "element gone", "data": data}}
+        monkeypatch, {SDK_ROUTE: {"success": True, "data": _diff_result(timeline)}}
     )
-    result = call(tool, {"element_id": "save", "action": "click"})
-    assert result.isError is True
-    out = text(result)
-    assert "element gone" in out
-    assert _line(out, "Timeline:").startswith("Timeline: UNKNOWN (requested")
-
-
-@pytest.mark.parametrize("tool", sorted(ROUTES))
-def test_timeout_covers_two_settles_plus_the_window(
-    monkeypatch: pytest.MonkeyPatch, tool: str
-) -> None:
-    route = ROUTES[tool]
-    runner = answering(
-        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
+    assert result.isError is False
+    assert _line(text(result), "firstResponseMs:") == (
+        f"firstResponseMs: UNKNOWN ({code}: nothing responded)"
     )
-    call(
-        tool,
-        {
-            "element_id": "save",
-            "action": "click",
-            "expect_states": ["saved-toast"],
-            "within_ms": 30000,
-            "settle_timeout": 20000,
-        },
-    )
-    # The relay settles before the action and executeWithDiff again after it:
-    # 2 * 20 s + 30 s + 10 s slack.
-    assert runner.read_timeouts[-1] == pytest.approx(80.0)
-
-
-def test_tool_descriptions_join_the_timeline_clause_with_a_comma() -> None:
-    from ui_bridge_mcp import server
-
-    descriptions = {
-        t.name: t.description or ""
-        for t in server.TOOLS
-        if t.name in ("sdk_execute_with_diff", "ui_execute_with_diff")
-    }
-    assert len(descriptions) == 2
-    for description in descriptions.values():
-        assert "categorization, plus the interaction timeline" in description
-        assert ". plus" not in description
-
-
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        {"enteredAtMs": 140, "notEnteredWithinMs": 2000},
-        {},
-        {"enteredAtMs": "soon"},
-    ],
-)
-def test_expected_state_outcome_not_exactly_one_numeric_key_is_unknown(
-    outcome: dict[str, Any],
-) -> None:
-    expected = [{"stateId": "saved-toast", "outcome": measured(outcome)}]
-    out = "\n".join(
-        format_timeline(_timeline(expectedStates=expected), expected_state_ids=None)
-    )
-    assert _line(out, "saved-toast:").startswith("saved-toast: UNKNOWN (")
-    assert "measured" not in _line(out, "saved-toast:").split("(")[0]
-
-
-def test_count_unknowable_dimension_omits_the_count() -> None:
-    obs = measured(
-        [],
-        unmeasured=[
-            {
-                "dimension": "animations-running-before-action(count-unknowable)",
-                "count": 0,
-                "code": "input_missing",
-            }
-        ],
-    )
-    out = "\n".join(
-        format_timeline(
-            _timeline(animationsUnsettledAtEnd=obs), expected_state_ids=None
-        )
-    )
-    assert _line(out, "animationsUnsettledAtEnd:") == (
-        "animationsUnsettledAtEnd: measured 0 animations [degraded: "
-        "animations-running-before-action(count-unknowable) input_missing]"
-    )
-
-
-def test_non_number_count_renders_as_question_mark() -> None:
-    obs = measured(
-        3,
-        unmeasured=[
-            {"dimension": "timeline-events:layout-shift", "count": "many", "code": "x"}
-        ],
-    )
-    assert render_observation(obs) == (
-        "measured 3 [degraded: timeline-events:layout-shift x? x]"
-    )
-
-
-def test_requested_states_answered_with_empty_list_are_unknown() -> None:
-    out = "\n".join(
-        format_timeline(
-            _timeline(expectedStates=[]), expected_state_ids=["saved-toast", "editor"]
-        )
-    )
-    line = _line(out, "expectedStates:")
-    assert line.startswith("expectedStates: UNKNOWN (requested saved-toast, editor")
-    assert "none requested" not in out
 
 
 @pytest.mark.parametrize("tool", sorted(ROUTES))
@@ -599,6 +809,54 @@ def test_tool_passes_requested_states_to_the_renderer(
     assert _line(out, "expectedStates:").startswith("expectedStates: UNKNOWN (")
 
 
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_tool_without_expect_states_labels_answers_not_requested(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    route = ROUTES[tool]
+    expected = [{"stateId": "x", "outcome": measured({"enteredAtMs": 5})}]
+    answering(
+        monkeypatch,
+        {
+            route: {
+                "success": True,
+                "data": _diff_result(_timeline(expectedStates=expected)),
+            }
+        },
+    )
+    out = text(call(tool, {"element_id": "save", "action": "click"}))
+    assert _line(out, "x:") == "x: measured enteredAtMs=5 (not requested)"
+
+
+def test_expected_state_ids_is_keyword_required() -> None:
+    import inspect
+
+    from ui_bridge_mcp import server
+
+    for fn in (
+        format_timeline,
+        server._execute_with_diff_failure_text,
+        server._execute_with_diff_result,
+    ):
+        param = inspect.signature(fn).parameters["expected_state_ids"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, fn.__name__
+        assert param.default is inspect.Parameter.empty, fn.__name__
+
+
+def test_tool_descriptions_join_the_timeline_clause_with_a_comma() -> None:
+    from ui_bridge_mcp import server
+
+    descriptions = {
+        t.name: t.description or ""
+        for t in server.TOOLS
+        if t.name in ("sdk_execute_with_diff", "ui_execute_with_diff")
+    }
+    assert len(descriptions) == 2
+    for description in descriptions.values():
+        assert "categorization, plus the interaction timeline" in description
+        assert ". plus" not in description
+
+
 def test_request_docstring_names_the_sdk_type() -> None:
     from ui_bridge_mcp import server
 
@@ -608,44 +866,46 @@ def test_request_docstring_names_the_sdk_type() -> None:
 
 
 # =============================================================================
-# The element action's value travels in elementAction.params
+# Failure path
 # =============================================================================
 
 
+def test_failed_action_keeps_its_timeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _diff_result(_timeline())
+    data["actionSuccess"] = False
+    body = {"success": False, "error": "element not found", "data": data}
+    answering(monkeypatch, {SDK_ROUTE: body})
+    result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
+    assert result.isError is True
+    out = text(result)
+    assert "element not found" in out
+    assert _line(out, "firstResponseMs:") == "firstResponseMs: measured 42"
+
+
 @pytest.mark.parametrize("tool", sorted(ROUTES))
-@pytest.mark.parametrize(
-    ("action", "key"), [("type", "text"), ("setValue", "value"), ("select", "value")]
-)
-def test_value_is_sent_as_the_param_the_sdk_action_reads(
-    monkeypatch: pytest.MonkeyPatch, tool: str, action: str, key: str
+def test_failed_action_with_data_but_no_timeline_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, tool: str
 ) -> None:
     route = ROUTES[tool]
-    runner = answering(
-        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    data = _diff_result(None)
+    data["actionSuccess"] = False
+    answering(
+        monkeypatch, {route: {"success": False, "error": "element gone", "data": data}}
     )
-    call(tool, {"element_id": "name", "action": action, "value": "Ada"})
-    (body,) = runner.bodies(route)
-    assert body["elementAction"] == {
-        "elementId": "name",
-        "action": action,
-        "params": {key: "Ada"},
-    }
+    result = call(tool, {"element_id": "save", "action": "click"})
+    assert result.isError is True
+    out = text(result)
+    assert "element gone" in out
+    assert _line(out, "Timeline:").startswith("Timeline: UNKNOWN (requested")
 
 
-@pytest.mark.parametrize("tool", sorted(ROUTES))
-def test_no_value_sends_no_params(monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
-    route = ROUTES[tool]
-    runner = answering(
-        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
-    )
-    call(tool, {"element_id": "save", "action": "click"})
-    (body,) = runner.bodies(route)
-    assert body["elementAction"] == {"elementId": "save", "action": "click"}
-
-
-# =============================================================================
-# Re-review follow-ups on 7466153
-# =============================================================================
+def test_failed_action_without_timeline_is_the_plain_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {SDK_ROUTE: {"success": False, "error": "boom"}})
+    result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
+    assert result.isError is True
+    assert "Timeline" not in text(result)
 
 
 @pytest.mark.parametrize("tool", sorted(ROUTES))
@@ -668,295 +928,3 @@ def test_inner_refusal_prints_no_timeline_line(
     assert "expectStates requires withinMs" in out
     assert "EXPECT_STATES_REQUIRES_WITHIN_MS" in out
     assert "Timeline" not in out
-
-
-def test_requested_state_the_producer_did_not_answer_is_unknown() -> None:
-    expected = [{"stateId": "a", "outcome": measured({"enteredAtMs": 140})}]
-    out = "\n".join(
-        format_timeline(
-            _timeline(expectedStates=expected), expected_state_ids=["a", "b"]
-        )
-    )
-    assert _line(out, "a:") == "a: measured enteredAtMs=140"
-    assert _line(out, "b:") == "b: UNKNOWN (requested, not answered)"
-    assert out.index("a: measured") < out.index("b: UNKNOWN")
-
-
-@pytest.mark.parametrize("tool", sorted(ROUTES))
-@pytest.mark.parametrize("action", ["sendKeys", "click", "autocomplete"])
-def test_value_on_an_action_that_does_not_read_it_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tool: str, action: str
-) -> None:
-    route = ROUTES[tool]
-    runner = answering(
-        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
-    )
-    result = call(tool, {"element_id": "box", "action": action, "value": "x"})
-    assert result.isError is True
-    out = text(result)
-    assert f"'value' is not read by the built-in {action!r} action" in out
-    assert "custom action registered under this name" in out
-    assert "type, setValue, select" in out
-    assert runner.bodies(route) == []
-
-
-# =============================================================================
-# Round-2 review follow-ups on 466a0a5
-# =============================================================================
-
-
-@pytest.mark.parametrize("tool", sorted(ROUTES))
-@pytest.mark.parametrize("action", ["openRow", "terminal.paste", "setRating"])
-def test_value_on_a_custom_action_is_passed_through(
-    monkeypatch: pytest.MonkeyPatch, tool: str, action: str
-) -> None:
-    """A registered custom action receives the whole params object."""
-    route = ROUTES[tool]
-    runner = answering(
-        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
-    )
-    result = call(tool, {"element_id": "row", "action": action, "value": "42"})
-    assert result.isError is False
-    (body,) = runner.bodies(route)
-    assert body["elementAction"] == {
-        "elementId": "row",
-        "action": action,
-        "params": {"value": "42"},
-    }
-
-
-def test_builtin_refusal_set_is_the_sdk_switch_minus_value_actions() -> None:
-    """The built-in switch in ui-bridge ``control/action-executor.ts``
-    performAction, checked against ui-bridge origin/main d84bfa6ffe67, minus
-    type/setValue/select."""
-    from ui_bridge_mcp import server
-
-    assert server.BUILTIN_ACTIONS_WITHOUT_VALUE == {
-        "click",
-        "hoverClick",
-        "doubleClick",
-        "rightClick",
-        "middleClick",
-        "sendKeys",
-        "clear",
-        "focus",
-        "blur",
-        "hover",
-        "scroll",
-        "scrollIntoView",
-        "check",
-        "uncheck",
-        "toggle",
-        "drag",
-        "autocomplete",
-        "submit",
-        "reset",
-    }
-    assert not server.BUILTIN_ACTIONS_WITHOUT_VALUE & set(server.VALUE_ACTIONS)
-
-
-def _state_lines(out: str) -> list[str]:
-    lines = out.splitlines()
-    start = next(i for i, ln in enumerate(lines) if ln.strip() == "expectedStates:")
-    block = []
-    for ln in lines[start + 1 :]:
-        if not ln.startswith("        "):
-            break
-        block.append(ln.strip())
-    return block
-
-
-ENTERED = measured({"enteredAtMs": 140})
-
-
-@pytest.mark.parametrize(
-    ("requested", "answered", "expected_lines"),
-    [
-        (
-            ["a", "b", "c"],
-            ["b"],
-            [
-                "a: UNKNOWN (requested, not answered)",
-                "b: measured enteredAtMs=140",
-                "c: UNKNOWN (requested, not answered)",
-            ],
-        ),
-        (
-            ["a", "a"],
-            ["a"],
-            [
-                "a: measured enteredAtMs=140",
-                "a: UNKNOWN (requested, not answered)",
-            ],
-        ),
-        (
-            ["a", "a"],
-            ["x"],
-            [
-                "a: UNKNOWN (requested, not answered)",
-                "a: UNKNOWN (requested, not answered)",
-                "x: measured enteredAtMs=140 (not requested)",
-            ],
-        ),
-    ],
-)
-def test_expected_states_follow_request_order_as_a_multiset(
-    requested: list[str], answered: list[str], expected_lines: list[str]
-) -> None:
-    expected = [{"stateId": sid, "outcome": ENTERED} for sid in answered]
-    out = "\n".join(
-        format_timeline(
-            _timeline(expectedStates=expected), expected_state_ids=requested
-        )
-    )
-    assert _state_lines(out) == expected_lines
-
-
-# =============================================================================
-# Round-3 review follow-ups on 323115f
-# =============================================================================
-
-
-def _states(requested: list[str] | None, answered: list[str]) -> list[str]:
-    expected = [
-        {"stateId": sid, "outcome": measured({"enteredAtMs": 10 * (i + 1)})}
-        for i, sid in enumerate(answered)
-    ]
-    out = "\n".join(
-        format_timeline(
-            _timeline(expectedStates=expected), expected_state_ids=requested
-        )
-    )
-    return _state_lines(out)
-
-
-def test_unrequested_answers_keep_their_answer_order() -> None:
-    assert _states(["a"], ["x", "y", "x"]) == [
-        "a: UNKNOWN (requested, not answered)",
-        "x: measured enteredAtMs=10 (not requested)",
-        "y: measured enteredAtMs=20 (not requested)",
-        "x: measured enteredAtMs=30 (not requested)",
-    ]
-
-
-def test_a_second_answer_to_a_single_request_is_labelled_not_requested() -> None:
-    once = _states(["a"], ["a", "a"])
-    twice = _states(["a", "a"], ["a", "a"])
-    assert once == [
-        "a: measured enteredAtMs=10",
-        "a: measured enteredAtMs=20 (not requested)",
-    ]
-    assert twice == ["a: measured enteredAtMs=10", "a: measured enteredAtMs=20"]
-    assert once != twice
-
-
-def test_unrequested_answer_between_requested_ones() -> None:
-    assert _states(["a", "b"], ["x", "a", "b"]) == [
-        "a: measured enteredAtMs=20",
-        "b: measured enteredAtMs=30",
-        "x: measured enteredAtMs=10 (not requested)",
-    ]
-
-
-def test_answers_with_no_requested_ids_known_are_listed_unlabelled() -> None:
-    assert _states(None, ["b", "a"]) == [
-        "b: measured enteredAtMs=10",
-        "a: measured enteredAtMs=20",
-    ]
-
-
-def test_answers_to_an_empty_request_are_all_not_requested() -> None:
-    assert _states([], ["b", "a"]) == [
-        "b: measured enteredAtMs=10 (not requested)",
-        "a: measured enteredAtMs=20 (not requested)",
-    ]
-
-
-@pytest.mark.parametrize("tool", sorted(ROUTES))
-def test_tool_without_expect_states_labels_answers_not_requested(
-    monkeypatch: pytest.MonkeyPatch, tool: str
-) -> None:
-    route = ROUTES[tool]
-    expected = [{"stateId": "x", "outcome": measured({"enteredAtMs": 5})}]
-    answering(
-        monkeypatch,
-        {
-            route: {
-                "success": True,
-                "data": _diff_result(_timeline(expectedStates=expected)),
-            }
-        },
-    )
-    out = text(call(tool, {"element_id": "save", "action": "click"}))
-    assert _line(out, "x:") == "x: measured enteredAtMs=5 (not requested)"
-
-
-def test_override_comment_names_every_fleet_override() -> None:
-    import inspect
-
-    from ui_bridge_mcp import server
-
-    source = inspect.getsource(server)
-    start = source.index("# An element may register a custom action")
-    comment = source[start : source.index("BUILTIN_ACTIONS_WITHOUT_VALUE:", start)]
-    assert "the one such override" not in comment
-    for name in ("sendKeys", "focus", "blur", "TerminalBridgeProxies.tsx"):
-        assert name in comment
-
-
-# =============================================================================
-# Round-4 review follow-ups on 6870c8e
-# =============================================================================
-
-
-def test_answers_with_no_requested_ids_keep_arrival_order() -> None:
-    assert _states(None, ["x", "y", "x"]) == [
-        "x: measured enteredAtMs=10",
-        "y: measured enteredAtMs=20",
-        "x: measured enteredAtMs=30",
-    ]
-
-
-@pytest.mark.parametrize("requested", [None, [], ["a"]])
-@pytest.mark.parametrize("entry", [{}, {"stateId": ""}, {"stateId": 7}, "garbage"])
-def test_answer_without_a_usable_state_id_says_so(
-    requested: list[str] | None, entry: Any
-) -> None:
-    if isinstance(entry, dict):
-        entry = {**entry, "outcome": measured({"enteredAtMs": 5})}
-    out = "\n".join(
-        format_timeline(_timeline(expectedStates=[entry]), expected_state_ids=requested)
-    )
-    line = _line(out, "?:")
-    assert line.endswith(" (no stateId)")
-    assert "(not requested)" not in line
-    if requested == ["a"]:
-        assert _line(out, "a:") == "a: UNKNOWN (requested, not answered)"
-
-
-def test_expected_state_ids_is_keyword_required() -> None:
-    import inspect
-
-    from ui_bridge_mcp import server
-
-    for fn in (
-        format_timeline,
-        server._execute_with_diff_failure_text,
-        server._execute_with_diff_result,
-    ):
-        param = inspect.signature(fn).parameters["expected_state_ids"]
-        assert param.kind is inspect.Parameter.KEYWORD_ONLY, fn.__name__
-        assert param.default is inspect.Parameter.empty, fn.__name__
-
-
-def test_override_comment_does_not_claim_a_silent_no_op() -> None:
-    import inspect
-
-    from ui_bridge_mcp import server
-
-    source = inspect.getsource(server)
-    start = source.index("# An element may register a custom action")
-    comment = source[start : source.index("BUILTIN_ACTIONS_WITHOUT_VALUE:", start)]
-    assert "silent no-op too" not in comment
-    assert "'keys' is required" in comment
-    assert "always refuse" in comment
