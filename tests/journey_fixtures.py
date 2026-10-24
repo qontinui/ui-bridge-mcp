@@ -52,7 +52,6 @@ def no_filter() -> dict[str, Any]:
 
 def departures(**over: int) -> dict[str, Any]:
     d = {
-        "rejected": 0,
         "rejectedFrontier": 0,
         "filteredOut": 0,
         "withdrawn": 0,
@@ -460,6 +459,7 @@ def dead_ends_measured() -> dict[str, Any]:
             "unobservedDepartures": 0,
             "unmeasuredDepartures": departures(),
             "unsettledByGraph": False,
+            "unconfirmedDestination": False,
         },
         {
             "nodeKey": SETTINGS,
@@ -467,6 +467,7 @@ def dead_ends_measured() -> dict[str, Any]:
             "unobservedDepartures": 0,
             "unmeasuredDepartures": departures(settleTimeout=1),
             "unsettledByGraph": False,
+            "unconfirmedDestination": True,
         },
     ]
     sf = search_frontier(
@@ -513,6 +514,7 @@ def dead_ends_unknown_unexplored() -> dict[str, Any]:
                 "unobservedDepartures": 0,
                 "unmeasuredDepartures": departures(),
                 "unsettledByGraph": False,
+                "unconfirmedDestination": False,
             }
         ],
         "frontier": search_frontier(
@@ -560,15 +562,25 @@ def prior_knowledge_measured() -> dict[str, Any]:
                 "nodeKey": "console#invite",
                 "arrivals": {"initial": 1},
                 "arrivalDoubt": {"filtered": 2, "withdrawn": 0},
-                "untrustedEdgeRows": 0,
+                "unplacedRejectedRows": 0,
                 "unknownDestinationArrivals": 0,
+                "openFrontierEntries": 0,
+                "ledgerNotWriting": False,
+                "unconfirmedDestination": False,
             }
         ],
         "frontier": search_frontier(),
         "coverage": coverage(),
         "filterEcho": {"since": None, "appVersion": "1.4.0", "runKind": "agent_action"},
     }
-    return envelope("prior-knowledge", "measured", result)
+    # routes.rs answer_prior_knowledge: settled nodes exist -> measured,
+    # degraded by the unsettled ones.
+    return envelope(
+        "prior-knowledge",
+        "measured",
+        result,
+        unmeasured=[dim("unsettled_prior_knowledge_nodes", 1, "input_missing")],
+    )
 
 
 def prior_knowledge_graph_doubt() -> dict[str, Any]:
@@ -580,19 +592,25 @@ def prior_knowledge_graph_doubt() -> dict[str, Any]:
                 "nodeKey": SETTINGS,
                 "arrivals": {"push": 1},
                 "arrivalDoubt": {"filtered": 0, "withdrawn": 0},
-                "untrustedEdgeRows": 2,
+                "unplacedRejectedRows": 2,
                 "unknownDestinationArrivals": 1,
+                "openFrontierEntries": 3,
+                "ledgerNotWriting": True,
+                "unconfirmedDestination": True,
             }
         ],
         "frontier": search_frontier(unplacedRejectedRows=2),
-        "coverage": coverage(rowsRejected=2),
+        "coverage": coverage(rowsRejected=1),
         "filterEcho": no_filter(),
     }
     return envelope(
         "prior-knowledge",
         "unknown",
         result,
-        unmeasured=[dim("unplaced_rejected_rows", 2, "producer_failed")],
+        unmeasured=[
+            dim("unplaced_rejected_rows", 2, "producer_failed"),
+            dim("unsettled_prior_knowledge_nodes", 1, "input_missing"),
+        ],
         code="producer_failed",
         detail="prior-knowledge: not settled (producer_failed)",
     )
@@ -888,4 +906,43 @@ def edge_timing_empty() -> dict[str, Any]:
         ),
         journey_coverage=None,
         considered=0,
+    )
+
+
+def graph_with_rejected_rows() -> dict[str, Any]:
+    """A ``JourneyGraph`` (the graph route's value) with rejected rows.
+
+    Two rejected entries standing for three distinct rows: ``rowsRejected``
+    counts entries, Σ``rows`` counts rows.
+    """
+    result = {
+        "nodes": [],
+        "edges": [],
+        "rejected": [
+            {
+                "kind": "edge",
+                "row": "edge-7",
+                "reason": "fromNode: pageLabel contains '/'",
+                "rows": 2,
+            },
+            {
+                "kind": "frontier",
+                "row": f"{RUNS} fp-x",
+                "reason": "nodeKey mismatch",
+                "rows": 1,
+            },
+        ],
+        "offGraphDepartures": departures(),
+        "rejectedFrontierDoublePlaced": 0,
+        "unplacedRejectedRows": 2,
+        "unplacedRejectedFrontier": 0,
+        "unknownDestinationArrivals": 0,
+        "coverage": coverage(rowsRejected=2),
+        "filterEcho": no_filter(),
+    }
+    return envelope(
+        "graph",
+        "measured",
+        result,
+        unmeasured=[dim("unplaced_rejected_rows", 2, "producer_failed")],
     )

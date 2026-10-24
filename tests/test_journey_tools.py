@@ -214,7 +214,7 @@ def test_graph_coverage_line_carries_every_count(
     line = first_line(out)
     assert line == (
         "COVERAGE: ledger=writing | edgesObserved=12 (toNodeUnobserved 0, "
-        "filteredOut 0, withdrawn 0, rowsRejected 0) | nodes=4 (unmodelled 1) | "
+        "filteredOut 0, withdrawn 0, rowsRejected 0 entries) | nodes=4 (unmodelled 1) | "
         "frontierOpen=2 at 1 node(s) (effect_destructive 1, not_yet_activated 1) | "
         "unmeasured: frontier x2 frontier_open | "
         "filter: since=none app_version=none run_kind=none | runs=3 | "
@@ -391,7 +391,9 @@ def test_dead_ends_separate_settled_from_unexplored(
     assert unexplored_block == [
         "    console#runs: open frontier effect_write 1",
         "    unmodelled:/admin/settings: unmeasured departures: "
-        "settle_timeout_departures 1",
+        "settle_timeout_departures 1; unconfirmed destination (every observed "
+        "arrival ended settle_timeout or error - it may be an intermediate state, "
+        "not a page)",
     ]
 
 
@@ -479,14 +481,45 @@ def test_prior_knowledge_graph_doubt_in_coverage_and_causes(
         F.prior_knowledge_graph_doubt(),
     )
     line = first_line(out)
-    assert "untrustedEdgeRows=2 | unknownDestinationArrivals=1" in line
+    assert "unplacedRejectedRows=2 | unknownDestinationArrivals=1" in line
+    assert "rowsRejected 1 entry (distinct row count not in this answer)" in line
+    assert "unsettled_prior_knowledge_nodes x1 input_missing" in line
     assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (producer_failed)")
     assert "  Settled: reached only by URL" in out and "(0):\n    (none)" in out
     assert (
         "    unmodelled:/admin/settings - arrivals push 1; could still be reached "
-        "by: 2 untrusted edge row(s) in the graph (any may arrive here); 1 "
-        "click/back row(s) with an unknown destination (any may arrive here)"
+        "by: 2 rejected edge row(s) placeable at no node (any may arrive here); 3 "
+        "open frontier entries in the graph (any may be the link into it); the "
+        "ledger is not writing (a click into it may not have been recorded); 1 "
+        "click/back row(s) with an unknown destination (any may arrive here); "
+        "unconfirmed destination (no arrival ended changed or no_change - it may "
+        "be an intermediate state, not a page a URL leads to)"
     ) in out
+    assert "    2 rejected edge row(s) placeable at no node (could be anywhere)" in out
+
+
+def test_prior_knowledge_settled_and_unsettled_is_degraded_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(
+        monkeypatch,
+        "journey_requires_prior_knowledge",
+        "prior-knowledge",
+        F.prior_knowledge_measured(),
+    )
+    assert "unmeasured: unsettled_prior_knowledge_nodes x1 input_missing" in first_line(
+        out
+    )
+    assert out.splitlines()[1].startswith("ANSWER: MEASURED - 1 node(s) settled")
+    assert "[DEGRADED:" in out.splitlines()[1]
+
+
+def test_rejected_rows_sum_distinct_rows() -> None:
+    from ui_bridge_mcp.journey import JourneyAnswer, graph_coverage_line
+
+    line = graph_coverage_line(JourneyAnswer(F.graph_with_rejected_rows()), None)
+    assert "rowsRejected 2 entries = 3 distinct row(s)" in line
+    assert "unplacedRejectedRows=2" in line
 
 
 def test_graph_doubt_is_absent_from_coverage_when_zero(
@@ -498,7 +531,7 @@ def test_graph_doubt_is_absent_from_coverage_when_zero(
         "prior-knowledge",
         F.prior_knowledge_measured(),
     )
-    assert "untrustedEdgeRows" not in first_line(out)
+    assert "unplacedRejectedRows" not in first_line(out)
     assert "unknownDestinationArrivals" not in first_line(out)
 
 
@@ -680,3 +713,15 @@ def test_since_echoed_in_utc_is_the_same_filter(
         **{"from": "console#nowhere", "since": "2026-10-22T00:00:00+02:00"},
     )
     assert "FILTER NOT APPLIED AS ASKED" not in first_line(out)
+
+
+def test_frontier_listing_with_a_read_gap_is_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F._read_gap(F.frontier_measured(), "frontier")
+    out, _, _ = run(monkeypatch, "journey_frontier", "frontier", body)
+    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (input_missing)")
+    assert (
+        "  Open frontier entries in the whole graph among the rows read - NOT "
+        "complete, the read had a gap (2):"
+    ) in out

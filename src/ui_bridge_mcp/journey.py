@@ -63,7 +63,6 @@ TIMING_METRICS: tuple[str, ...] = (
 _DEPARTURE_FIELDS: tuple[tuple[str, str], ...] = (
     ("rejectedFrontier", "rejected_frontier"),
     ("settleTimeout", "settle_timeout_departures"),
-    ("rejected", "rejected_departures"),
     ("errored", "errored_departures"),
     ("filteredOut", "filtered_departures"),
     ("withdrawn", "withdrawn_departures"),
@@ -262,7 +261,27 @@ def read_gaps(answer: JourneyAnswer) -> list[Any]:
 
 # Graph-wide doubt counters (``JourneyGraph``): rows that may arrive at any
 # node. Read from wherever the answer carries them.
-_GRAPH_DOUBT_KEYS: tuple[str, ...] = ("untrustedEdgeRows", "unknownDestinationArrivals")
+_GRAPH_DOUBT_KEYS: tuple[str, ...] = (
+    "unplacedRejectedRows",
+    "unknownDestinationArrivals",
+)
+
+
+def _rejected_text(answer: JourneyAnswer) -> str:
+    """``rowsRejected`` counts ENTRIES (one per kind, row, reason); Σ``rows``
+    of ``rejected`` is the number of distinct rejected rows."""
+    entries = answer.coverage.get("rowsRejected")
+    text = f"rowsRejected {_count(entries)} entr{'y' if entries == 1 else 'ies'}"
+    listed = answer.result.get("rejected")
+    if isinstance(listed, list):
+        rows = [_dict(r).get("rows") for r in listed]
+        total = (
+            format_number(sum(rows)) if all(_is_number(n) for n in rows) else "UNKNOWN"
+        )
+        return f"{text} = {total} distinct row(s)"
+    if _is_number(entries) and entries:
+        return f"{text} (distinct row count not in this answer)"
+    return text
 
 
 def _graph_doubt(answer: JourneyAnswer) -> list[str]:
@@ -286,7 +305,7 @@ def graph_coverage_line(answer: JourneyAnswer, requested: dict[str, str] | None)
             f"(toNodeUnobserved {_count(cov.get('edgesToNodeUnobserved'))}, "
             f"filteredOut {_count(cov.get('edgesFilteredOut'))}, "
             f"withdrawn {_count(cov.get('edgesInvalidated'))}, "
-            f"rowsRejected {_count(cov.get('rowsRejected'))})"
+            f"{_rejected_text(answer)})"
         )
         parts.append(
             f"nodes={_count(cov.get('nodesObserved'))} "
@@ -432,7 +451,7 @@ def unsettled_lines(search: Any, limit: int, heading: str) -> list[str]:
     if len(nodes) > limit:
         lines.append(f"    ... and {len(nodes) - limit} more node(s) (raise `limit`)")
     for key, label in (
-        ("unplacedRejectedRows", "untrusted edge row(s) placeable at no node"),
+        ("unplacedRejectedRows", "rejected edge row(s) placeable at no node"),
         ("unplacedRejectedFrontier", "rejected frontier row(s) placeable at no node"),
     ):
         n = frontier.get(key)
@@ -629,6 +648,11 @@ def _unexplored_text(node: Any) -> str:
     departures = _departures_text(n.get("unmeasuredDepartures"))
     if departures:
         facts.append(f"unmeasured departures: {departures}")
+    if n.get("unconfirmedDestination") is True:
+        facts.append(
+            "unconfirmed destination (every observed arrival ended settle_timeout "
+            "or error - it may be an intermediate state, not a page)"
+        )
     if n.get("unsettledByGraph") is True:
         facts.append(
             "the graph as a whole cannot settle it (an unplaced untrusted row, or "
@@ -695,11 +719,22 @@ def _prior_unsettled_text(node: Any) -> str:
             causes.append(
                 f"{format_number(value)} {label} click/back arrival(s) into it"
             )
-    untrusted = n.get("untrustedEdgeRows")
+    untrusted = n.get("unplacedRejectedRows")
     if _is_number(untrusted) and untrusted:
         causes.append(
-            f"{format_number(untrusted)} untrusted edge row(s) in the graph (any may "
-            "arrive here)"
+            f"{format_number(untrusted)} rejected edge row(s) placeable at no node "
+            "(any may arrive here)"
+        )
+    open_entries = n.get("openFrontierEntries")
+    if _is_number(open_entries) and open_entries:
+        causes.append(
+            f"{format_number(open_entries)} open frontier entr"
+            f"{'y' if open_entries == 1 else 'ies'} in the graph (any may be the "
+            "link into it)"
+        )
+    if n.get("ledgerNotWriting") is True:
+        causes.append(
+            "the ledger is not writing (a click into it may not have been recorded)"
         )
     unknown_dest = n.get("unknownDestinationArrivals")
     if _is_number(unknown_dest) and unknown_dest:
@@ -707,10 +742,17 @@ def _prior_unsettled_text(node: Any) -> str:
             f"{format_number(unknown_dest)} click/back row(s) with an unknown "
             "destination (any may arrive here)"
         )
-    return (
+    text = (
         f"{n.get('nodeKey', '?')} - arrivals {_by_reason(n.get('arrivals'))}; "
-        f"could still be reached by: {'; '.join(causes) if causes else 'UNKNOWN (no cause reported)'}"
+        "could still be reached by: "
+        f"{'; '.join(causes) if causes else 'UNKNOWN (no cause reported)'}"
     )
+    if n.get("unconfirmedDestination") is True:
+        text += (
+            "; unconfirmed destination (no arrival ended changed or no_change - "
+            "it may be an intermediate state, not a page a URL leads to)"
+        )
+    return text
 
 
 def format_prior_knowledge(
@@ -791,7 +833,13 @@ def format_frontier(
             )
         entries = _list(r.get("entries"))
         if entries:
-            lines.append(f"  Open frontier entries {where} ({len(entries)}):")
+            heading = (
+                f"Open frontier entries {where} among the rows read - NOT complete, "
+                "the read had a gap"
+                if read_gaps(answer)
+                else f"Open frontier entries {where}"
+            )
+            lines.append(f"  {heading} ({len(entries)}):")
             lines.extend(_limited(entries, limit, _frontier_entry, "    "))
         return lines
 
