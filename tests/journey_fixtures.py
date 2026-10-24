@@ -555,11 +555,76 @@ def dead_ends_absent() -> dict[str, Any]:
 def prior_knowledge_measured() -> dict[str, Any]:
     result = {
         "nodes": [{"nodeKey": SETTINGS, "arrivals": {"initial": 2, "push": 1}}],
+        "unsettled": [
+            {
+                "nodeKey": "console#invite",
+                "arrivals": {"initial": 1},
+                "arrivalDoubt": {"filtered": 2, "withdrawn": 0},
+                "untrustedEdgeRows": 0,
+                "unknownDestinationArrivals": 0,
+            }
+        ],
         "frontier": search_frontier(),
         "coverage": coverage(),
         "filterEcho": {"since": None, "appVersion": "1.4.0", "runKind": "agent_action"},
     }
     return envelope("prior-knowledge", "measured", result)
+
+
+def prior_knowledge_graph_doubt() -> dict[str, Any]:
+    """Graph-wide doubt: no node settles, so the negative about the rest is unknown."""
+    result = {
+        "nodes": [],
+        "unsettled": [
+            {
+                "nodeKey": SETTINGS,
+                "arrivals": {"push": 1},
+                "arrivalDoubt": {"filtered": 0, "withdrawn": 0},
+                "untrustedEdgeRows": 2,
+                "unknownDestinationArrivals": 1,
+            }
+        ],
+        "frontier": search_frontier(unplacedRejectedRows=2),
+        "coverage": coverage(rowsRejected=2),
+        "filterEcho": no_filter(),
+    }
+    return envelope(
+        "prior-knowledge",
+        "unknown",
+        result,
+        unmeasured=[dim("unplaced_rejected_rows", 2, "producer_failed")],
+        code="producer_failed",
+        detail="prior-knowledge: not settled (producer_failed)",
+    )
+
+
+def _read_gap(body: dict[str, Any], query: str) -> dict[str, Any]:
+    """The runner's answer when its read had a gap: unknown, the gap named."""
+    cov = body["provenance"]["coverage"]
+    cov["unmeasured"] = [
+        dim("edges_beyond_read_bound_50000", 1, "input_missing"),
+        dim("rows_unparseable", 3, "producer_failed"),
+    ]
+    source = body["provenance"]["source"]
+    if body["status"] == "measured":
+        source["result"] = body.pop("value")
+    body["status"] = "unknown"
+    body["unknown"] = {
+        "code": "input_missing",
+        "detail": (
+            f"{query}: the read bound was reached (50000 edges); older edges were "
+            "not read, so a negative cannot be settled — narrow with ?since="
+        ),
+    }
+    return body
+
+
+def dead_ends_read_gap() -> dict[str, Any]:
+    return _read_gap(dead_ends_measured(), "dead-ends")
+
+
+def prior_knowledge_read_gap() -> dict[str, Any]:
+    return _read_gap(prior_knowledge_measured(), "prior-knowledge")
 
 
 def frontier_measured() -> dict[str, Any]:
@@ -756,6 +821,9 @@ def edge_timing_measured() -> dict[str, Any]:
         "edgesFilteredOut": 1,
         "edgesInvalidated": 0,
         "timelinesUnparseable": 0,
+        "rowsRejected": 0,
+        "samplesByOutcome": {"changed": 3, "settle_timeout": 1},
+        "samplesByTrigger": {"affordance": 4},
         "timing": timing,
         "ledger": copy.deepcopy(WRITING),
     }
@@ -803,6 +871,9 @@ def edge_timing_empty() -> dict[str, Any]:
         "edgesFilteredOut": 2,
         "edgesInvalidated": 1,
         "timelinesUnparseable": 0,
+        "rowsRejected": 1,
+        "samplesByOutcome": {},
+        "samplesByTrigger": {},
         "timing": timing,
         "ledger": copy.deepcopy(WRITING),
     }

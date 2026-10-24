@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 import ui_bridge_mcp.server as server_mod
+from ui_bridge_mcp.timeline import format_timeline
 
 from . import journey_fixtures as F
 from .mcp_session import answering, call, text
@@ -445,6 +446,134 @@ def test_prior_knowledge_lists_arrivals(monkeypatch: pytest.MonkeyPatch) -> None
     assert "    unmodelled:/admin/settings - arrivals initial 2, push 1" in out
 
 
+def test_prior_knowledge_unsettled_is_its_own_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(
+        monkeypatch,
+        "journey_requires_prior_knowledge",
+        "prior-knowledge",
+        F.prior_knowledge_measured(),
+    )
+    lines = out.splitlines()
+    settled = next(i for i, x in enumerate(lines) if x.startswith("  Settled: reached"))
+    unsettled = lines.index(
+        "  Unsettled - NOT prior-knowledge findings, NOT ruled out (1):"
+    )
+    assert settled < unsettled
+    assert all("console#invite" not in x for x in lines[settled:unsettled])
+    assert lines[unsettled + 1] == (
+        "    console#invite - arrivals initial 1; could still be reached by: "
+        "2 filtered out click/back arrival(s) into it"
+    )
+    assert "1 node(s) settled as reachable only with prior knowledge" in lines[1]
+
+
+def test_prior_knowledge_graph_doubt_in_coverage_and_causes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(
+        monkeypatch,
+        "journey_requires_prior_knowledge",
+        "prior-knowledge",
+        F.prior_knowledge_graph_doubt(),
+    )
+    line = first_line(out)
+    assert "untrustedEdgeRows=2 | unknownDestinationArrivals=1" in line
+    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (producer_failed)")
+    assert "  Settled: reached only by URL" in out and "(0):\n    (none)" in out
+    assert (
+        "    unmodelled:/admin/settings - arrivals push 1; could still be reached "
+        "by: 2 untrusted edge row(s) in the graph (any may arrive here); 1 "
+        "click/back row(s) with an unknown destination (any may arrive here)"
+    ) in out
+
+
+def test_graph_doubt_is_absent_from_coverage_when_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(
+        monkeypatch,
+        "journey_requires_prior_knowledge",
+        "prior-knowledge",
+        F.prior_knowledge_measured(),
+    )
+    assert "untrustedEdgeRows" not in first_line(out)
+    assert "unknownDestinationArrivals" not in first_line(out)
+
+
+def test_prior_knowledge_without_unsettled_list_says_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.prior_knowledge_measured()
+    del body["value"]["unsettled"]
+    out, _, _ = run(
+        monkeypatch, "journey_requires_prior_knowledge", "prior-knowledge", body
+    )
+    assert "  Unsettled: UNKNOWN (the answer carried no `unsettled` list" in out
+
+
+@pytest.mark.parametrize(
+    ("tool", "route", "body", "heading"),
+    [
+        (
+            "journey_dead_ends",
+            "dead-ends",
+            F.dead_ends_read_gap(),
+            "  Dead ends among the rows read - NOT settled, the read had a gap (3):",
+        ),
+        (
+            "journey_requires_prior_knowledge",
+            "prior-knowledge",
+            F.prior_knowledge_read_gap(),
+            "  Reached only by URL among the rows read - NOT settled, the read had "
+            "a gap (1):",
+        ),
+    ],
+)
+def test_read_gap_is_unknown_with_the_gap_named(
+    monkeypatch: pytest.MonkeyPatch, tool: str, route: str, body: Any, heading: str
+) -> None:
+    out, is_error, _ = run(monkeypatch, tool, route, body)
+    assert not is_error
+    lines = out.splitlines()
+    assert (
+        "unmeasured: edges_beyond_read_bound_50000 x1 input_missing; "
+        "rows_unparseable x3 producer_failed"
+    ) in lines[0]
+    assert lines[1].startswith("ANSWER: UNKNOWN (input_missing) - NOT a negative")
+    assert lines[2] == (
+        "  Read gap: edges_beyond_read_bound_50000 x1 input_missing; "
+        "rows_unparseable x3 producer_failed - the ledger was not read in full, so "
+        "nothing below is settled (narrow with `since`)."
+    )
+    assert heading in lines
+    assert "Settled dead ends" not in out
+    assert "MEASURED" not in out
+
+
+def test_timeline_network_event_with_null_url_renders() -> None:
+    timeline = {
+        "recordedMs": 900,
+        "settled": True,
+        "summary": None,
+        "observedSources": ["network"],
+        "events": [
+            {"type": "action", "offsetMs": 0},
+            {
+                "type": "network-request-started",
+                "offsetMs": 5,
+                "requestId": None,
+                "method": "GET",
+                "url": None,
+                "hasQuery": False,
+            },
+        ],
+    }
+    lines = format_timeline(timeline, expected_state_ids=None)
+    assert lines[-1] == "    events: 2 (action 1, network-request-started 1)"
+
+
 def test_frontier_lists_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     out, _, runner = run(
         monkeypatch, "journey_frontier", "frontier", F.frontier_measured(), node=F.RUNS
@@ -487,7 +616,8 @@ def test_edge_timing_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not is_error
     assert first_line(out) == (
         "COVERAGE: ledger=writing | n=4 (withoutTimeline 1, timelinesUnparseable 0; "
-        "excluded: filteredOut 1, withdrawn 0) | unmeasured: timeline x1 "
+        "excluded: filteredOut 1, withdrawn 0, rowsRejected 0) | pooled: by outcome "
+        "changed 3, settle_timeout 1; by trigger affordance 4 | unmeasured: timeline x1 "
         "input_missing | filter: since=none app_version=none run_kind=none | "
         "observation window: 2026-10-21T10:00:00Z .. 2026-10-24T10:00:00Z | "
         "appVersions=[1.4.0]"
@@ -523,7 +653,8 @@ def test_edge_timing_n_zero_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not is_error
     line = first_line(out)
     assert (
-        "n=0 (withoutTimeline 0, timelinesUnparseable 0; excluded: filteredOut 2, withdrawn 1)"
+        "n=0 (withoutTimeline 0, timelinesUnparseable 0; excluded: filteredOut 2, "
+        "withdrawn 1, rowsRejected 1) | pooled: by outcome none; by trigger none"
         in line
     )
     assert "observation window: none (no observation)" in line

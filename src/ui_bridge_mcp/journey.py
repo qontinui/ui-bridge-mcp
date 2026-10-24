@@ -238,6 +238,44 @@ def _by_reason(counts: Any, *, nonzero_only: bool = True) -> str:
     return ", ".join(parts) if parts else "none"
 
 
+# ``provenance.coverage.unmeasured`` dimensions the runner adds for a gap in
+# its own READ of the ledger (``routes.rs`` ``ReadGaps::dimensions``), as
+# opposed to a gap in the graph: a truncated edge or frontier read, or rows
+# that did not parse. Any listed item may be wrong when one is present.
+_READ_GAP_PREFIXES: tuple[str, ...] = (
+    "edges_beyond_read_bound_",
+    "frontier_beyond_read_bound_",
+    "rows_unparseable",
+)
+
+
+def read_gaps(answer: JourneyAnswer) -> list[Any]:
+    """The unmeasured entries that name a gap in the ledger read itself."""
+    return [
+        d
+        for d in answer.unmeasured or []
+        if isinstance(d, dict)
+        and isinstance(d.get("dimension"), str)
+        and d["dimension"].startswith(_READ_GAP_PREFIXES)
+    ]
+
+
+# Graph-wide doubt counters (``JourneyGraph``): rows that may arrive at any
+# node. Read from wherever the answer carries them.
+_GRAPH_DOUBT_KEYS: tuple[str, ...] = ("untrustedEdgeRows", "unknownDestinationArrivals")
+
+
+def _graph_doubt(answer: JourneyAnswer) -> list[str]:
+    holders = [answer.coverage, answer.result]
+    holders += [_dict(u) for u in _list(answer.result.get("unsettled"))[:1]]
+    parts = []
+    for key in _GRAPH_DOUBT_KEYS:
+        value = next((h[key] for h in holders if key in h), None)
+        if _is_number(value) and value:
+            parts.append(f"{key}={format_number(value)}")
+    return parts
+
+
 def graph_coverage_line(answer: JourneyAnswer, requested: dict[str, str] | None) -> str:
     """The one-line COVERAGE header of a graph-backed answer."""
     cov = answer.coverage
@@ -259,6 +297,7 @@ def graph_coverage_line(answer: JourneyAnswer, requested: dict[str, str] | None)
             f"at {_count(cov.get('frontierNodes'))} node(s) "
             f"({_by_reason(cov.get('frontierByReason'))})"
         )
+        parts.extend(_graph_doubt(answer))
     else:
         parts.append(
             "edgesObserved=UNKNOWN nodes=UNKNOWN frontierOpen=UNKNOWN (no counts: "
@@ -432,12 +471,24 @@ def _render(
             answer, positive=positive(answer), negative=negative, not_this=not_this
         ),
     ]
+    lines.extend(_gap_lines(answer))
     lines.extend(details(answer))
     if not answer.settled:
         lines.extend(
             unsettled_lines(answer.result.get("frontier"), limit, _SETTLE_HEADING)
         )
     return "\n".join(lines)
+
+
+def _gap_lines(answer: JourneyAnswer) -> list[str]:
+    """Name a gap in the ledger READ, which no exploration can settle."""
+    gaps = read_gaps(answer)
+    if not gaps:
+        return []
+    return [
+        f"  Read gap: {'; '.join(format_unmeasured(gaps))} - the ledger was not "
+        "read in full, so nothing below is settled (narrow with `since`)."
+    ]
 
 
 def _ledger_unknown_lines(answer: JourneyAnswer) -> list[str]:
@@ -593,7 +644,12 @@ def format_dead_ends(body: Any, requested: dict[str, str] | None, limit: int) ->
             return _ledger_unknown_lines(answer)
         dead = _list(r.get("deadEnds"))
         unexplored = _list(r.get("unexplored"))
-        lines = [f"  Settled dead ends ({len(dead)}):"]
+        heading = (
+            "Dead ends among the rows read - NOT settled, the read had a gap"
+            if read_gaps(answer)
+            else "Settled dead ends"
+        )
+        lines = [f"  {heading} ({len(dead)}):"]
         if dead:
             lines.extend(
                 _limited(
@@ -629,6 +685,34 @@ def format_dead_ends(body: Any, requested: dict[str, str] | None, limit: int) ->
     )
 
 
+def _prior_unsettled_text(node: Any) -> str:
+    n = _dict(node)
+    causes = []
+    doubt = _dict(n.get("arrivalDoubt"))
+    for key, label in (("filtered", "filtered out"), ("withdrawn", "withdrawn")):
+        value = doubt.get(key)
+        if _is_number(value) and value:
+            causes.append(
+                f"{format_number(value)} {label} click/back arrival(s) into it"
+            )
+    untrusted = n.get("untrustedEdgeRows")
+    if _is_number(untrusted) and untrusted:
+        causes.append(
+            f"{format_number(untrusted)} untrusted edge row(s) in the graph (any may "
+            "arrive here)"
+        )
+    unknown_dest = n.get("unknownDestinationArrivals")
+    if _is_number(unknown_dest) and unknown_dest:
+        causes.append(
+            f"{format_number(unknown_dest)} click/back row(s) with an unknown "
+            "destination (any may arrive here)"
+        )
+    return (
+        f"{n.get('nodeKey', '?')} - arrivals {_by_reason(n.get('arrivals'))}; "
+        f"could still be reached by: {'; '.join(causes) if causes else 'UNKNOWN (no cause reported)'}"
+    )
+
+
 def format_prior_knowledge(
     body: Any, requested: dict[str, str] | None, limit: int
 ) -> str:
@@ -637,26 +721,45 @@ def format_prior_knowledge(
         if not r:
             return _ledger_unknown_lines(answer)
         nodes = _list(r.get("nodes"))
-        if not nodes:
-            return []
-        lines = [
-            "  Reached only by URL (initial/push/replace/hash), never by an "
-            f"affordance or back from another node ({len(nodes)}):"
-        ]
-        lines.extend(
-            _limited(
-                nodes,
-                limit,
-                lambda n: f"{_dict(n).get('nodeKey', '?')} - arrivals "
-                f"{_by_reason(_dict(n).get('arrivals'))}",
-                "    ",
-            )
+        unsettled = _list(r.get("unsettled"))
+        settled_heading = (
+            "Reached only by URL among the rows read - NOT settled, the read had a gap"
+            if read_gaps(answer)
+            else "Settled: reached only by URL (initial/push/replace/hash), never "
+            "by an affordance or back from another node"
         )
+        lines = [f"  {settled_heading} ({len(nodes)}):"]
+        if nodes:
+            lines.extend(
+                _limited(
+                    nodes,
+                    limit,
+                    lambda n: f"{_dict(n).get('nodeKey', '?')} - arrivals "
+                    f"{_by_reason(_dict(n).get('arrivals'))}",
+                    "    ",
+                )
+            )
+        else:
+            lines.append("    (none)")
+        if "unsettled" not in r:
+            lines.append(
+                "  Unsettled: UNKNOWN (the answer carried no `unsettled` list, so "
+                "the listed nodes cannot be told apart from doubtful ones)"
+            )
+            return lines
+        lines.append(
+            "  Unsettled - NOT prior-knowledge findings, NOT ruled out "
+            f"({len(unsettled)}):"
+        )
+        if unsettled:
+            lines.extend(_limited(unsettled, limit, _prior_unsettled_text, "    "))
+        else:
+            lines.append("    (none)")
         return lines
 
     def positive(answer: JourneyAnswer) -> str:
         return (
-            f"{len(_list(answer.result.get('nodes')))} node(s) observed reachable "
+            f"{len(_list(answer.result.get('nodes')))} node(s) settled as reachable "
             "only with prior knowledge (a URL)"
         )
 
@@ -754,7 +857,12 @@ def timing_coverage_line(
             f"(withoutTimeline {_count(timing.get('withoutTimeline'))}, "
             f"timelinesUnparseable {_count(r.get('timelinesUnparseable'))}; "
             f"excluded: filteredOut {_count(r.get('edgesFilteredOut'))}, "
-            f"withdrawn {_count(r.get('edgesInvalidated'))})"
+            f"withdrawn {_count(r.get('edgesInvalidated'))}, "
+            f"rowsRejected {_count(r.get('rowsRejected'))})"
+        )
+        parts.append(
+            f"pooled: by outcome {_by_reason(r.get('samplesByOutcome'))}; "
+            f"by trigger {_by_reason(r.get('samplesByTrigger'))}"
         )
     else:
         parts.append(
@@ -846,6 +954,7 @@ def format_edge_timing(
             ),
         ),
     ]
+    lines.extend(_gap_lines(answer))
     if not timing:
         lines.extend(_ledger_unknown_lines(answer))
         return "\n".join(lines)
