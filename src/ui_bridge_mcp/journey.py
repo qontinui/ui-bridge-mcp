@@ -174,6 +174,10 @@ def _unmeasured_text(answer: JourneyAnswer) -> str:
     if unmeasured is None:
         return "unmeasured: UNKNOWN (the answer did not report what it left out)"
     if not unmeasured:
+        if answer.status == "unknown" and not answer.result:
+            # A read that could not be made (schema absent, read failure)
+            # reports no gaps because it looked at nothing.
+            return "unmeasured: none reported (the ledger was not read)"
         return "unmeasured: none"
     return f"unmeasured: {'; '.join(format_unmeasured(unmeasured))}"
 
@@ -506,7 +510,7 @@ def _gap_lines(answer: JourneyAnswer) -> list[str]:
         return []
     return [
         f"  Read gap: {'; '.join(format_unmeasured(gaps))} - the ledger was not "
-        "read in full, so nothing below is settled (narrow with `since`)."
+        "read in full, so nothing below is settled."
     ]
 
 
@@ -661,6 +665,11 @@ def _unexplored_text(node: Any) -> str:
     return f"{n.get('nodeKey', '?')}: {'; '.join(facts) if facts else 'unsettled'}"
 
 
+def _no_edges(answer: JourneyAnswer) -> bool:
+    """The graph was built over no edge: empty lists there say nothing."""
+    return answer.coverage.get("edgesObserved") == 0
+
+
 def format_dead_ends(body: Any, requested: dict[str, str] | None, limit: int) -> str:
     def details(answer: JourneyAnswer) -> list[str]:
         r = answer.result
@@ -668,6 +677,8 @@ def format_dead_ends(body: Any, requested: dict[str, str] | None, limit: int) ->
             return _ledger_unknown_lines(answer)
         dead = _list(r.get("deadEnds"))
         unexplored = _list(r.get("unexplored"))
+        if _no_edges(answer) and not dead and not unexplored:
+            return []
         heading = (
             "Dead ends among the rows read - NOT settled, the read had a gap"
             if read_gaps(answer)
@@ -764,6 +775,8 @@ def format_prior_knowledge(
             return _ledger_unknown_lines(answer)
         nodes = _list(r.get("nodes"))
         unsettled = _list(r.get("unsettled"))
+        if _no_edges(answer) and not nodes and not unsettled:
+            return []
         settled_heading = (
             "Reached only by URL among the rows read - NOT settled, the read had a gap"
             if read_gaps(answer)

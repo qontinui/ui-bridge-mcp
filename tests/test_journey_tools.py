@@ -483,8 +483,16 @@ def test_prior_knowledge_graph_doubt_in_coverage_and_causes(
     line = first_line(out)
     assert "unplacedRejectedRows=2 | unknownDestinationArrivals=1" in line
     assert "rowsRejected 1 entry (distinct row count not in this answer)" in line
-    assert "unsettled_prior_knowledge_nodes x1 input_missing" in line
-    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (producer_failed)")
+    # The coverage agrees with the unsettled node's ledgerNotWriting and
+    # openFrontierEntries, and the leading `ledger` dimension sets the code.
+    assert line.startswith("COVERAGE: ledger=write_failing (")
+    assert "frontierOpen=3 at 1 node(s)" in line
+    assert (
+        "unmeasured: ledger x1 ledger_write_failing; frontier x3 frontier_open; "
+        "unplaced_rejected_rows x2 producer_failed; unsettled_prior_knowledge_nodes "
+        "x1 input_missing"
+    ) in line
+    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (ledger_write_failing)")
     assert "  Settled: reached only by URL" in out and "(0):\n    (none)" in out
     assert (
         "    unmodelled:/admin/settings - arrivals push 1; could still be reached "
@@ -547,13 +555,17 @@ def test_prior_knowledge_without_unsettled_list_says_unknown(
 
 
 @pytest.mark.parametrize(
-    ("tool", "route", "body", "heading"),
+    ("tool", "route", "body", "heading", "code", "before", "after"),
     [
         (
             "journey_dead_ends",
             "dead-ends",
             F.dead_ends_read_gap(),
             "  Dead ends among the rows read - NOT settled, the read had a gap (3):",
+            "frontier_open",
+            "frontier x1 frontier_open; settle_timeout_departures x1 "
+            "no_event_before_timeout; ",
+            "; unexplored_nodes x2 input_missing",
         ),
         (
             "journey_requires_prior_knowledge",
@@ -561,25 +573,49 @@ def test_prior_knowledge_without_unsettled_list_says_unknown(
             F.prior_knowledge_read_gap(),
             "  Reached only by URL among the rows read - NOT settled, the read had "
             "a gap (1):",
+            "input_missing",
+            "",
+            "; unsettled_prior_knowledge_nodes x1 input_missing",
+        ),
+        (
+            "journey_frontier",
+            "frontier",
+            F._read_gap(F.frontier_measured(), "frontier"),
+            "  Open frontier entries in the whole graph among the rows read - NOT "
+            "complete, the read had a gap (2):",
+            "frontier_open",
+            "frontier x2 frontier_open; ",
+            " | filter:",
         ),
     ],
 )
 def test_read_gap_is_unknown_with_the_gap_named(
-    monkeypatch: pytest.MonkeyPatch, tool: str, route: str, body: Any, heading: str
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    route: str,
+    body: Any,
+    heading: str,
+    code: str,
+    before: str,
+    after: str,
 ) -> None:
+    """The base answer's own dimensions are kept, the read's gaps follow them
+    and the route's extra dimension comes last (routes.rs ``answer``); the
+    code is the first dimension's."""
     out, is_error, _ = run(monkeypatch, tool, route, body)
     assert not is_error
     lines = out.splitlines()
-    assert (
-        "unmeasured: edges_beyond_read_bound_50000 x1 input_missing; "
+    gap = (
+        "edges_beyond_read_bound_50000 x1 input_missing; "
         "rows_unparseable x3 producer_failed"
-    ) in lines[0]
-    assert lines[1].startswith("ANSWER: UNKNOWN (input_missing) - NOT a negative")
-    assert lines[2] == (
-        "  Read gap: edges_beyond_read_bound_50000 x1 input_missing; "
-        "rows_unparseable x3 producer_failed - the ledger was not read in full, so "
-        "nothing below is settled (narrow with `since`)."
     )
+    assert f"unmeasured: {before}{gap}{after}" in lines[0]
+    assert lines[1].startswith(f"ANSWER: UNKNOWN ({code}) - NOT a negative")
+    assert lines[2] == (
+        f"  Read gap: {gap} - the ledger was not read in full, so nothing below "
+        "is settled."
+    )
+    assert "since" not in lines[1] + lines[2]
     assert heading in lines
     assert "Settled dead ends" not in out
     assert "MEASURED" not in out
@@ -687,9 +723,10 @@ def test_edge_timing_n_zero_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     line = first_line(out)
     assert (
         "n=0 (withoutTimeline 0, timelinesUnparseable 0; excluded: filteredOut 2, "
-        "withdrawn 1, rowsRejected 1) | pooled: by outcome none; by trigger none"
+        "withdrawn 1, rowsRejected 0) | pooled: by outcome none; by trigger none"
         in line
     )
+    assert "unmeasured: none |" in line
     assert "observation window: none (no observation)" in line
     answer = out.splitlines()[1]
     assert answer.startswith("ANSWER: UNKNOWN (no_observations) - NOT a negative")
@@ -715,13 +752,58 @@ def test_since_echoed_in_utc_is_the_same_filter(
     assert "FILTER NOT APPLIED AS ASKED" not in first_line(out)
 
 
-def test_frontier_listing_with_a_read_gap_is_not_complete(
+def test_edge_timing_rejected_rows_set_the_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    body = F._read_gap(F.frontier_measured(), "frontier")
-    out, _, _ = run(monkeypatch, "journey_frontier", "frontier", body)
-    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (input_missing)")
+    out, _, _ = run(
+        monkeypatch,
+        "journey_edge_timing",
+        "edge-timing",
+        F.edge_timing_rejected(),
+        **{"from": F.HOME, "to": F.SETTINGS, "since": "2026-10-23T00:00:00Z"},
+    )
+    line = first_line(out)
+    assert "withdrawn 1, rowsRejected 1)" in line
     assert (
-        "  Open frontier entries in the whole graph among the rows read - NOT "
-        "complete, the read had a gap (2):"
-    ) in out
+        "unmeasured: rows_rejected x1 producer_failed; unplaced_rejected_rows x4 "
+        "producer_failed"
+    ) in line
+    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (producer_failed)")
+
+
+def test_missing_unmeasured_is_unknown_not_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.steps_measured()
+    del body["provenance"]["coverage"]["unmeasured"]
+    out, _, _ = run(
+        monkeypatch,
+        "journey_steps_to",
+        "steps",
+        body,
+        **{"from": F.HOME, "to": F.RUN_DETAIL},
+    )
+    line = first_line(out)
+    assert "unmeasured: UNKNOWN (the answer did not report what it left out)" in line
+    assert "unmeasured: none" not in line
+    # Not reported is not settled: the measured answer is marked degraded.
+    assert "[DEGRADED:" in out.splitlines()[1]
+
+
+@pytest.mark.parametrize(
+    "body", [F.read_failed("dead-ends"), F.schema_absent("dead-ends")]
+)
+def test_unread_ledger_reports_no_gaps_as_not_read(
+    monkeypatch: pytest.MonkeyPatch, body: Any
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_dead_ends", "dead-ends", body)
+    assert "unmeasured: none reported (the ledger was not read)" in first_line(out)
+
+
+def test_empty_ledger_hides_empty_lists(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, _, _ = run(
+        monkeypatch, "journey_dead_ends", "dead-ends", F.empty_ledger("dead-ends")
+    )
+    assert "Settled dead ends" not in out
+    assert "Unexplored or unsettled" not in out
+    assert "(none)" not in out.split("\n", 1)[1]

@@ -40,6 +40,10 @@ WRITING = {
     "state": "writing",
     "detail": "journey tables present; 12 edge(s) written by this process",
 }
+WRITE_FAILING = {
+    "state": "write_failing",
+    "detail": "3 of the last 50 journey writes failed; last error: pool timed out",
+}
 SCHEMA_ABSENT = {
     "state": "schema_absent",
     "detail": "embedded DB predates the journey tables",
@@ -497,6 +501,9 @@ def dead_ends_measured() -> dict[str, Any]:
         unmeasured=[
             dim("frontier", 1, "frontier_open"),
             dim("settle_timeout_departures", 1, "no_event_before_timeout"),
+            # routes.rs answer_dead_ends: a non-empty `unexplored` degrades
+            # the listing.
+            dim("unexplored_nodes", 2, "input_missing"),
         ],
     )
 
@@ -532,9 +539,16 @@ def dead_ends_unknown_unexplored() -> dict[str, Any]:
         "dead-ends",
         "unknown",
         result,
-        unmeasured=[dim("frontier", 1, "frontier_open")],
+        unmeasured=[
+            dim("frontier", 1, "frontier_open"),
+            dim("unexplored_nodes", 1, "input_missing"),
+        ],
         code="frontier_open",
-        detail="dead-ends: the searched part of the graph has 1 open frontier entry",
+        detail=(
+            "dead-ends: 1 open frontier entry (affordances seen and never "
+            "activated) in the searched part; they are listed in "
+            "provenance.source.result"
+        ),
     )
 
 
@@ -599,39 +613,86 @@ def prior_knowledge_graph_doubt() -> dict[str, Any]:
                 "unconfirmedDestination": True,
             }
         ],
-        "frontier": search_frontier(unplacedRejectedRows=2),
-        "coverage": coverage(rowsRejected=1),
+        "frontier": search_frontier(
+            [
+                search_node(
+                    RUNS,
+                    [
+                        frontier_entry(RUNS, "fp-a"),
+                        frontier_entry(RUNS, "fp-b"),
+                        frontier_entry(RUNS, "fp-c"),
+                    ],
+                )
+            ],
+            unplacedRejectedRows=2,
+        ),
+        "coverage": coverage(
+            rowsRejected=1,
+            frontierOpen=3,
+            frontierNodes=1,
+            ledger=copy.deepcopy(WRITE_FAILING),
+        ),
         "filterEcho": no_filter(),
     }
+    result["coverage"]["frontierByReason"]["not_yet_activated"] = 3
+    # JourneySearchFrontier::unmeasured order (ledger, frontier, ...,
+    # unplaced_rejected_rows), then the route's extra dimension.
     return envelope(
         "prior-knowledge",
         "unknown",
         result,
         unmeasured=[
+            dim("ledger", 1, "ledger_write_failing"),
+            dim("frontier", 3, "frontier_open"),
             dim("unplaced_rejected_rows", 2, "producer_failed"),
             dim("unsettled_prior_knowledge_nodes", 1, "input_missing"),
         ],
-        code="producer_failed",
-        detail="prior-knowledge: not settled (producer_failed)",
+        code="ledger_write_failing",
+        detail=(
+            "prior-knowledge: the journey ledger is not being written, so a negative "
+            "over it could describe a stale graph as a finished one (see "
+            "provenance.coverage.ledger)"
+        ),
     )
+
+
+_ROUTE_EXTRA_DIMENSIONS = frozenset(
+    {"unexplored_nodes", "unsettled_prior_knowledge_nodes"}
+)
 
 
 def _read_gap(body: dict[str, Any], query: str) -> dict[str, Any]:
     """The runner's answer when its read had a gap: unknown, the gap named."""
     cov = body["provenance"]["coverage"]
-    cov["unmeasured"] = [
+    # routes.rs `answer`: the shared search-frontier dimensions, then the
+    # read's gaps, then the route's extra dimensions; the code is the first.
+    base = cov["unmeasured"]
+    extra = [d for d in base if d["dimension"] in _ROUTE_EXTRA_DIMENSIONS]
+    shared = [d for d in base if d["dimension"] not in _ROUTE_EXTRA_DIMENSIONS]
+    gaps = [
         dim("edges_beyond_read_bound_50000", 1, "input_missing"),
         dim("rows_unparseable", 3, "producer_failed"),
     ]
+    cov["unmeasured"] = shared + gaps + extra
+    first = cov["unmeasured"][0]
     source = body["provenance"]["source"]
     if body["status"] == "measured":
         source["result"] = body.pop("value")
     body["status"] = "unknown"
+    details = {
+        "frontier": f"{query}: {first['count']} open frontier "
+        f"entr{'y' if first['count'] == 1 else 'ies'} (affordances "
+        "seen and never activated) in the searched part; they are listed in "
+        "provenance.source.result",
+        "edges_beyond_read_bound_50000": f"{query}: the read bound was reached "
+        "(50000 edges, newest first); older edges were not read",
+    }
     body["unknown"] = {
-        "code": "input_missing",
-        "detail": (
-            f"{query}: the read bound was reached (50000 edges); older edges were "
-            "not read, so a negative cannot be settled — narrow with ?since="
+        "code": first["code"],
+        "detail": details.get(
+            first["dimension"],
+            f"{query}: {first['count']} {first['dimension']} not measured "
+            f"({first['code']})",
         ),
     }
     return body
@@ -889,7 +950,7 @@ def edge_timing_empty() -> dict[str, Any]:
         "edgesFilteredOut": 2,
         "edgesInvalidated": 1,
         "timelinesUnparseable": 0,
-        "rowsRejected": 1,
+        "rowsRejected": 0,
         "samplesByOutcome": {},
         "samplesByTrigger": {},
         "timing": timing,
@@ -946,3 +1007,24 @@ def graph_with_rejected_rows() -> dict[str, Any]:
         result,
         unmeasured=[dim("unplaced_rejected_rows", 2, "producer_failed")],
     )
+
+
+def edge_timing_rejected() -> dict[str, Any]:
+    """n=0 with a rejected row of the pair: the code comes from `rows_rejected`.
+
+    ``answer_edge_timing``: ``rows_rejected`` (rows of this pair that fail the
+    shared trust rule), then every untrusted row in the read as
+    ``unplaced_rejected_rows``; the code is the first dimension's.
+    """
+    body = edge_timing_empty()
+    value = body["provenance"]["source"]["result"]
+    value["rowsRejected"] = 1
+    body["provenance"]["coverage"]["unmeasured"] = [
+        dim("rows_rejected", 1, "producer_failed"),
+        dim("unplaced_rejected_rows", 4, "producer_failed"),
+    ]
+    body["unknown"] = {
+        "code": "producer_failed",
+        "detail": "edge-timing: 1 rows_rejected not measured (producer_failed)",
+    }
+    return body
