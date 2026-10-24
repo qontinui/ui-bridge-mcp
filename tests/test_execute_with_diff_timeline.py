@@ -592,3 +592,39 @@ def test_request_docstring_names_the_sdk_type() -> None:
     doc = server._execute_with_diff_request.__doc__ or ""
     assert "ActionWithDiffRequest" in doc
     assert "ActionDiffRequest" not in doc
+
+
+# =============================================================================
+# The element action's value travels in elementAction.params
+# =============================================================================
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+@pytest.mark.parametrize(
+    ("action", "key"), [("type", "text"), ("setValue", "value"), ("select", "value")]
+)
+def test_value_is_sent_as_the_param_the_sdk_action_reads(
+    monkeypatch: pytest.MonkeyPatch, tool: str, action: str, key: str
+) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    call(tool, {"element_id": "name", "action": action, "value": "Ada"})
+    (body,) = runner.bodies(route)
+    assert body["elementAction"] == {
+        "elementId": "name",
+        "action": action,
+        "params": {key: "Ada"},
+    }
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_no_value_sends_no_params(monkeypatch: pytest.MonkeyPatch, tool: str) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    call(tool, {"element_id": "save", "action": "click"})
+    (body,) = runner.bodies(route)
+    assert body["elementAction"] == {"elementId": "save", "action": "click"}

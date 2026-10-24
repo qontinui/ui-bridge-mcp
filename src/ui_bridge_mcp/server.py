@@ -594,7 +594,10 @@ _EXECUTE_WITH_DIFF_SCHEMA: dict[str, Any] = {
         },
         "value": {
             "type": "string",
-            "description": "Value for type/setValue actions",
+            "description": (
+                "Value for type/setValue/select actions (sent as "
+                "elementAction.params.text for type, params.value otherwise)"
+            ),
         },
         "settle_timeout": {
             "type": "integer",
@@ -642,6 +645,18 @@ _EXECUTE_WITH_DIFF_SCHEMA: dict[str, Any] = {
 }
 
 
+def _element_action_value_key(action: str) -> str:
+    """The ``elementAction.params`` key an action's value travels under.
+
+    ``ActionWithDiffRequest.elementAction`` is ``{elementId, action, params?}``
+    and only ``params`` reaches the action. ``type`` reads ``params.text``
+    (``control/types.ts`` ``TypeAction``; the relay spreads params into its
+    request and reads ``request.text``); ``setValue`` and ``select`` read
+    ``params.value`` (``action-executor.ts`` performSetValue, ``SelectAction``).
+    """
+    return "text" if action == "type" else "value"
+
+
 def _execute_with_diff_request(
     element_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any]:
@@ -662,8 +677,10 @@ def _execute_with_diff_request(
         "timeline": arguments.get("timeline", True) is not False,
     }
     value = arguments.get("value")
-    if value:
-        body["elementAction"]["value"] = value
+    if value is not None:
+        body["elementAction"]["params"] = {
+            _element_action_value_key(arguments["action"]): value
+        }
     if arguments.get("timeline_interval") is not None:
         body["timelineInterval"] = arguments["timeline_interval"]
     if arguments.get("expect_states") is not None:
