@@ -202,16 +202,26 @@ def _expected_states_lines(
             ]
         return ["    expectedStates: none requested"]
     lines = ["    expectedStates:"]
-    answered: set[str] = set()
+    # Answered entries by id, in answer order: a multiset, so a requested id
+    # repeated twice needs two answers.
+    pending: dict[str, list[Any]] = {}
     for entry in expected:
         result = entry if isinstance(entry, dict) else {}
-        state_id = result.get("stateId", "?")
-        answered.add(str(state_id))
+        pending.setdefault(str(result.get("stateId", "?")), []).append(result)
+
+    def _line(state_id: str, result: dict[str, Any]) -> str:
         outcome = render_observation(result.get("outcome"), _expected_outcome_value)
-        lines.append(f"      {state_id}: {outcome}")
+        return f"      {state_id}: {outcome}"
+
+    # Requested ids first, in request order; then any answer nobody requested.
     for state_id in requested_ids or ():
-        if state_id not in answered:
+        answers = pending.get(state_id)
+        if answers:
+            lines.append(_line(state_id, answers.pop(0)))
+        else:
             lines.append(f"      {state_id}: UNKNOWN (requested, not answered)")
+    for state_id, answers in pending.items():
+        lines.extend(_line(state_id, result) for result in answers)
     return lines
 
 

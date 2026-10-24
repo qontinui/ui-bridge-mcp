@@ -595,9 +595,9 @@ _EXECUTE_WITH_DIFF_SCHEMA: dict[str, Any] = {
         "value": {
             "type": "string",
             "description": (
-                "Value for type/setValue/select actions only (sent as "
-                "elementAction.params.text for type, params.value for "
-                "setValue/select); refused on any other action"
+                "Value for type/setValue/select or a registered custom action "
+                "(sent as elementAction.params.text for type, params.value "
+                "otherwise); refused on built-in actions that read no value"
             ),
         },
         "settle_timeout": {
@@ -654,15 +654,52 @@ def _element_action_value_key(action: str) -> str:
     (``control/types.ts`` ``TypeAction``; the relay spreads params into its
     request and reads ``request.text``); ``setValue`` and ``select`` read
     ``params.value`` (``action-executor.ts`` performSetValue, ``SelectAction``).
+    Any other name (a registered custom action, which receives the whole
+    params object) gets ``params.value``.
     """
     return "text" if action == "type" else "value"
 
 
-# The element actions that take this tool's ``value`` (see
-# ``_element_action_value_key``). Any other action reads other params (e.g.
-# ``sendKeys`` reads ``keys``/``text``), so a value on it is refused rather than
-# silently sent where the action never reads it.
+# The built-in element actions that take this tool's ``value`` (see
+# ``_element_action_value_key``).
 VALUE_ACTIONS: tuple[str, ...] = ("type", "setValue", "select")
+
+# The SDK's built-in element actions that read NO value: the built-in switch in
+# ui-bridge ``control/action-executor.ts`` performAction, minus VALUE_ACTIONS.
+# A ``value`` on one of these is refused rather than sent where the built-in
+# never reads it (a silent no-op reported as success). Any other name is a
+# registered custom action, which receives the whole params object, so its
+# value is passed through as ``params.value``.
+#
+# An element may register a custom action under a built-in name, and its
+# handler then runs instead of the built-in. These names are still refused,
+# and the error says the refusal is about the built-in: this tool can only send
+# ``params.value``, and the one such override in the fleet (the runner
+# terminal's ``sendKeys``, ``TerminalInstance.tsx``) reads ``params.keys``, so
+# passing the value through would be a silent no-op too.
+BUILTIN_ACTIONS_WITHOUT_VALUE: frozenset[str] = frozenset(
+    {
+        "click",
+        "hoverClick",
+        "doubleClick",
+        "rightClick",
+        "middleClick",
+        "sendKeys",
+        "clear",
+        "focus",
+        "blur",
+        "hover",
+        "scroll",
+        "scrollIntoView",
+        "check",
+        "uncheck",
+        "toggle",
+        "drag",
+        "autocomplete",
+        "submit",
+        "reset",
+    }
+)
 
 
 def _execute_with_diff_request(
@@ -670,8 +707,8 @@ def _execute_with_diff_request(
 ) -> dict[str, Any] | str:
     """The ``ActionWithDiffRequest`` body (ui-bridge ``ai/types.ts``) for a tool call.
 
-    Returns an error message instead when ``value`` is given for an action
-    outside ``VALUE_ACTIONS``.
+    Returns an error message instead when ``value`` is given for a built-in
+    action in ``BUILTIN_ACTIONS_WITHOUT_VALUE``.
 
     ``timeline`` is always sent, so the tool's default (on) does not depend on
     the producer's. ``expectStates`` / ``withinMs`` are forwarded as given; the
@@ -689,10 +726,12 @@ def _execute_with_diff_request(
     }
     value = arguments.get("value")
     if value is not None:
-        if arguments["action"] not in VALUE_ACTIONS:
+        if arguments["action"] in BUILTIN_ACTIONS_WITHOUT_VALUE:
             return (
-                f"'value' is not read by the {arguments['action']!r} action; only "
-                f"{', '.join(VALUE_ACTIONS)} take a value. Drop 'value' for "
+                f"'value' is not read by the built-in {arguments['action']!r} "
+                f"action; of the built-ins only {', '.join(VALUE_ACTIONS)} take "
+                "a value. A custom action registered under this name would also "
+                "receive only params.value from this tool. Drop 'value' for "
                 "this action."
             )
         body["elementAction"]["params"] = {
@@ -717,6 +756,7 @@ def _expected_state_ids(request_body: dict[str, Any]) -> list[str] | None:
 
 def _is_action_diff_result(data: dict[str, Any]) -> bool:
     """Whether a failure's ``data`` is an ActionDiffResult, not a bare refusal."""
+    # Relies on ActionDiffResult's required actionSuccess/diff fields (ai/types.ts).
     return any(key in data for key in ("actionSuccess", "timeline", "diff"))
 
 

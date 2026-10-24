@@ -681,6 +681,116 @@ def test_value_on_an_action_that_does_not_read_it_is_refused(
     result = call(tool, {"element_id": "box", "action": action, "value": "x"})
     assert result.isError is True
     out = text(result)
-    assert f"'value' is not read by the {action!r} action" in out
+    assert f"'value' is not read by the built-in {action!r} action" in out
+    assert "custom action registered under this name" in out
     assert "type, setValue, select" in out
     assert runner.bodies(route) == []
+
+
+# =============================================================================
+# Round-2 review follow-ups on 466a0a5
+# =============================================================================
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+@pytest.mark.parametrize("action", ["openRow", "terminal.paste", "setRating"])
+def test_value_on_a_custom_action_is_passed_through(
+    monkeypatch: pytest.MonkeyPatch, tool: str, action: str
+) -> None:
+    """A registered custom action receives the whole params object."""
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    result = call(tool, {"element_id": "row", "action": action, "value": "42"})
+    assert result.isError is False
+    (body,) = runner.bodies(route)
+    assert body["elementAction"] == {
+        "elementId": "row",
+        "action": action,
+        "params": {"value": "42"},
+    }
+
+
+def test_builtin_refusal_set_is_the_sdk_switch_minus_value_actions() -> None:
+    from ui_bridge_mcp import server
+
+    assert server.BUILTIN_ACTIONS_WITHOUT_VALUE == {
+        "click",
+        "hoverClick",
+        "doubleClick",
+        "rightClick",
+        "middleClick",
+        "sendKeys",
+        "clear",
+        "focus",
+        "blur",
+        "hover",
+        "scroll",
+        "scrollIntoView",
+        "check",
+        "uncheck",
+        "toggle",
+        "drag",
+        "autocomplete",
+        "submit",
+        "reset",
+    }
+    assert not server.BUILTIN_ACTIONS_WITHOUT_VALUE & set(server.VALUE_ACTIONS)
+
+
+def _state_lines(out: str) -> list[str]:
+    lines = out.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "expectedStates:")
+    block = []
+    for ln in lines[start + 1 :]:
+        if not ln.startswith("        "):
+            break
+        block.append(ln.strip())
+    return block
+
+
+ENTERED = measured({"enteredAtMs": 140})
+
+
+@pytest.mark.parametrize(
+    ("requested", "answered", "expected_lines"),
+    [
+        (
+            ["a", "b", "c"],
+            ["b"],
+            [
+                "a: UNKNOWN (requested, not answered)",
+                "b: measured enteredAtMs=140",
+                "c: UNKNOWN (requested, not answered)",
+            ],
+        ),
+        (
+            ["a", "a"],
+            ["a"],
+            [
+                "a: measured enteredAtMs=140",
+                "a: UNKNOWN (requested, not answered)",
+            ],
+        ),
+        (
+            ["a", "a"],
+            ["x"],
+            [
+                "a: UNKNOWN (requested, not answered)",
+                "a: UNKNOWN (requested, not answered)",
+                "x: measured enteredAtMs=140",
+            ],
+        ),
+    ],
+)
+def test_expected_states_follow_request_order_as_a_multiset(
+    requested: list[str], answered: list[str], expected_lines: list[str]
+) -> None:
+    expected = [{"stateId": sid, "outcome": ENTERED} for sid in answered]
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=expected), expected_state_ids=requested
+        )
+    )
+    assert _state_lines(out) == expected_lines
