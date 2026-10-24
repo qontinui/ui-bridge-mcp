@@ -21,6 +21,18 @@ from mcp.server.stdio import stdio_server
 
 from .client import AI_ASSERT_STATES, UIBridgeClient, UIBridgeResponse
 from .elements import element_state
+from .journey import DEFAULT_LIST_LIMIT as JOURNEY_LIST_LIMIT
+from .journey import FILTER_ARGS as JOURNEY_FILTER_ARGS
+from .journey import RUN_KINDS as JOURNEY_RUN_KINDS
+from .journey import (
+    format_dead_ends,
+    format_edge_timing,
+    format_frontier,
+    format_prior_knowledge,
+    format_reachable,
+    format_steps,
+)
+from .journey import format_health as format_journey_health
 from .screenshot import (
     AnnotationOptions,
     BaselineStore,
@@ -1980,6 +1992,70 @@ _WAIT_FOR_CHANGE_SCHEMA: dict[str, Any] = {
     "required": ["predicate_type"],
 }
 
+
+# =============================================================================
+# Journey queries (runner ``GET /apps/{app_id}/journey/*``)
+# =============================================================================
+
+_JOURNEY_COMMON = """
+
+Answers from the runner's journey ledger: the configurations users and agents
+were OBSERVED in, and the navigation edges between them. The output's FIRST
+line is COVERAGE (ledger state, edges/nodes observed, open frontier, what was
+left unmeasured, the filter applied); the second is ANSWER, one of:
+- MEASURED: a positive answer (DEGRADED when parts of the graph are unmeasured);
+- ABSENT: a SETTLED negative - every part searched was fully explored;
+- UNKNOWN (<code>): the negative could NOT be settled (open frontier, a node
+  never observed, a ledger not being written, an empty ledger). UNKNOWN is never
+  a negative; the frontier entries and departures that would settle it follow.
+No thresholds and no verdicts."""
+
+
+def _journey_schema(
+    properties: dict[str, Any], required: Sequence[str] = (), *, filtered: bool = True
+) -> dict[str, Any]:
+    """An inputSchema: ``app_id``, the route's own args, the filter and ``limit``."""
+    props: dict[str, Any] = {
+        "app_id": {
+            "type": "string",
+            "description": "The registered app id (as in /apps), e.g. 'qontinui-web'.",
+        },
+        **properties,
+    }
+    if filtered:
+        props.update(
+            {
+                "since": {
+                    "type": "string",
+                    "description": "RFC 3339 lower bound on observedAt (e.g. 2026-10-01T00:00:00Z).",
+                },
+                "app_version": {
+                    "type": "string",
+                    "description": "Only edges observed on this app version.",
+                },
+                "run_kind": {
+                    "type": "string",
+                    "enum": list(JOURNEY_RUN_KINDS),
+                    "description": "Only edges of this run kind.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Most items listed per section (default "
+                        f"{JOURNEY_LIST_LIMIT}); the counts are always complete."
+                    ),
+                },
+            }
+        )
+    return {
+        "type": "object",
+        "properties": props,
+        "required": ["app_id", *required],
+    }
+
+
+_NODE_KEY = "A JourneyNode key (from journey_frontier / journey_dead_ends output)."
 
 TOOLS = [
     # Health check
@@ -4849,6 +4925,95 @@ Examples:
             },
             "required": ["expression"],
         },
+    ),
+    # Journey queries (runner GET /apps/{app_id}/journey/*)
+    types.Tool(
+        name="journey_health",
+        description=(
+            "Whether the app's journey ledger is being written (writing / "
+            "schema_absent / write_failing), the schema probe, and this runner "
+            "process's ledger counters. Read this before trusting any journey "
+            "answer: a ledger that is not writing describes a stale graph."
+        ),
+        inputSchema=_journey_schema({}, filtered=False),
+    ),
+    types.Tool(
+        name="journey_reachable_from",
+        description=(
+            "Every observed node reachable from `from` over affordance navigations "
+            "that changed the page, with its step count." + _JOURNEY_COMMON
+        ),
+        inputSchema=_journey_schema(
+            {"from": {"type": "string", "description": _NODE_KEY}}, ["from"]
+        ),
+    ),
+    types.Tool(
+        name="journey_steps_to",
+        description=(
+            "The shortest observed path (hop count and edges) from `from` to `to`. "
+            "ABSENT means NOT_REACHABLE (settled); UNKNOWN means it could not be "
+            "settled - never read UNKNOWN as unreachable." + _JOURNEY_COMMON
+        ),
+        inputSchema=_journey_schema(
+            {
+                "from": {"type": "string", "description": _NODE_KEY},
+                "to": {"type": "string", "description": _NODE_KEY},
+            },
+            ["from", "to"],
+        ),
+    ),
+    types.Tool(
+        name="journey_dead_ends",
+        description=(
+            "Observed nodes a user cannot leave by an affordance (settled dead "
+            "ends, with back_only true/false/UNKNOWN), listed separately from "
+            "unexplored or unsettled nodes, which are NOT dead ends." + _JOURNEY_COMMON
+        ),
+        inputSchema=_journey_schema({}),
+    ),
+    types.Tool(
+        name="journey_requires_prior_knowledge",
+        description=(
+            "Observed nodes reached ONLY by URL (initial/push/replace/hash), never "
+            "by an affordance or back from another node - pages a user must already "
+            "know the address of." + _JOURNEY_COMMON
+        ),
+        inputSchema=_journey_schema({}),
+    ),
+    types.Tool(
+        name="journey_frontier",
+        description=(
+            "The open frontier: affordances seen and never activated, per node "
+            "(or at one `node`), with why each is still open." + _JOURNEY_COMMON
+        ),
+        inputSchema=_journey_schema(
+            {
+                "node": {
+                    "type": "string",
+                    "description": _NODE_KEY + " Omit for the whole graph.",
+                }
+            }
+        ),
+    ),
+    types.Tool(
+        name="journey_edge_timing",
+        description=(
+            "The timing of one edge (`from` -> `to`) as a distribution over its "
+            "observations: n, how many had no timeline, the observation window "
+            "and app versions, and per metric (firstResponseMs, settleMs, "
+            "layoutShiftTotal, layoutShiftCount, layoutShiftAfterFirstResponseMs, "
+            "longTaskTotalMs) min/median/p90/max over measured values with the "
+            "measured, absent and unknown counts, then each observation's raw "
+            "values. Never a single latency; no thresholds. The first line is "
+            "COVERAGE; n=0 is UNKNOWN, never 'fast'."
+        ),
+        inputSchema=_journey_schema(
+            {
+                "from": {"type": "string", "description": _NODE_KEY},
+                "to": {"type": "string", "description": _NODE_KEY},
+            },
+            ["from", "to"],
+        ),
     ),
 ]
 
@@ -8189,12 +8354,88 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 )
             ]
 
+        elif name in _JOURNEY_ROUTES:
+            return await _journey_tool(ui_client, name, arguments)
+
         else:
             return _tool_error(f"Unknown tool: {name}")
 
     except Exception as e:
         logger.exception(f"Error calling tool {name}")
         return _tool_error(f"Error: {str(e)}")
+
+
+# =============================================================================
+# Journey tool dispatch
+# =============================================================================
+
+# Tool name -> (runner route, the node-key arguments it takes, required ones).
+_JOURNEY_ROUTES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "journey_health": ("health", (), ()),
+    "journey_reachable_from": ("reachable", ("from",), ("from",)),
+    "journey_steps_to": ("steps", ("from", "to"), ("from", "to")),
+    "journey_dead_ends": ("dead-ends", (), ()),
+    "journey_requires_prior_knowledge": ("prior-knowledge", (), ()),
+    "journey_frontier": ("frontier", ("node",), ()),
+    "journey_edge_timing": ("edge-timing", ("from", "to"), ("from", "to")),
+}
+
+
+def _str_arg(arguments: dict[str, Any], key: str) -> str | None:
+    value = arguments.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+async def _journey_tool(
+    ui_client: UIBridgeClient, name: str, arguments: dict[str, Any]
+) -> ToolResult:
+    """Call one journey route and render its answer, COVERAGE line first.
+
+    An ``unknown`` answer is an answer, not a tool failure: the runner looked
+    and could not settle the question. Only a failed request is an error.
+    """
+    route, node_args, required = _JOURNEY_ROUTES[name]
+    app_id = _str_arg(arguments, "app_id")
+    if app_id is None:
+        return _tool_error(f"{name}: `app_id` is required")
+    missing = [arg for arg in required if _str_arg(arguments, arg) is None]
+    if missing:
+        return _tool_error(f"{name}: {', '.join(f'`{m}`' for m in missing)} required")
+    # The input schema holds ``limit`` to an integer >= 1.
+    limit = int(arguments.get("limit", JOURNEY_LIST_LIMIT))
+
+    params: dict[str, str] = {}
+    for arg in node_args:
+        value = _str_arg(arguments, arg)
+        if value is not None:
+            params[arg] = value
+    requested: dict[str, str] = {}
+    if route != "health":
+        for arg in JOURNEY_FILTER_ARGS:
+            value = _str_arg(arguments, arg)
+            if value is not None:
+                requested[arg] = value
+        params.update(requested)
+
+    response = await ui_client.journey(app_id, route, params)
+    if not response.success:
+        return _error_result(response, prefix=f"{name} ({app_id})")
+    body = response.data
+    if route == "health":
+        text = format_journey_health(body)
+    elif route == "reachable":
+        text = format_reachable(body, params["from"], requested, limit)
+    elif route == "steps":
+        text = format_steps(body, params["from"], params["to"], requested, limit)
+    elif route == "dead-ends":
+        text = format_dead_ends(body, requested, limit)
+    elif route == "prior-knowledge":
+        text = format_prior_knowledge(body, requested, limit)
+    elif route == "frontier":
+        text = format_frontier(body, params.get("node"), requested, limit)
+    else:
+        text = format_edge_timing(body, params["from"], params["to"], requested, limit)
+    return _text(text)
 
 
 # =============================================================================
