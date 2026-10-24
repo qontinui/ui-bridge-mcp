@@ -262,7 +262,7 @@ def test_new_code_in_a_tool_result_is_not_an_error(
 
 
 def test_summary_fields_each_get_one_line() -> None:
-    out = "\n".join(format_timeline(_timeline()))
+    out = "\n".join(format_timeline(_timeline(), expected_state_ids=None))
     for name in SUMMARY_NUMBER_FIELDS:
         _line(out, f"{name}:")
     assert _line(out, "firstResponseMs:") == "firstResponseMs: measured 42"
@@ -295,7 +295,10 @@ def test_running_animations_are_named() -> None:
         {"name": "transition:opacity", "isInfinite": False},
     ]
     out = "\n".join(
-        format_timeline(_timeline(animationsUnsettledAtEnd=measured(animations)))
+        format_timeline(
+            _timeline(animationsUnsettledAtEnd=measured(animations)),
+            expected_state_ids=None,
+        )
     )
     assert _line(out, "animationsUnsettledAtEnd:") == (
         "animationsUnsettledAtEnd: measured 2 animations: fade-in, transition:opacity"
@@ -312,7 +315,9 @@ def test_expect_states_miss_renders_not_entered_within_ms() -> None:
             "outcome": unknown("input_missing", "no state registry"),
         },
     ]
-    out = "\n".join(format_timeline(_timeline(expectedStates=expected)))
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=expected), expected_state_ids=None)
+    )
     assert _line(out, "saved-toast:") == (
         "saved-toast: measured notEnteredWithinMs=2000"
     )
@@ -322,18 +327,20 @@ def test_expect_states_miss_renders_not_entered_within_ms() -> None:
 
 
 def test_opted_out_timeline_says_so() -> None:
-    assert format_timeline(None, requested=False) == [f"  {TIMELINE_OPTED_OUT}"]
+    assert format_timeline(None, requested=False, expected_state_ids=None) == [
+        f"  {TIMELINE_OPTED_OUT}"
+    ]
     assert TIMELINE_OPTED_OUT == "Timeline: no timeline (opted out)"
 
 
 def test_requested_but_missing_timeline_is_unknown_not_opted_out() -> None:
-    out = "\n".join(format_timeline(None, requested=True))
+    out = "\n".join(format_timeline(None, requested=True, expected_state_ids=None))
     assert "opted out" not in out
     assert out.strip().startswith("Timeline: UNKNOWN (requested")
 
 
 def test_missing_parts_of_a_timeline_are_unknown() -> None:
-    out = "\n".join(format_timeline({"events": "x"}))
+    out = "\n".join(format_timeline({"events": "x"}, expected_state_ids=None))
     assert _line(out, "Timeline:") == "Timeline: recorded UNKNOWN, settled: UNKNOWN"
     assert _line(out, "summary:").startswith("summary: UNKNOWN")
     assert _line(out, "observedSources:").startswith("observedSources: UNKNOWN")
@@ -518,7 +525,9 @@ def test_expected_state_outcome_not_exactly_one_numeric_key_is_unknown(
     outcome: dict[str, Any],
 ) -> None:
     expected = [{"stateId": "saved-toast", "outcome": measured(outcome)}]
-    out = "\n".join(format_timeline(_timeline(expectedStates=expected)))
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=expected), expected_state_ids=None)
+    )
     assert _line(out, "saved-toast:").startswith("saved-toast: UNKNOWN (")
     assert "measured" not in _line(out, "saved-toast:").split("(")[0]
 
@@ -534,7 +543,11 @@ def test_count_unknowable_dimension_omits_the_count() -> None:
             }
         ],
     )
-    out = "\n".join(format_timeline(_timeline(animationsUnsettledAtEnd=obs)))
+    out = "\n".join(
+        format_timeline(
+            _timeline(animationsUnsettledAtEnd=obs), expected_state_ids=None
+        )
+    )
     assert _line(out, "animationsUnsettledAtEnd:") == (
         "animationsUnsettledAtEnd: measured 0 animations [degraded: "
         "animations-running-before-action(count-unknowable) input_missing]"
@@ -889,3 +902,61 @@ def test_override_comment_names_every_fleet_override() -> None:
     assert "the one such override" not in comment
     for name in ("sendKeys", "focus", "blur", "TerminalBridgeProxies.tsx"):
         assert name in comment
+
+
+# =============================================================================
+# Round-4 review follow-ups on 6870c8e
+# =============================================================================
+
+
+def test_answers_with_no_requested_ids_keep_arrival_order() -> None:
+    assert _states(None, ["x", "y", "x"]) == [
+        "x: measured enteredAtMs=10",
+        "y: measured enteredAtMs=20",
+        "x: measured enteredAtMs=30",
+    ]
+
+
+@pytest.mark.parametrize("requested", [None, [], ["a"]])
+@pytest.mark.parametrize("entry", [{}, {"stateId": ""}, {"stateId": 7}, "garbage"])
+def test_answer_without_a_usable_state_id_says_so(
+    requested: list[str] | None, entry: Any
+) -> None:
+    if isinstance(entry, dict):
+        entry = {**entry, "outcome": measured({"enteredAtMs": 5})}
+    out = "\n".join(
+        format_timeline(_timeline(expectedStates=[entry]), expected_state_ids=requested)
+    )
+    line = _line(out, "?:")
+    assert line.endswith(" (no stateId)")
+    assert "(not requested)" not in line
+    if requested == ["a"]:
+        assert _line(out, "a:") == "a: UNKNOWN (requested, not answered)"
+
+
+def test_expected_state_ids_is_keyword_required() -> None:
+    import inspect
+
+    from ui_bridge_mcp import server
+
+    for fn in (
+        format_timeline,
+        server._execute_with_diff_failure_text,
+        server._execute_with_diff_result,
+    ):
+        param = inspect.signature(fn).parameters["expected_state_ids"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, fn.__name__
+        assert param.default is inspect.Parameter.empty, fn.__name__
+
+
+def test_override_comment_does_not_claim_a_silent_no_op() -> None:
+    import inspect
+
+    from ui_bridge_mcp import server
+
+    source = inspect.getsource(server)
+    start = source.index("# An element may register a custom action")
+    comment = source[start : source.index("BUILTIN_ACTIONS_WITHOUT_VALUE:", start)]
+    assert "silent no-op too" not in comment
+    assert "'keys' is required" in comment
+    assert "always refuse" in comment

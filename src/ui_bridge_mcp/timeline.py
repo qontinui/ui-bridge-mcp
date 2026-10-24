@@ -205,13 +205,15 @@ def _expected_states_lines(
             ]
         return ["    expectedStates: none requested"]
     lines = ["    expectedStates:"]
-    # Every answer, in answer order. A requested id consumes the first answer
-    # for it not yet consumed (a multiset: an id requested twice needs two
-    # answers); whatever is left keeps its answer order.
-    answers: list[tuple[str, dict[str, Any]]] = []
+    # Every answer, in answer order, with its stateId (``None`` when it carried
+    # no usable one). A requested id consumes the first answer for it not yet
+    # consumed (a multiset: an id requested twice needs two answers); whatever
+    # is left keeps its answer order.
+    answers: list[tuple[str | None, dict[str, Any]]] = []
     for entry in expected:
         result = entry if isinstance(entry, dict) else {}
-        answers.append((str(result.get("stateId", "?")), result))
+        raw_id = result.get("stateId")
+        answers.append((raw_id if isinstance(raw_id, str) and raw_id else None, result))
     consumed = [False] * len(answers)
 
     def _line(state_id: str, result: dict[str, Any], suffix: str = "") -> str:
@@ -234,12 +236,15 @@ def _expected_states_lines(
             lines.append(_line(state_id, answers[index][1]))
     # ``requested_ids=None`` means the caller did not say what it asked for, so
     # nothing can be called unrequested; otherwise a leftover answer is one.
-    suffix = "" if requested_ids is None else " (not requested)"
-    lines.extend(
-        _line(state_id, result, suffix)
-        for i, (state_id, result) in enumerate(answers)
-        if not consumed[i]
-    )
+    # An answer with no usable stateId cannot be called either: it says so.
+    unrequested = "" if requested_ids is None else " (not requested)"
+    for i, (answered_id, result) in enumerate(answers):
+        if consumed[i]:
+            continue
+        if answered_id is None:
+            lines.append(_line("?", result, " (no stateId)"))
+        else:
+            lines.append(_line(answered_id, result, unrequested))
     return lines
 
 
@@ -261,7 +266,7 @@ def format_timeline(
     timeline: Any,
     *,
     requested: bool = True,
-    expected_state_ids: Sequence[str] | None = None,
+    expected_state_ids: Sequence[str] | None,
 ) -> list[str]:
     """The timeline block of an executeWithDiff result, one line per fact.
 

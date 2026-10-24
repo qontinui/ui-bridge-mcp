@@ -674,12 +674,14 @@ VALUE_ACTIONS: tuple[str, ...] = ("type", "setValue", "select")
 # An element may register a custom action under a built-in name, and its
 # handler then runs instead of the built-in. These names are still refused,
 # and the error says the refusal is about the built-in: this tool can only send
-# ``params.value``, and the fleet's overrides of built-ins read no
-# ``params.value``: the runner terminal's ``sendKeys`` (``TerminalInstance.tsx``
-# and ``TerminalBridgeProxies.tsx``) reads ``params.keys``, and the proxies'
-# ``focus`` and ``blur`` (``TerminalBridgeProxies.tsx``) take no params at all
-# (qontinui-runner origin/main 8dfed17e809b). Passing the value through would
-# be a silent no-op too.
+# ``params.value``, and it cannot send what the fleet's overrides of built-ins
+# read (qontinui-runner origin/main 8dfed17e809b). The runner terminal's
+# ``sendKeys`` (``TerminalInstance.tsx`` and ``TerminalBridgeProxies.tsx``)
+# reads ``params.keys`` and rejects a missing one (``'keys' is required``,
+# ``terminalKeySequence.ts``); the proxies' ``focus`` and ``blur``
+# (``TerminalBridgeProxies.tsx``) always refuse (no mounted view). Passing the
+# value through would reach a handler that refuses it, so the tool refuses it
+# first with a message that says why.
 BUILTIN_ACTIONS_WITHOUT_VALUE: frozenset[str] = frozenset(
     {
         "click",
@@ -770,7 +772,8 @@ def _is_action_diff_result(data: dict[str, Any]) -> bool:
 def _execute_with_diff_failure_text(
     response: UIBridgeResponse,
     timeline_requested: bool,
-    expected_state_ids: list[str] | None = None,
+    *,
+    expected_state_ids: list[str] | None,
 ) -> str:
     """A failed execute-with-diff's text, keeping the timeline the producer recorded.
 
@@ -802,7 +805,7 @@ def _execute_with_diff_result(
     data: Any,
     *,
     timeline_requested: bool = True,
-    expected_state_ids: list[str] | None = None,
+    expected_state_ids: list[str] | None,
 ) -> ToolResult:
     """An execute-with-diff outcome, read from the producer's ``actionSuccess``.
 
@@ -7812,7 +7815,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not response.success:
                 return _tool_error(
                     _execute_with_diff_failure_text(
-                        response, timeline_requested, expected_ids
+                        response, timeline_requested, expected_state_ids=expected_ids
                     )
                 )
             return _execute_with_diff_result(
@@ -7992,7 +7995,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not response.success:
                 return _tool_error(
                     _execute_with_diff_failure_text(
-                        response, timeline_requested, expected_ids
+                        response, timeline_requested, expected_state_ids=expected_ids
                     )
                 )
             return _execute_with_diff_result(
