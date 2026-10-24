@@ -645,7 +645,7 @@ _EXECUTE_WITH_DIFF_SCHEMA: dict[str, Any] = {
 def _execute_with_diff_request(
     element_id: str, arguments: dict[str, Any]
 ) -> dict[str, Any]:
-    """The ``ActionDiffRequest`` body (ui-bridge ``ai/types.ts``) for a tool call.
+    """The ``ActionWithDiffRequest`` body (ui-bridge ``ai/types.ts``) for a tool call.
 
     ``timeline`` is always sent, so the tool's default (on) does not depend on
     the producer's. ``expectStates`` / ``withinMs`` are forwarded as given; the
@@ -673,8 +673,18 @@ def _execute_with_diff_request(
     return body
 
 
+def _expected_state_ids(request_body: dict[str, Any]) -> list[str] | None:
+    """The ``expectStates`` ids a request carried, as strings; ``None`` if none."""
+    ids = request_body.get("expectStates")
+    if not isinstance(ids, list):
+        return None
+    return [str(i) for i in ids]
+
+
 def _execute_with_diff_failure_text(
-    response: UIBridgeResponse, timeline_requested: bool
+    response: UIBridgeResponse,
+    timeline_requested: bool,
+    expected_state_ids: list[str] | None = None,
 ) -> str:
     """A failed execute-with-diff's text, keeping the timeline the producer recorded.
 
@@ -684,13 +694,26 @@ def _execute_with_diff_failure_text(
     """
     lines = [f"Error: {response.describe_error()}"]
     data = _as_dict(response.data)
-    if "timeline" in data:
-        lines.extend(format_timeline(data["timeline"], requested=timeline_requested))
+    if data:
+        # A body under ``data`` is an ActionDiffResult: a requested timeline it
+        # lacks is UNKNOWN on failure exactly as on success.
+        lines.extend(
+            format_timeline(
+                data.get("timeline"),
+                requested=timeline_requested,
+                expected_state_ids=expected_state_ids,
+            )
+        )
     return "\n".join(lines)
 
 
 def _execute_with_diff_result(
-    action: str, element_id: str, data: Any, *, timeline_requested: bool = True
+    action: str,
+    element_id: str,
+    data: Any,
+    *,
+    timeline_requested: bool = True,
+    expected_state_ids: list[str] | None = None,
 ) -> ToolResult:
     """An execute-with-diff outcome, read from the producer's ``actionSuccess``.
 
@@ -713,7 +736,13 @@ def _execute_with_diff_result(
             "  Action success: UNKNOWN (the response carried no boolean "
             f"'actionSuccess', got {action_success!r})"
         )
-    lines.extend(format_timeline(result.get("timeline"), requested=timeline_requested))
+    lines.extend(
+        format_timeline(
+            result.get("timeline"),
+            requested=timeline_requested,
+            expected_state_ids=expected_state_ids,
+        )
+    )
     diff = _as_dict(result.get("diff"))
     changes = diff.get("changes")
     if isinstance(changes, dict):
@@ -4383,7 +4412,7 @@ Returns the matched request details once it completes, or an error on timeout.""
     ),
     types.Tool(
         name="sdk_execute_with_diff",
-        description="Execute an element action and capture what changed in the UI. Returns before/after diff with categorization. plus the interaction timeline (action -> events -> settled, with a summary whose every value is measured, absent or UNKNOWN).",
+        description="Execute an element action and capture what changed in the UI. Returns before/after diff with categorization, plus the interaction timeline (action -> events -> settled, with a summary whose every value is measured, absent or UNKNOWN).",
         inputSchema=_EXECUTE_WITH_DIFF_SCHEMA,
     ),
     types.Tool(
@@ -4540,7 +4569,7 @@ Returns what changed, or an error if the timeout passes first.""",
     ),
     types.Tool(
         name="ui_execute_with_diff",
-        description="Execute an element action in the runner's own UI and capture what changed (Control mode). Returns before/after diff with categorization. plus the interaction timeline (action -> events -> settled, with a summary whose every value is measured, absent or UNKNOWN).",
+        description="Execute an element action in the runner's own UI and capture what changed (Control mode). Returns before/after diff with categorization, plus the interaction timeline (action -> events -> settled, with a summary whose every value is measured, absent or UNKNOWN).",
         inputSchema=_EXECUTE_WITH_DIFF_SCHEMA,
     ),
     types.Tool(
@@ -7687,16 +7716,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             element_id = ref_manager.resolve(arguments["element_id"])
             request_body = _execute_with_diff_request(element_id, arguments)
             timeline_requested = request_body["timeline"]
+            expected_ids = _expected_state_ids(request_body)
             response = await ui_client.sdk_execute_with_diff(request_body)
             if not response.success:
                 return _tool_error(
-                    _execute_with_diff_failure_text(response, timeline_requested)
+                    _execute_with_diff_failure_text(
+                        response, timeline_requested, expected_ids
+                    )
                 )
             return _execute_with_diff_result(
                 arguments["action"],
                 element_id,
                 response.data,
                 timeline_requested=timeline_requested,
+                expected_state_ids=expected_ids,
             )
 
         elif name == "sdk_wait_for_change":
@@ -7861,16 +7894,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             element_id = ref_manager.resolve(arguments["element_id"])
             request_body = _execute_with_diff_request(element_id, arguments)
             timeline_requested = request_body["timeline"]
+            expected_ids = _expected_state_ids(request_body)
             response = await ui_client.control_execute_with_diff(request_body)
             if not response.success:
                 return _tool_error(
-                    _execute_with_diff_failure_text(response, timeline_requested)
+                    _execute_with_diff_failure_text(
+                        response, timeline_requested, expected_ids
+                    )
                 )
             return _execute_with_diff_result(
                 arguments["action"],
                 element_id,
                 response.data,
                 timeline_requested=timeline_requested,
+                expected_state_ids=expected_ids,
             )
 
         elif name == "ui_wait_for_change":

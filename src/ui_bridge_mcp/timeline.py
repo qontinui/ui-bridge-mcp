@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .client import UNKNOWN_CODES
@@ -61,6 +61,12 @@ EXPECTED_STATE_OUTCOME_KEYS: tuple[str, ...] = (
 
 TIMELINE_OPTED_OUT = "Timeline: no timeline (opted out)"
 
+# A coverage dimension whose name carries this marker documents that how many
+# things went unmeasured is unknowable; its ``count`` carries no meaning
+# (ui-bridge ``ai/types.ts`` ``animationsUnsettledAtEnd``, e.g.
+# ``animations-running-before-action(count-unknowable)``), so no ``xN`` is shown.
+COUNT_UNKNOWABLE_MARKER = "(count-unknowable)"
+
 _COMPACT_LIMIT = 200
 
 
@@ -96,9 +102,14 @@ def _degradation(observation: dict[str, Any]) -> str:
         if not isinstance(entry, dict):
             parts.append(_compact(entry))
             continue
+        dimension = entry.get("dimension", "?")
+        code = entry.get("code", "?")
+        if isinstance(dimension, str) and COUNT_UNKNOWABLE_MARKER in dimension:
+            parts.append(f"{dimension} {code}")
+            continue
         count = entry.get("count")
         shown = format_number(count) if _is_number(count) else "?"
-        parts.append(f"{entry.get('dimension', '?')} x{shown} {entry.get('code', '?')}")
+        parts.append(f"{dimension} x{shown} {code}")
     return f" [degraded: {'; '.join(parts)}]"
 
 
@@ -168,12 +179,25 @@ def _expected_outcome_value(value: Any) -> str | None:
     return f"{present[0]}={format_number(value[present[0]])}"
 
 
-def _expected_states_lines(expected: Any) -> list[str]:
+def _expected_states_lines(
+    expected: Any, requested_ids: Sequence[str] | None
+) -> list[str]:
+    """The expectedStates block; ``requested_ids`` is what the caller asked for.
+
+    An empty list is "none requested" only when nothing was requested. When
+    states were requested and the producer answered none of them, that is
+    UNKNOWN: it did not say what became of them.
+    """
     if not isinstance(expected, list):
         return [
             "    expectedStates: UNKNOWN (the summary carried no expectedStates list)"
         ]
     if not expected:
+        if requested_ids:
+            return [
+                "    expectedStates: UNKNOWN (requested "
+                f"{', '.join(requested_ids)}, but the producer answered none of them)"
+            ]
         return ["    expectedStates: none requested"]
     lines = ["    expectedStates:"]
     for entry in expected:
@@ -198,10 +222,16 @@ def _event_counts(events: Any) -> str:
     return f"{len(events)}{breakdown}"
 
 
-def format_timeline(timeline: Any, *, requested: bool = True) -> list[str]:
+def format_timeline(
+    timeline: Any,
+    *,
+    requested: bool = True,
+    expected_state_ids: Sequence[str] | None = None,
+) -> list[str]:
     """The timeline block of an executeWithDiff result, one line per fact.
 
-    ``requested=False`` is the caller's ``timeline: false`` opt-out. A
+    ``requested=False`` is the caller's ``timeline: false`` opt-out.
+    ``expected_state_ids`` are the ``expectStates`` the caller sent. A
     requested timeline the response did not carry is UNKNOWN: the transport
     that answered did not record one, which says nothing about the page.
     """
@@ -238,7 +268,9 @@ def format_timeline(timeline: Any, *, requested: bool = True) -> list[str]:
         )
         lines.extend(
             "  " + line
-            for line in _expected_states_lines(summary.get("expectedStates"))
+            for line in _expected_states_lines(
+                summary.get("expectedStates"), expected_state_ids
+            )
         )
     else:
         lines.append("    summary: UNKNOWN (the timeline carried no summary)")

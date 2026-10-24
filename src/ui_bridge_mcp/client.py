@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_RUNNER_PORT = 9876
 DEFAULT_TIMEOUT = 30.0
 ELEMENT_DISCOVERY_TIMEOUT = 60.0
+# Seconds an execute-with-diff HTTP call is given beyond its recording window.
+EXECUTE_WITH_DIFF_TIMEOUT_SLACK = 10.0
 
 
 def get_windows_host() -> str:
@@ -39,9 +41,12 @@ CODE_APP_UNREACHABLE = "app_unreachable"
 CODE_PRODUCER_FAILED = "producer_failed"
 
 # The closed Observation ``UnknownCode`` set, in the canonical wire-contract
-# order: ui-bridge ``observation/observation.ts`` ``UNKNOWN_CODES`` and its
-# ``diagnostics/codes.json``, twin of qontinui-schemas
-# ``rust-vision-core/src/observation.rs``. A code outside it still renders as
+# order: the twin of the ui-bridge SDK's
+# ``packages/ui-bridge/src/observation/observation.ts`` ``UNKNOWN_CODES``. The
+# last seven members are not yet in qontinui-schemas
+# ``rust-vision-core/src/observation.rs`` ``UnknownCode::ALL`` on its main (nine
+# members there); they land with this same plan's schemas branch, and this
+# list is the twin of that file only once it does. A code outside it still renders as
 # UNKNOWN with the code it carried (``timeline.render_unknown``), flagged as
 # one this server does not know, never as an error.
 UNKNOWN_CODES: tuple[str, ...] = (
@@ -147,18 +152,23 @@ def _wait_for_change_body(
 def _execute_with_diff_timeout(request: dict[str, Any]) -> float:
     """An HTTP timeout that outlasts an execute-with-diff's own recording.
 
-    The SDK records until the UI settles (``settleTimeout``) and, with
-    ``expectStates``, until every expected state has entered or ``withinMs``
-    has elapsed, even past settle. A window longer than the default HTTP
-    timeout would otherwise be cut off here and reported as a transport
-    failure while the app was still recording.
+    ``settleTimeout`` is spent twice: the browser relay settles the DOM BEFORE
+    the action (``react/commandHandlers.ts`` relayExecuteWithDiff), and
+    executeWithDiff settles again after it. With ``expectStates`` the SDK then
+    records until every expected state has entered or ``withinMs`` has
+    elapsed, even past settle. A window longer than the default HTTP timeout
+    would otherwise be cut off here and reported as a transport failure while
+    the app was still recording.
     """
-    waits = [
-        value
-        for value in (request.get("settleTimeout"), request.get("withinMs"))
-        if isinstance(value, int | float) and not isinstance(value, bool)
-    ]
-    return max(DEFAULT_TIMEOUT, sum(waits) / 1000 + 10.0)
+
+    def _ms(key: str) -> float:
+        value = request.get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return float(value)
+        return 0.0
+
+    wait_ms = 2 * _ms("settleTimeout") + _ms("withinMs")
+    return max(DEFAULT_TIMEOUT, wait_ms / 1000 + EXECUTE_WITH_DIFF_TIMEOUT_SLACK)
 
 
 @dataclass

@@ -431,3 +431,164 @@ def test_failed_action_without_timeline_is_the_plain_error(
     result = call("sdk_execute_with_diff", {"element_id": "save", "action": "click"})
     assert result.isError is True
     assert "Timeline" not in text(result)
+
+
+# =============================================================================
+# Review follow-ups on 1ebcd63
+# =============================================================================
+
+
+def test_unknown_codes_comment_names_the_sdk_twin_not_schemas_main() -> None:
+    """The comment must not claim schemas main already carries the 16 codes."""
+    import inspect
+
+    import ui_bridge_mcp.client as client_module
+
+    source = inspect.getsource(client_module)
+    start = source.index("# The closed Observation ``UnknownCode`` set")
+    comment = source[start : source.index("UNKNOWN_CODES: tuple", start)]
+    assert "packages/ui-bridge/src/observation/observation.ts" in comment
+    assert "twin of qontinui-schemas" not in comment
+    assert "once it does" in comment
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_failed_action_with_data_but_no_timeline_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    route = ROUTES[tool]
+    data = _diff_result(None)
+    data["actionSuccess"] = False
+    answering(
+        monkeypatch, {route: {"success": False, "error": "element gone", "data": data}}
+    )
+    result = call(tool, {"element_id": "save", "action": "click"})
+    assert result.isError is True
+    out = text(result)
+    assert "element gone" in out
+    assert _line(out, "Timeline:").startswith("Timeline: UNKNOWN (requested")
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_timeout_covers_two_settles_plus_the_window(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    route = ROUTES[tool]
+    runner = answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    call(
+        tool,
+        {
+            "element_id": "save",
+            "action": "click",
+            "expect_states": ["saved-toast"],
+            "within_ms": 30000,
+            "settle_timeout": 20000,
+        },
+    )
+    # The relay settles before the action and executeWithDiff again after it:
+    # 2 * 20 s + 30 s + 10 s slack.
+    assert runner.read_timeouts[-1] == pytest.approx(80.0)
+
+
+def test_tool_descriptions_join_the_timeline_clause_with_a_comma() -> None:
+    from ui_bridge_mcp import server
+
+    descriptions = {
+        t.name: t.description or ""
+        for t in server.TOOLS
+        if t.name in ("sdk_execute_with_diff", "ui_execute_with_diff")
+    }
+    assert len(descriptions) == 2
+    for description in descriptions.values():
+        assert "categorization, plus the interaction timeline" in description
+        assert ". plus" not in description
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"enteredAtMs": 140, "notEnteredWithinMs": 2000},
+        {},
+        {"enteredAtMs": "soon"},
+    ],
+)
+def test_expected_state_outcome_not_exactly_one_numeric_key_is_unknown(
+    outcome: dict[str, Any],
+) -> None:
+    expected = [{"stateId": "saved-toast", "outcome": measured(outcome)}]
+    out = "\n".join(format_timeline(_timeline(expectedStates=expected)))
+    assert _line(out, "saved-toast:").startswith("saved-toast: UNKNOWN (")
+    assert "measured" not in _line(out, "saved-toast:").split("(")[0]
+
+
+def test_count_unknowable_dimension_omits_the_count() -> None:
+    obs = measured(
+        [],
+        unmeasured=[
+            {
+                "dimension": "animations-running-before-action(count-unknowable)",
+                "count": 0,
+                "code": "input_missing",
+            }
+        ],
+    )
+    out = "\n".join(format_timeline(_timeline(animationsUnsettledAtEnd=obs)))
+    assert _line(out, "animationsUnsettledAtEnd:") == (
+        "animationsUnsettledAtEnd: measured 0 animations [degraded: "
+        "animations-running-before-action(count-unknowable) input_missing]"
+    )
+
+
+def test_non_number_count_renders_as_question_mark() -> None:
+    obs = measured(
+        3,
+        unmeasured=[
+            {"dimension": "timeline-events:layout-shift", "count": "many", "code": "x"}
+        ],
+    )
+    assert render_observation(obs) == (
+        "measured 3 [degraded: timeline-events:layout-shift x? x]"
+    )
+
+
+def test_requested_states_answered_with_empty_list_are_unknown() -> None:
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=[]), expected_state_ids=["saved-toast", "editor"]
+        )
+    )
+    line = _line(out, "expectedStates:")
+    assert line.startswith("expectedStates: UNKNOWN (requested saved-toast, editor")
+    assert "none requested" not in out
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_tool_passes_requested_states_to_the_renderer(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    route = ROUTES[tool]
+    answering(
+        monkeypatch, {route: {"success": True, "data": _diff_result(_timeline())}}
+    )
+    out = text(
+        call(
+            tool,
+            {
+                "element_id": "save",
+                "action": "click",
+                "expect_states": ["saved-toast"],
+                "within_ms": 2000,
+            },
+        )
+    )
+    assert _line(out, "expectedStates:").startswith("expectedStates: UNKNOWN (")
+
+
+def test_request_docstring_names_the_sdk_type() -> None:
+    from ui_bridge_mcp import server
+
+    doc = server._execute_with_diff_request.__doc__ or ""
+    assert "ActionWithDiffRequest" in doc
+    assert "ActionDiffRequest" not in doc
