@@ -713,6 +713,9 @@ def test_value_on_a_custom_action_is_passed_through(
 
 
 def test_builtin_refusal_set_is_the_sdk_switch_minus_value_actions() -> None:
+    """The built-in switch in ui-bridge ``control/action-executor.ts``
+    performAction, checked against ui-bridge origin/main d84bfa6ffe67, minus
+    type/setValue/select."""
     from ui_bridge_mcp import server
 
     assert server.BUILTIN_ACTIONS_WITHOUT_VALUE == {
@@ -779,7 +782,7 @@ ENTERED = measured({"enteredAtMs": 140})
             [
                 "a: UNKNOWN (requested, not answered)",
                 "a: UNKNOWN (requested, not answered)",
-                "x: measured enteredAtMs=140",
+                "x: measured enteredAtMs=140 (not requested)",
             ],
         ),
     ],
@@ -794,3 +797,95 @@ def test_expected_states_follow_request_order_as_a_multiset(
         )
     )
     assert _state_lines(out) == expected_lines
+
+
+# =============================================================================
+# Round-3 review follow-ups on 323115f
+# =============================================================================
+
+
+def _states(requested: list[str] | None, answered: list[str]) -> list[str]:
+    expected = [
+        {"stateId": sid, "outcome": measured({"enteredAtMs": 10 * (i + 1)})}
+        for i, sid in enumerate(answered)
+    ]
+    out = "\n".join(
+        format_timeline(
+            _timeline(expectedStates=expected), expected_state_ids=requested
+        )
+    )
+    return _state_lines(out)
+
+
+def test_unrequested_answers_keep_their_answer_order() -> None:
+    assert _states(["a"], ["x", "y", "x"]) == [
+        "a: UNKNOWN (requested, not answered)",
+        "x: measured enteredAtMs=10 (not requested)",
+        "y: measured enteredAtMs=20 (not requested)",
+        "x: measured enteredAtMs=30 (not requested)",
+    ]
+
+
+def test_a_second_answer_to_a_single_request_is_labelled_not_requested() -> None:
+    once = _states(["a"], ["a", "a"])
+    twice = _states(["a", "a"], ["a", "a"])
+    assert once == [
+        "a: measured enteredAtMs=10",
+        "a: measured enteredAtMs=20 (not requested)",
+    ]
+    assert twice == ["a: measured enteredAtMs=10", "a: measured enteredAtMs=20"]
+    assert once != twice
+
+
+def test_unrequested_answer_between_requested_ones() -> None:
+    assert _states(["a", "b"], ["x", "a", "b"]) == [
+        "a: measured enteredAtMs=20",
+        "b: measured enteredAtMs=30",
+        "x: measured enteredAtMs=10 (not requested)",
+    ]
+
+
+def test_answers_with_no_requested_ids_known_are_listed_unlabelled() -> None:
+    assert _states(None, ["b", "a"]) == [
+        "b: measured enteredAtMs=10",
+        "a: measured enteredAtMs=20",
+    ]
+
+
+def test_answers_to_an_empty_request_are_all_not_requested() -> None:
+    assert _states([], ["b", "a"]) == [
+        "b: measured enteredAtMs=10 (not requested)",
+        "a: measured enteredAtMs=20 (not requested)",
+    ]
+
+
+@pytest.mark.parametrize("tool", sorted(ROUTES))
+def test_tool_without_expect_states_labels_answers_not_requested(
+    monkeypatch: pytest.MonkeyPatch, tool: str
+) -> None:
+    route = ROUTES[tool]
+    expected = [{"stateId": "x", "outcome": measured({"enteredAtMs": 5})}]
+    answering(
+        monkeypatch,
+        {
+            route: {
+                "success": True,
+                "data": _diff_result(_timeline(expectedStates=expected)),
+            }
+        },
+    )
+    out = text(call(tool, {"element_id": "save", "action": "click"}))
+    assert _line(out, "x:") == "x: measured enteredAtMs=5 (not requested)"
+
+
+def test_override_comment_names_every_fleet_override() -> None:
+    import inspect
+
+    from ui_bridge_mcp import server
+
+    source = inspect.getsource(server)
+    start = source.index("# An element may register a custom action")
+    comment = source[start : source.index("BUILTIN_ACTIONS_WITHOUT_VALUE:", start)]
+    assert "the one such override" not in comment
+    for name in ("sendKeys", "focus", "blur", "TerminalBridgeProxies.tsx"):
+        assert name in comment

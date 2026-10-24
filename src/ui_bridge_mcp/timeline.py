@@ -189,6 +189,9 @@ def _expected_states_lines(
     UNKNOWN: it did not say what became of them. The SDK promises one entry
     per requested id (``ai/types.ts`` ``TimelineSummary.expectedStates``), so
     each requested id it did not answer is listed as UNKNOWN, not dropped.
+    Answers to ids not requested follow in answer order, labelled
+    ``(not requested)``; ``requested_ids=None`` (the caller did not say what
+    it asked for) lists every answer in answer order, unlabelled.
     """
     if not isinstance(expected, list):
         return [
@@ -202,26 +205,41 @@ def _expected_states_lines(
             ]
         return ["    expectedStates: none requested"]
     lines = ["    expectedStates:"]
-    # Answered entries by id, in answer order: a multiset, so a requested id
-    # repeated twice needs two answers.
-    pending: dict[str, list[Any]] = {}
+    # Every answer, in answer order. A requested id consumes the first answer
+    # for it not yet consumed (a multiset: an id requested twice needs two
+    # answers); whatever is left keeps its answer order.
+    answers: list[tuple[str, dict[str, Any]]] = []
     for entry in expected:
         result = entry if isinstance(entry, dict) else {}
-        pending.setdefault(str(result.get("stateId", "?")), []).append(result)
+        answers.append((str(result.get("stateId", "?")), result))
+    consumed = [False] * len(answers)
 
-    def _line(state_id: str, result: dict[str, Any]) -> str:
+    def _line(state_id: str, result: dict[str, Any], suffix: str = "") -> str:
         outcome = render_observation(result.get("outcome"), _expected_outcome_value)
-        return f"      {state_id}: {outcome}"
+        return f"      {state_id}: {outcome}{suffix}"
 
-    # Requested ids first, in request order; then any answer nobody requested.
     for state_id in requested_ids or ():
-        answers = pending.get(state_id)
-        if answers:
-            lines.append(_line(state_id, answers.pop(0)))
-        else:
+        index = next(
+            (
+                i
+                for i, (answered_id, _) in enumerate(answers)
+                if not consumed[i] and answered_id == state_id
+            ),
+            None,
+        )
+        if index is None:
             lines.append(f"      {state_id}: UNKNOWN (requested, not answered)")
-    for state_id, answers in pending.items():
-        lines.extend(_line(state_id, result) for result in answers)
+        else:
+            consumed[index] = True
+            lines.append(_line(state_id, answers[index][1]))
+    # ``requested_ids=None`` means the caller did not say what it asked for, so
+    # nothing can be called unrequested; otherwise a leftover answer is one.
+    suffix = "" if requested_ids is None else " (not requested)"
+    lines.extend(
+        _line(state_id, result, suffix)
+        for i, (state_id, result) in enumerate(answers)
+        if not consumed[i]
+    )
     return lines
 
 

@@ -674,9 +674,12 @@ VALUE_ACTIONS: tuple[str, ...] = ("type", "setValue", "select")
 # An element may register a custom action under a built-in name, and its
 # handler then runs instead of the built-in. These names are still refused,
 # and the error says the refusal is about the built-in: this tool can only send
-# ``params.value``, and the one such override in the fleet (the runner
-# terminal's ``sendKeys``, ``TerminalInstance.tsx``) reads ``params.keys``, so
-# passing the value through would be a silent no-op too.
+# ``params.value``, and the fleet's overrides of built-ins read no
+# ``params.value``: the runner terminal's ``sendKeys`` (``TerminalInstance.tsx``
+# and ``TerminalBridgeProxies.tsx``) reads ``params.keys``, and the proxies'
+# ``focus`` and ``blur`` (``TerminalBridgeProxies.tsx``) take no params at all
+# (qontinui-runner origin/main 8dfed17e809b). Passing the value through would
+# be a silent no-op too.
 BUILTIN_ACTIONS_WITHOUT_VALUE: frozenset[str] = frozenset(
     {
         "click",
@@ -746,11 +749,15 @@ def _execute_with_diff_request(
     return body
 
 
-def _expected_state_ids(request_body: dict[str, Any]) -> list[str] | None:
-    """The ``expectStates`` ids a request carried, as strings; ``None`` if none."""
+def _expected_state_ids(request_body: dict[str, Any]) -> list[str]:
+    """The ``expectStates`` ids a request carried, as strings; ``[]`` if none.
+
+    This tool built the request, so it knows exactly what it asked for: no
+    ``expectStates`` is an empty request, and any answer is unrequested.
+    """
     ids = request_body.get("expectStates")
     if not isinstance(ids, list):
-        return None
+        return []
     return [str(i) for i in ids]
 
 
