@@ -771,3 +771,79 @@ def test_null_health_and_null_toast_text_render_unknown_not_none_or_crash() -> N
     assert "Health: UNKNOWN" in out
     assert "UNKNOWN (no text)" in out
     assert "[info]" in out
+
+
+# =============================================================================
+# Absent ``visible`` outside the visual description
+# =============================================================================
+
+
+_NOT_GIVEN: Any = object()
+
+
+def _bare(visible: Any = _NOT_GIVEN, **state: Any) -> dict[str, Any]:
+    """An element whose state omits ``visible`` unless one is given."""
+    if visible is not _NOT_GIVEN:
+        state["visible"] = visible
+    return {"id": "btn", "type": "button", "state": state}
+
+
+def test_offscreen_counts_split_stated_from_unstated() -> None:
+    from ui_bridge_mcp.screenshot import _offscreen_counts
+
+    elements = [
+        _bare(True, inViewport=False),
+        _bare(inViewport=False),
+        _bare(None, inViewport=False),
+        _bare(False, inViewport=False),
+        _bare(inViewport=True),
+    ]
+    assert _offscreen_counts(elements) == (1, 2)
+
+
+def test_offscreen_badge_names_unstated_visibility() -> None:
+    from ui_bridge_mcp.screenshot import _offscreen_label
+
+    assert _offscreen_label([_bare(True, inViewport=False)]) == "1 off-screen"
+    assert (
+        _offscreen_label([_bare(inViewport=False)])
+        == "0 off-screen (+1 visibility unknown)"
+    )
+    assert _offscreen_label([_bare(False, inViewport=False)]) is None
+
+
+@pytest.mark.parametrize("visible", [_NOT_GIVEN, None, True])
+def test_annotation_draws_unstated_visibility(visible: Any) -> None:
+    from ui_bridge_mcp.screenshot import _should_annotate
+
+    el = _bare(visible, rect={"x": 0, "y": 0, "width": 10, "height": 10})
+    assert _should_annotate(el, "all", None, None)
+
+
+def test_annotation_skips_explicitly_hidden() -> None:
+    from ui_bridge_mcp.screenshot import _should_annotate
+
+    el = _bare(False, rect={"x": 0, "y": 0, "width": 10, "height": 10})
+    assert not _should_annotate(el, "all", None, None)
+
+
+@pytest.mark.parametrize("visible", [_NOT_GIVEN, None])
+def test_element_formatters_say_visibility_unknown(visible: Any) -> None:
+    el = _bare(visible)
+    summary = server_mod.format_element_summary(el)
+    compact = server_mod.format_element_compact(el, "@e1")
+    assert "[visibility unknown]" in summary
+    assert "hidden" not in summary
+    assert "visibility-unknown" in compact
+    assert "hidden" not in compact
+
+
+@pytest.mark.parametrize(("visible", "flagged"), [(True, False), (False, True)])
+def test_element_formatters_stated_visibility(visible: bool, flagged: bool) -> None:
+    el = _bare(visible)
+    summary = server_mod.format_element_summary(el)
+    compact = server_mod.format_element_compact(el, "@e1")
+    assert ("hidden" in summary) is flagged
+    assert ("hidden" in compact) is flagged
+    assert "unknown" not in summary
+    assert "unknown" not in compact
