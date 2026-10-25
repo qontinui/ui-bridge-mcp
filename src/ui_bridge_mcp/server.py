@@ -5883,24 +5883,56 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            matches = data.get("matches", [])
+            # Both producers (the SDK's aiSearch handler and the runner's IPC
+            # fallback) answer {results: [{element, confidence, ...}], ...}.
+            # A body with no results list says nothing about whether anything
+            # matched, so it is not rendered as "No elements found".
+            raw = (
+                response.data.get("results")
+                if isinstance(response.data, dict)
+                else None
+            )
+            if not isinstance(raw, list):
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=(
+                            f"Search for '{text}': UNKNOWN — the response carried "
+                            "no results list"
+                        ),
+                    )
+                ]
+            hits: list[dict[str, Any]] = [
+                r
+                for r in raw
+                if isinstance(r, dict) and isinstance(r.get("element"), dict)
+            ]
+            unreadable = len(raw) - len(hits)
+            if raw and not hits:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=(
+                            f"Search for '{text}': UNKNOWN — {len(raw)} result(s) "
+                            "carried no readable element"
+                        ),
+                    )
+                ]
 
             # Client-side content filtering as fallback until SDK handlers
             # support the contentRole/contentTypes parameters natively
+            def _role(hit: dict[str, Any]) -> Any:
+                meta = hit["element"].get("contentMetadata")
+                return meta.get("contentRole") if isinstance(meta, dict) else None
+
             if content_role:
-                matches = [
-                    m
-                    for m in matches
-                    if m.get("contentMetadata", {}).get("contentRole") == content_role
-                ]
+                hits = [hit for hit in hits if _role(hit) == content_role]
             if content_types:
                 ct_set = set(content_types)
-                matches = [
-                    m
-                    for m in matches
-                    if m.get("contentMetadata", {}).get("contentRole") in ct_set
-                    or m.get("type") in ct_set
+                hits = [
+                    hit
+                    for hit in hits
+                    if _role(hit) in ct_set or hit["element"].get("type") in ct_set
                 ]
 
             filter_desc = ""
@@ -5909,7 +5941,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             elif content_types:
                 filter_desc = f" (types: {', '.join(content_types)})"
 
-            if not matches:
+            if not hits and unreadable:
+                # The unreadable results may have matched the filter.
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=(
+                            f"Search for '{text}'{filter_desc}: UNKNOWN — no "
+                            f"readable result matched; {unreadable} result(s) "
+                            "carried no readable element"
+                        ),
+                    )
+                ]
+            if not hits:
                 return [
                     types.TextContent(
                         type="text",
@@ -5917,11 +5961,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     )
                 ]
             lines = [
-                f"Found {len(matches)} element(s) matching '{text}'{filter_desc}:",
+                f"Found {len(hits)} element(s) matching '{text}'{filter_desc}:",
                 "",
             ]
-            for m in matches:
-                lines.append(format_element_summary(m))
+            if unreadable:
+                lines.insert(
+                    1, f"({unreadable} more result(s) carried no readable element)"
+                )
+            for hit in hits:
+                line = format_element_summary(hit["element"])
+                conf = hit.get("confidence")
+                if isinstance(conf, int | float) and not isinstance(conf, bool):
+                    line += f" (confidence {conf:.2f})"
+                lines.append(line)
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_find":

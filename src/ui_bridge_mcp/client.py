@@ -375,6 +375,7 @@ class UIBridgeClient:
         json_data: dict[str, Any] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         params: dict[str, str] | None = None,
+        bare_list_key: str | None = None,
     ) -> UIBridgeResponse:
         """Make an HTTP request to the UI Bridge API.
 
@@ -384,6 +385,11 @@ class UIBridgeClient:
             json_data: Optional JSON body for POST requests.
             timeout: Request timeout in seconds.
             params: Optional query parameters for GET requests.
+            bare_list_key: For a route the runner serves UNWRAPPED (no
+                ``success`` envelope): a 200 body that has no ``success`` key
+                but carries a list under this key is the route's answer, and
+                is returned whole as ``data``. Every other route keeps the
+                rule that an absent ``success`` is a failure.
         """
         client = await self._get_client()
         url = f"{self.base_url}{endpoint}"
@@ -413,6 +419,14 @@ class UIBridgeClient:
                     ),
                     code=CODE_PRODUCER_FAILED,
                     status=response.status_code,
+                )
+            if (
+                bare_list_key is not None
+                and "success" not in data
+                and isinstance(data.get(bare_list_key), list)
+            ):
+                return UIBridgeResponse(
+                    success=True, data=data, status=response.status_code
                 )
             # Absent `success` is a failure, never a success.
             success = data.get("success", False) is True
@@ -926,7 +940,12 @@ class UIBridgeClient:
             body["contentRole"] = content_role
         if content_types:
             body["contentTypes"] = content_types
-        return await self._request("POST", "/ui-bridge/sdk/ai/search", body)
+        # The runner unwraps this route: both its SDK path and its IPC fallback
+        # (qontinui-runner sdk_client.rs handle_ai_search) answer the bare
+        # search response, {results: [...], ...}, with no success envelope.
+        return await self._request(
+            "POST", "/ui-bridge/sdk/ai/search", body, bare_list_key="results"
+        )
 
     async def sdk_ai_find(
         self,
