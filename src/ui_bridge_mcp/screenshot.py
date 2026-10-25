@@ -982,6 +982,18 @@ def _has_unmeasured_geometry(el: dict[str, Any]) -> bool:
     return "rect" not in state and state.get("visible", True) is not False
 
 
+def _is_laid_out(el: dict[str, Any]) -> bool:
+    """Layout input: an element with a rect that the snapshot does not mark hidden.
+
+    This includes elements whose ``visible`` field is absent or null, so layout
+    keeps seeing them; the ``Elements: N visible`` count does not (see its caller).
+    """
+    state = element_state(el)
+    visible = state.get("visible", True)
+    # ``visible: null`` says no more than an absent field, so it is not "hidden".
+    return bool(state.get("rect")) and (visible is None or bool(visible))
+
+
 def _scroll_lines(viewport: dict[str, Any], vp_h: float) -> list[str]:
     """Scroll statement for a viewport whose size is known.
 
@@ -1060,16 +1072,23 @@ def generate_visual_description(
     else:
         lines.append(_unknown_line("Viewport"))
 
-    visible_elements: list[dict[str, Any]] = []
+    # ``laid_out`` feeds layout detection, which needs geometry, not a statement
+    # of visibility. ``visible`` is the subset whose snapshot actually carries a
+    # ``visible`` field; every count printed below is over that subset.
+    laid_out: list[dict[str, Any]] = []
+    visible: list[dict[str, Any]] = []
     if elements is None:
         lines.append(_unknown_line("Elements"))
     else:
-        visible_elements = [
-            el
-            for el in elements
-            if element_state(el).get("visible", True) and element_state(el).get("rect")
+        laid_out = [el for el in elements if _is_laid_out(el)]
+        visible = [
+            el for el in laid_out if element_state(el).get("visible") is not None
         ]
-        lines.append(f"Elements: {len(visible_elements)} visible")
+        lines.append(f"Elements: {len(visible)} visible")
+        unstated = len(laid_out) - len(visible)
+        if unstated:
+            noun = "element" if unstated == 1 else "elements"
+            lines.append(_unknown_line(f"Visibility of {unstated} {noun}"))
         unmeasured = sum(1 for el in elements if _has_unmeasured_geometry(el))
         if unmeasured:
             noun = "element" if unmeasured == 1 else "elements"
@@ -1080,7 +1099,7 @@ def generate_visual_description(
         lines.append("")
         lines.append(_unknown_line("Layout"))
     else:
-        regions = _detect_layout_regions(visible_elements, vp_w, vp_h)
+        regions = _detect_layout_regions(laid_out, vp_w, vp_h)
         if regions:
             lines.append("")
             lines.append("Layout:")
@@ -1090,7 +1109,7 @@ def generate_visual_description(
     if elements is not None:
         # Element type breakdown
         type_counts: dict[str, int] = {}
-        for el in visible_elements:
+        for el in visible:
             et = el.get("type", "unknown")
             type_counts[et] = type_counts.get(et, 0) + 1
 
@@ -1101,10 +1120,8 @@ def generate_visual_description(
                 lines.append(f"  {et}: {count}")
 
         # Interactive vs content
-        interactive = sum(
-            1 for el in visible_elements if el.get("category") == "interactive"
-        )
-        content = sum(1 for el in visible_elements if el.get("category") == "content")
+        interactive = sum(1 for el in visible if el.get("category") == "interactive")
+        content = sum(1 for el in visible if el.get("category") == "content")
         lines.append(f"\nInteractive: {interactive}, Content: {content}")
 
     # Modal status
