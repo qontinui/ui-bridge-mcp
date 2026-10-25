@@ -727,6 +727,29 @@ FAILURE_PATHS: list[FailurePath] = [
         "Page was not refreshed: no-op",
     ),
     FailurePath(
+        "sdk_ai_search: Search result UNKNOWN for '{}': the response carried no "
+        "`results` list (got {}). This is not 'no elements found'.",
+        "sdk_ai_search",
+        {"text": "Save"},
+        {"/ui-bridge/sdk/ai/search": ok({"matches": []})},
+        "Search result UNKNOWN for 'Save':",
+    ),
+    FailurePath(
+        "sdk_ai_search: Search result UNKNOWN for '{}': {} of {} result(s) "
+        "carried no `element` object.",
+        "sdk_ai_search",
+        {"text": "Save"},
+        {"/ui-bridge/sdk/ai/search": ok({"results": [{"confidence": 0.5}]})},
+        "Search result UNKNOWN for 'Save': 1 of 1",
+    ),
+    FailurePath(
+        "sdk_ai_search: Search result UNKNOWN for '{}'{}: none proven to match; {}",
+        "sdk_ai_search",
+        {"text": "Save", "content_role": "heading"},
+        {"/ui-bridge/sdk/ai/search": ok({"results": [{"element": {"id": "a"}}]})},
+        "Search result UNKNOWN for 'Save' (role: heading): none proven",
+    ),
+    FailurePath(
         "sdk_cross_app_compare: Cross-app comparison UNKNOWN: the response carried "
         "no scores; this transport does not compare apps.",
         "sdk_cross_app_compare",

@@ -1148,3 +1148,159 @@ def test_form_without_a_validity_is_unknown_not_valid(
     assert any("Password" in ln and "[INVALID]" in ln for ln in lines)
     name_line = next(ln for ln in lines if "Name" in ln)
     assert "INVALID" not in name_line and "UNKNOWN" not in name_line
+
+
+# =============================================================================
+# sdk_ai_search reads SearchResponse.results, not a `matches` key
+# =============================================================================
+
+SEARCH = "/ui-bridge/sdk/ai/search"
+_NO_META = object()
+
+
+def _hit(elem_id: str, confidence: float, **element: Any) -> dict[str, Any]:
+    """A ui-bridge ai/types.ts SearchResult around a minimal element."""
+    return {
+        "element": {
+            "id": elem_id,
+            "type": "button",
+            "label": elem_id.title(),
+            "state": {"visible": True, "enabled": True},
+            **element,
+        },
+        "confidence": confidence,
+        "matchReasons": ["text"],
+    }
+
+
+def test_search_lists_the_results_the_sdk_sends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ui-bridge server/handlers.ts aiSearch returns SearchResponse.results."""
+    answering(
+        monkeypatch,
+        {SEARCH: ok({"results": [_hit("save", 0.9), _hit("cancel", 0.4)]})},
+    )
+    result = call("sdk_ai_search", {"text": "button"})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "Found 2 element(s) matching 'button':",
+        "",
+        "- save (button): Save (90%)",
+        "- cancel (button): Cancel (40%)",
+    ]
+
+
+def test_search_with_no_results_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {SEARCH: ok({"results": [], "scannedCount": 12})})
+    result = call("sdk_ai_search", {"text": "button"})
+    assert result.isError is False
+    assert text(result) == "No elements found matching: button"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"matches": [_hit("save", 0.9)]}, {"results": None}, {}, {"results": {"save": 1}}],
+    ids=["legacy-matches-key", "results-null", "results-absent", "results-dict"],
+)
+def test_search_without_results_is_unknown_not_none_found(
+    data: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answering(monkeypatch, {SEARCH: ok(data)})
+    result = call("sdk_ai_search", {"text": "button"})
+    assert result.isError is True
+    assert text(result).startswith("Search result UNKNOWN for 'button':")
+
+
+def test_search_content_role_filter_reads_the_element(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    heading = _hit(
+        "title",
+        0.8,
+        type="heading",
+        category="content",
+        contentMetadata={"contentRole": "heading"},
+    )
+    answering(monkeypatch, {SEARCH: ok({"results": [heading, _hit("save", 0.9)]})})
+    result = call("sdk_ai_search", {"text": "title", "content_role": "heading"})
+    assert result.isError is False
+    lines = text(result).splitlines()
+    assert lines[0] == "Found 1 element(s) matching 'title' (role: heading):"
+    assert lines[2].startswith("- title (heading): Title")
+    assert "save" not in text(result)
+
+
+def test_search_content_types_filter_reads_the_element_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    link = _hit("docs", 0.7, type="nav-text")
+    answering(monkeypatch, {SEARCH: ok({"results": [link, _hit("save", 0.9)]})})
+    result = call("sdk_ai_search", {"text": "x", "content_types": ["nav-text"]})
+    assert result.isError is False
+    assert "- docs (nav-text): Docs (70%)" in text(result)
+    assert "save" not in text(result)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["x", {"confidence": 0.5}, {"element": None, "confidence": 0.5}],
+    ids=["not-an-object", "element-absent", "element-null"],
+)
+def test_search_result_without_an_element_is_unknown_not_dropped(
+    bad: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answering(monkeypatch, {SEARCH: ok({"results": [_hit("save", 0.9), bad]})})
+    result = call("sdk_ai_search", {"text": "button"})
+    assert result.isError is True
+    assert text(result) == (
+        "Search result UNKNOWN for 'button': 1 of 2 result(s) carried no "
+        "`element` object."
+    )
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [_NO_META, {}, {"contentRole": None}],
+    ids=["metadata-absent", "role-absent", "role-null"],
+)
+def test_search_filter_with_only_unjudged_results_is_unknown_not_none(
+    meta: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A result with no contentMetadata.contentRole is not a proven non-match."""
+    extra = {} if meta is _NO_META else {"contentMetadata": meta}
+    answering(monkeypatch, {SEARCH: ok({"results": [_hit("save", 0.9, **extra)]})})
+    result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
+    assert result.isError is True
+    assert text(result) == (
+        "Search result UNKNOWN for 't' (role: heading): none proven to match; "
+        "1 other result(s) carried no contentMetadata.contentRole, so whether "
+        "they match the filter is UNKNOWN."
+    )
+
+
+def test_search_filter_names_unjudged_results_beside_its_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    heading = _hit("title", 0.8, contentMetadata={"contentRole": "heading"})
+    answering(monkeypatch, {SEARCH: ok({"results": [heading, _hit("save", 0.9)]})})
+    result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
+    assert result.isError is False
+    assert text(result).splitlines()[-1] == (
+        "1 other result(s) carried no contentMetadata.contentRole, so whether "
+        "they match the filter is UNKNOWN."
+    )
+
+
+def test_search_filter_counts_only_unjudged_results_it_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A type match without contentMetadata is kept, so it is not counted."""
+    answering(
+        monkeypatch,
+        {SEARCH: ok({"results": [_hit("docs", 0.7, type="nav-text")]})},
+    )
+    result = call("sdk_ai_search", {"text": "x", "content_types": ["nav-text"]})
+    assert "contentMetadata" not in text(result)

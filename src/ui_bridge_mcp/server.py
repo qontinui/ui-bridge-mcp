@@ -5883,56 +5883,50 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not response.success:
                 return _error_result(response)
-            # Both producers (the SDK's aiSearch handler and the runner's IPC
-            # fallback) answer {results: [{element, confidence, ...}], ...}.
-            # A body with no results list says nothing about whether anything
-            # matched, so it is not rendered as "No elements found".
-            raw = (
-                response.data.get("results")
-                if isinstance(response.data, dict)
-                else None
+            # ui-bridge ai/types.ts SearchResponse: `results` is a list of
+            # SearchResult {element, confidence, matchReasons}. An absent
+            # `results` is UNKNOWN, not "no elements found".
+            results = _as_dict(response.data).get("results")
+            if not isinstance(results, list):
+                return _tool_error(
+                    f"Search result UNKNOWN for '{text}': the response carried no "
+                    f"`results` list (got {type(results).__name__}). This is not "
+                    "'no elements found'."
+                )
+            # A result with no element object is not a match we can show, and
+            # dropping it would shrink the count: the whole answer is UNKNOWN.
+            malformed = sum(
+                1
+                for r in results
+                if not isinstance(r, dict) or not isinstance(r.get("element"), dict)
             )
-            if not isinstance(raw, list):
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=(
-                            f"Search for '{text}': UNKNOWN — the response carried "
-                            "no results list"
-                        ),
-                    )
-                ]
-            hits: list[dict[str, Any]] = [
-                r
-                for r in raw
-                if isinstance(r, dict) and isinstance(r.get("element"), dict)
-            ]
-            unreadable = len(raw) - len(hits)
-            if raw and not hits:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=(
-                            f"Search for '{text}': UNKNOWN — {len(raw)} result(s) "
-                            "carried no readable element"
-                        ),
-                    )
-                ]
+            if malformed:
+                return _tool_error(
+                    f"Search result UNKNOWN for '{text}': {malformed} of "
+                    f"{len(results)} result(s) carried no `element` object."
+                )
+            matches = [(r["element"], r.get("confidence")) for r in results]
 
             # Client-side content filtering as fallback until SDK handlers
-            # support the contentRole/contentTypes parameters natively
-            def _role(hit: dict[str, Any]) -> Any:
-                meta = hit["element"].get("contentMetadata")
-                return meta.get("contentRole") if isinstance(meta, dict) else None
-
+            # support the contentRole/contentTypes parameters natively. An
+            # element with no contentMetadata cannot be judged by role; say
+            # how many were dropped that way rather than reading them as
+            # non-matches silently.
+            unfiltered = matches
             if content_role:
-                hits = [hit for hit in hits if _role(hit) == content_role]
+                matches = [
+                    (el, conf)
+                    for el, conf in matches
+                    if _as_dict(el.get("contentMetadata")).get("contentRole")
+                    == content_role
+                ]
             if content_types:
                 ct_set = set(content_types)
-                hits = [
-                    hit
-                    for hit in hits
-                    if _role(hit) in ct_set or hit["element"].get("type") in ct_set
+                matches = [
+                    (el, conf)
+                    for el, conf in matches
+                    if _as_dict(el.get("contentMetadata")).get("contentRole") in ct_set
+                    or el.get("type") in ct_set
                 ]
 
             filter_desc = ""
@@ -5940,20 +5934,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 filter_desc = f" (role: {content_role})"
             elif content_types:
                 filter_desc = f" (types: {', '.join(content_types)})"
+            kept = {id(el) for el, _ in matches}
+            unjudged = sum(
+                1
+                for el, _ in unfiltered
+                if id(el) not in kept
+                and not isinstance(
+                    _as_dict(el.get("contentMetadata")).get("contentRole"), str
+                )
+            )
+            unjudged_note = (
+                f"{unjudged} other result(s) carried no contentMetadata.contentRole, "
+                "so whether they match the filter is UNKNOWN."
+                if unjudged
+                else ""
+            )
 
-            if not hits and unreadable:
-                # The unreadable results may have matched the filter.
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=(
-                            f"Search for '{text}'{filter_desc}: UNKNOWN — no "
-                            f"readable result matched; {unreadable} result(s) "
-                            "carried no readable element"
-                        ),
+            if not matches:
+                if unjudged:
+                    return _tool_error(
+                        f"Search result UNKNOWN for '{text}'{filter_desc}: none "
+                        f"proven to match; {unjudged_note}"
                     )
-                ]
-            if not hits:
                 return [
                     types.TextContent(
                         type="text",
@@ -5961,19 +5963,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     )
                 ]
             lines = [
-                f"Found {len(hits)} element(s) matching '{text}'{filter_desc}:",
+                f"Found {len(matches)} element(s) matching '{text}'{filter_desc}:",
                 "",
             ]
-            if unreadable:
-                lines.insert(
-                    1, f"({unreadable} more result(s) carried no readable element)"
-                )
-            for hit in hits:
-                line = format_element_summary(hit["element"])
-                conf = hit.get("confidence")
-                if isinstance(conf, int | float) and not isinstance(conf, bool):
-                    line += f" (confidence {conf:.2f})"
+            for el, conf in matches:
+                line = format_element_summary(el)
+                if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+                    line += f" ({conf:.0%})"
                 lines.append(line)
+            if unjudged_note:
+                lines += ["", unjudged_note]
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_find":
