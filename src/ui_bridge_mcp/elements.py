@@ -15,3 +15,14 @@ def element_state(el: dict[str, Any]) -> dict[str, Any]:
     """
     state = el.get("state")
     return state if isinstance(state, dict) else {}
+
+
+def stated_visibility(state: dict[str, Any]) -> bool | None:
+    """What the snapshot says about visibility: ``True``, ``False``, or ``None``.
+
+    ``None`` means the producer did not say — the ``visible`` field is absent
+    or ``null``. A renderer must not read that as visible (the old
+    ``state.get("visible", True)`` default) nor as hidden (``not None``).
+    """
+    visible = state.get("visible")
+    return None if visible is None else bool(visible)

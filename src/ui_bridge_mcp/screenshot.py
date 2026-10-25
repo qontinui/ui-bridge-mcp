@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .elements import element_state
+from .elements import element_state, stated_visibility
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,9 @@ def _should_annotate(
     rect = state.get("rect")
     if not rect:
         return False
-    if not state.get("visible", True):
+    # Annotation needs geometry, not a statement of visibility (as layout does,
+    # see ``_is_laid_out``): only an explicit ``visible: false`` is skipped.
+    if stated_visibility(state) is False:
         return False
 
     elem_id = el.get("id", "")
@@ -618,15 +620,8 @@ def _draw_viewport_indicators(
             outline=(100, 100, 100),
         )
 
-    # Count off-screen elements
-    offscreen_count = sum(
-        1
-        for el in elements
-        if element_state(el).get("inViewport") is False
-        and element_state(el).get("visible", True)
-    )
-    if offscreen_count > 0:
-        label = f"{offscreen_count} off-screen"
+    label = _offscreen_label(elements)
+    if label:
         bbox = draw.textbbox((0, 0), label, font=font)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
@@ -641,6 +636,37 @@ def _draw_viewport_indicators(
     # Minimap in bottom-right corner
     if doc_w > vp_w or doc_h > vp_h:
         _draw_minimap(draw, iw, ih, vp_w, vp_h, doc_w, doc_h, scroll_x, scroll_y)
+
+
+def _offscreen_counts(elements: list[dict[str, Any]]) -> tuple[int, int]:
+    """Off-screen elements as ``(stated visible, visibility unstated)``.
+
+    An element whose snapshot omits ``visible`` (or sends ``null``) is not
+    counted as a visible off-screen element; it is counted separately so the
+    badge says the producer did not say, instead of folding it into the total.
+    """
+    visible = unstated = 0
+    for el in elements:
+        state = element_state(el)
+        if state.get("inViewport") is not False:
+            continue
+        stated = stated_visibility(state)
+        if stated is None:
+            unstated += 1
+        elif stated:
+            visible += 1
+    return visible, unstated
+
+
+def _offscreen_label(elements: list[dict[str, Any]]) -> str | None:
+    """The off-screen badge text, or ``None`` when there is nothing to report."""
+    visible, unstated = _offscreen_counts(elements)
+    if not visible and not unstated:
+        return None
+    label = f"{visible} off-screen"
+    if unstated:
+        label += f" (+{unstated} visibility unknown)"
+    return label
 
 
 def _draw_minimap(
@@ -718,7 +744,7 @@ def draw_box_model_overlay(
         eid = el.get("id", "")
         state = element_state(el)
         rect = state.get("rect")
-        if not rect or not state.get("visible", True):
+        if not rect or stated_visibility(state) is False:
             continue
 
         dd = design_map.get(eid)
@@ -838,7 +864,7 @@ def draw_accessibility_overlay(
     for el in elements:
         state = element_state(el)
         rect = state.get("rect")
-        if not rect or not state.get("visible", True):
+        if not rect or stated_visibility(state) is False:
             continue
 
         eid = el.get("id", "")
