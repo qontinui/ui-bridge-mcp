@@ -62,8 +62,25 @@ Add to your MCP settings:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QONTINUI_RUNNER_HOST` | `localhost` (or WSL host) | Runner hostname |
+| `QONTINUI_RUNNER_HOST` | `127.0.0.1` | Runner hostname. The runner listens on the IPv4 loopback only; see [Reaching a Windows runner from WSL](#reaching-a-windows-runner-from-wsl). |
 | `QONTINUI_RUNNER_PORT` | `9876` | Runner port |
+
+#### Reaching a Windows runner from WSL
+
+The runner binds `127.0.0.1` only, and its Host gate refuses, among others, a
+request whose `Host` is neither a loopback name with the runner's bound port nor a
+`QONTINUI_RUNNER_ALLOWED_HOSTS` entry (`403 HOST_NOT_LOOPBACK`).
+
+- **WSL1, or WSL2 in mirrored networking mode** (`networkingMode=mirrored` in
+  `.wslconfig`) shares the Windows loopback, so the default works. Every
+  process in every WSL distro then reaches the runner as a loopback caller,
+  credential routes included, so use it only where you trust every WSL user
+  and container on the machine.
+- **WSL2 in NAT mode** (the default) cannot reach the runner, because the runner
+  listens on no address WSL can reach. Switch to mirrored
+  mode. Forwarding a Windows port to the runner is not a supported setup:
+  every client that can reach the forwarded address arrives at the runner as
+  `127.0.0.1`, with a local caller's access.
 
 ## Available Tools
 

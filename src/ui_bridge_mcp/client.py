@@ -19,20 +19,14 @@ ELEMENT_DISCOVERY_TIMEOUT = 60.0
 EXECUTE_WITH_DIFF_TIMEOUT_SLACK = 10.0
 
 
-def get_windows_host() -> str:
-    """Get the Windows host IP address from WSL.
-
-    In WSL2, the Windows host is accessible via the IP in /etc/resolv.conf.
-    Falls back to localhost for native Windows/Mac/Linux.
-    """
-    try:
-        with open("/etc/resolv.conf") as f:
-            for line in f:
-                if line.startswith("nameserver"):
-                    return line.split()[1]
-    except (FileNotFoundError, IndexError):
-        pass
-    return "localhost"
+# The default runner host. The runner binds the IPv4 loopback only, so this is
+# the one address that reaches it from the same OS. ``localhost`` is not used
+# because it resolves to ``::1`` first on Windows and pays a doomed IPv6
+# connect. The first /etc/resolv.conf nameserver (the old default) is a DNS
+# resolver on native Linux and macOS, and under NAT-mode WSL2 it is typically
+# WSL's DNS-tunnelling stub or the Windows host's vEthernet IP, neither of which
+# the runner binds; see the README for reaching a Windows runner from WSL.
+LOOPBACK_HOST = "127.0.0.1"
 
 
 # Observation ``UnknownCode`` values (wire contract, snake_case) that this client
@@ -325,16 +319,22 @@ class UIBridgeClient:
     def __init__(
         self,
         host: str | None = None,
-        port: int = DEFAULT_RUNNER_PORT,
+        port: int | None = None,
     ) -> None:
         """Initialize the client.
 
+        An explicit argument wins, then the environment variable, then the default.
+
         Args:
-            host: Runner host. Auto-detected from WSL if None.
-            port: Runner port. Defaults to 9876.
+            host: Runner host. Defaults to QONTINUI_RUNNER_HOST, else 127.0.0.1.
+            port: Runner port. Defaults to QONTINUI_RUNNER_PORT, else 9876.
         """
-        self.host = host or os.environ.get("QONTINUI_RUNNER_HOST") or get_windows_host()
-        self.port = int(os.environ.get("QONTINUI_RUNNER_PORT", port))
+        self.host = host or os.environ.get("QONTINUI_RUNNER_HOST") or LOOPBACK_HOST
+        self.port = (
+            port
+            if port is not None
+            else int(os.environ.get("QONTINUI_RUNNER_PORT") or DEFAULT_RUNNER_PORT)
+        )
         self.base_url = f"http://{self.host}:{self.port}"
         self._client: httpx.AsyncClient | None = None
 
