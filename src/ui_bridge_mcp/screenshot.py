@@ -999,13 +999,13 @@ def _has_unmeasured_geometry(el: dict[str, Any]) -> bool:
     """True when an element's geometry cannot be read from the snapshot.
 
     The element has no ``state`` object, or a ``state`` with no ``rect`` key and
-    no explicit ``visible: false``. A present ``rect: null`` is the producer
+    no ``visible`` that reads as hidden (``stated_visibility`` is ``False``). A present ``rect: null`` is the producer
     saying "not rendered" and is not counted.
     """
     state = el.get("state")
     if not isinstance(state, dict):
         return True
-    return "rect" not in state and state.get("visible", True) is not False
+    return "rect" not in state and stated_visibility(state) is not False
 
 
 def _is_laid_out(el: dict[str, Any]) -> bool:
@@ -1015,9 +1015,8 @@ def _is_laid_out(el: dict[str, Any]) -> bool:
     keeps seeing them; the ``Elements: N visible`` count does not (see its caller).
     """
     state = element_state(el)
-    visible = state.get("visible", True)
-    # ``visible: null`` says no more than an absent field, so it is not "hidden".
-    return bool(state.get("rect")) and (visible is None or bool(visible))
+    # Absent and ``visible: null`` say no more than each other, so neither is "hidden".
+    return bool(state.get("rect")) and stated_visibility(state) is not False
 
 
 def _scroll_lines(viewport: dict[str, Any], vp_h: float) -> list[str]:
@@ -1108,7 +1107,7 @@ def generate_visual_description(
     else:
         laid_out = [el for el in elements if _is_laid_out(el)]
         visible = [
-            el for el in laid_out if element_state(el).get("visible") is not None
+            el for el in laid_out if stated_visibility(element_state(el)) is not None
         ]
         lines.append(f"Elements: {len(visible)} visible")
         unstated = len(laid_out) - len(visible)

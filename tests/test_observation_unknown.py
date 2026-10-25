@@ -847,3 +847,44 @@ def test_element_formatters_stated_visibility(visible: bool, flagged: bool) -> N
     assert ("hidden" in compact) is flagged
     assert "unknown" not in summary
     assert "unknown" not in compact
+
+
+_RECT = {"x": 0, "y": 0, "width": 10, "height": 10}
+
+
+@pytest.mark.parametrize(
+    ("visible", "laid_out"),
+    [
+        (_NOT_GIVEN, True),
+        (None, True),
+        (True, True),
+        (False, False),
+        (0, False),
+        ("", False),
+    ],
+)
+def test_layout_input_excludes_only_explicitly_hidden(
+    visible: Any, laid_out: bool
+) -> None:
+    from ui_bridge_mcp.screenshot import _is_laid_out
+
+    assert _is_laid_out(_bare(visible, rect=_RECT)) is laid_out
+
+
+@pytest.mark.parametrize(
+    ("visible", "unmeasured"),
+    [
+        (_NOT_GIVEN, True),
+        (None, True),
+        (True, True),
+        (False, False),
+        (0, False),
+        ("", False),
+    ],
+)
+def test_unmeasured_geometry_excludes_only_explicitly_hidden(
+    visible: Any, unmeasured: bool
+) -> None:
+    from ui_bridge_mcp.screenshot import _has_unmeasured_geometry
+
+    assert _has_unmeasured_geometry(_bare(visible)) is unmeasured
