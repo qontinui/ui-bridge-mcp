@@ -829,7 +829,7 @@ def test_annotation_skips_explicitly_hidden() -> None:
 
 @pytest.mark.parametrize("visible", [_NOT_GIVEN, None])
 def test_element_formatters_say_visibility_unknown(visible: Any) -> None:
-    el = _bare(visible)
+    el = _bare(visible, enabled=True)  # isolate visibility
     summary = server_mod.format_element_summary(el)
     compact = server_mod.format_element_compact(el, "@e1")
     assert "[visibility unknown]" in summary
@@ -840,7 +840,7 @@ def test_element_formatters_say_visibility_unknown(visible: Any) -> None:
 
 @pytest.mark.parametrize(("visible", "flagged"), [(True, False), (False, True)])
 def test_element_formatters_stated_visibility(visible: bool, flagged: bool) -> None:
-    el = _bare(visible)
+    el = _bare(visible, enabled=True)  # isolate visibility
     summary = server_mod.format_element_summary(el)
     compact = server_mod.format_element_compact(el, "@e1")
     assert ("hidden" in summary) is flagged

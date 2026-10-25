@@ -20,7 +20,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .client import AI_ASSERT_STATES, UIBridgeClient, UIBridgeResponse
-from .elements import element_state, stated_visibility
+from .elements import element_state, stated_enabled, stated_visibility
 from .screenshot import (
     AnnotationOptions,
     BaselineStore,
@@ -1312,7 +1312,10 @@ def format_element_compact(element: dict[str, Any], ref: str) -> str:
         flags.append("visibility-unknown")
     elif not visible:
         flags.append("hidden")
-    if not state.get("enabled", True):
+    enabled = stated_enabled(state)
+    if enabled is None:
+        flags.append("enabled-unknown")
+    elif not enabled:
         flags.append("disabled")
     if state.get("value"):
         flags.append("has-value")
@@ -1336,7 +1339,7 @@ def format_element_summary(element: dict[str, Any]) -> str:
     state = element_state(element)
     rect = state.get("rect", {})
     visible = stated_visibility(state)
-    enabled = state.get("enabled", True)
+    enabled = stated_enabled(state)
 
     bounds = ""
     if rect:
@@ -1347,7 +1350,9 @@ def format_element_summary(element: dict[str, Any]) -> str:
         status.append("visibility unknown")
     elif not visible:
         status.append("hidden")
-    if not enabled:
+    if enabled is None:
+        status.append("enabled unknown")
+    elif not enabled:
         status.append("disabled")
     status_str = f" [{', '.join(status)}]" if status else ""
 

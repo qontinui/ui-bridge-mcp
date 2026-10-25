@@ -26,3 +26,13 @@ def stated_visibility(state: dict[str, Any]) -> bool | None:
     """
     visible = state.get("visible")
     return None if visible is None else bool(visible)
+
+
+def stated_enabled(state: dict[str, Any]) -> bool | None:
+    """What the snapshot says about ``enabled``: ``True``, ``False``, or ``None``.
+
+    ``None`` means the field is absent or ``null``; the same reading as
+    :func:`stated_visibility`.
+    """
+    enabled = state.get("enabled")
+    return None if enabled is None else bool(enabled)
