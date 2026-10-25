@@ -89,6 +89,40 @@ def test_full_snapshot_has_no_unknown() -> None:
     assert "Elements: 2 visible" in desc
 
 
+def test_absent_visible_is_not_counted_visible() -> None:
+    # domain_spec/ui-bridge b2-d-mcp-absent-visible-counts-as-visible: an element
+    # with a rect and no ``visible`` field used to land in "N visible".
+    present = _full_snapshot()
+    absent = copy.deepcopy(present)
+    del absent["elements"][1]["state"]["visible"]
+    assert "Elements: 2 visible" in _describe(present)
+    out = _describe(absent)
+    assert "Elements: 1 visible" in out
+    assert _unknown("Visibility of 1 element") in out
+    # The breakdown counts the same population as "N visible" ...
+    assert "Interactive: 1, Content: 0" in out
+    assert "  button: 1" in out
+    # ... while layout still sees both, since it needs geometry only.
+    assert "  left-sidebar: 2 elements" in out
+
+
+def test_null_visible_is_unknown_not_hidden() -> None:
+    snap = _full_snapshot()
+    snap["elements"][0]["state"]["visible"] = None
+    snap["elements"][1]["state"]["visible"] = None
+    out = _describe(snap)
+    assert "Elements: 0 visible" in out
+    assert _unknown("Visibility of 2 elements") in out
+
+
+def test_explicitly_hidden_element_is_neither_visible_nor_unknown() -> None:
+    snap = _full_snapshot()
+    snap["elements"][1]["state"]["visible"] = False
+    out = _describe(snap)
+    assert "Elements: 1 visible" in out
+    assert "Visibility of" not in out
+
+
 def test_error_summary_absent_vs_healthy() -> None:
     present = _full_snapshot()
     absent = copy.deepcopy(present)
@@ -190,6 +224,7 @@ def test_state_null_is_unmeasured_not_a_crash() -> None:
     desc = _describe(snap)
     assert "Elements: 0 visible" in desc
     assert _unknown("Geometry of 1 element") in desc
+    assert "Visibility of" not in desc  # never reported twice
 
 
 @pytest.mark.parametrize(
@@ -304,6 +339,7 @@ def test_rect_key_absent_counts_but_rect_null_does_not() -> None:
     ]
     desc = _describe(snap)
     assert _unknown("Geometry of 1 element") in desc
+    assert "Visibility of" not in desc  # never reported twice
 
 
 def test_page_null_does_not_crash() -> None:
