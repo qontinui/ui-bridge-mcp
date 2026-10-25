@@ -64,3 +64,30 @@ def test_empty_environment_values_fall_through(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("QONTINUI_RUNNER_HOST", "")
     monkeypatch.setenv("QONTINUI_RUNNER_PORT", "")
     assert UIBridgeClient().base_url == "http://127.0.0.1:9876"
+
+
+@pytest.mark.parametrize(
+    "value", ["abc", "0", "65536", "-1", "98.76", "+9876", "9_876", "٩٨٧٦"]
+)
+def test_invalid_port_names_the_variable(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # An unusable value is a misconfiguration to report, not a silent fall
+    # back to 9876 and not int()'s bare "invalid literal" message.
+    monkeypatch.setenv("QONTINUI_RUNNER_PORT", value)
+    with pytest.raises(ValueError, match="QONTINUI_RUNNER_PORT"):
+        UIBridgeClient()
+
+
+def test_port_whitespace_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QONTINUI_RUNNER_PORT", " 9877 ")
+    assert UIBridgeClient().port == 9877
+    monkeypatch.setenv("QONTINUI_RUNNER_PORT", "   ")
+    assert UIBridgeClient().port == DEFAULT_RUNNER_PORT
+
+
+def test_host_whitespace_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("QONTINUI_RUNNER_HOST", " 10.0.0.5 ")
+    assert UIBridgeClient().host == "10.0.0.5"
+    monkeypatch.setenv("QONTINUI_RUNNER_HOST", "   ")
+    assert UIBridgeClient().host == LOOPBACK_HOST

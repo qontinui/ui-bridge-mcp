@@ -24,7 +24,8 @@ poetry add ui-bridge-mcp
 
 ## Prerequisites
 
-The MCP server requires the **qontinui-runner** to be running on port 9876.
+The MCP server requires the **qontinui-runner** to be running, by default at
+`127.0.0.1:9876` (see [Environment Variables](#environment-variables)).
 
 For external app access, the target application must have the UI Bridge SDK integrated.
 
@@ -63,7 +64,7 @@ Add to your MCP settings:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QONTINUI_RUNNER_HOST` | `127.0.0.1` | Runner hostname. The runner listens on the IPv4 loopback only; see [Reaching a Windows runner from WSL](#reaching-a-windows-runner-from-wsl). |
-| `QONTINUI_RUNNER_PORT` | `9876` | Runner port |
+| `QONTINUI_RUNNER_PORT` | `9876` | Runner port. Empty or blank means the default; a value that is not a port (1-65535) is an error naming this variable. |
 
 #### Reaching a Windows runner from WSL
 

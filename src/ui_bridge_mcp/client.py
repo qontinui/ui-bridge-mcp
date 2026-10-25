@@ -29,6 +29,25 @@ EXECUTE_WITH_DIFF_TIMEOUT_SLACK = 10.0
 LOOPBACK_HOST = "127.0.0.1"
 
 
+def _port_from_environment() -> int:
+    """Read QONTINUI_RUNNER_PORT, else the default; an unset or blank value is the default.
+
+    A value that is not a TCP port raises a ``ValueError`` naming the variable,
+    rather than ``int()``'s bare "invalid literal" or a URL that cannot connect.
+    Only ASCII digits are accepted: ``int()`` alone would also take ``+9876``,
+    ``9_876`` and non-ASCII digits.
+    """
+    raw = os.environ.get("QONTINUI_RUNNER_PORT", "").strip()
+    if not raw:
+        return DEFAULT_RUNNER_PORT
+    if not (raw.isascii() and raw.isdigit() and 1 <= int(raw) <= 65535):
+        raise ValueError(
+            f"QONTINUI_RUNNER_PORT={raw!r} is not a TCP port (1-65535); "
+            f"unset it to use the default {DEFAULT_RUNNER_PORT}"
+        )
+    return int(raw)
+
+
 # Observation ``UnknownCode`` values (wire contract, snake_case) that this client
 # assigns itself when the failure happened before any body could carry a code.
 CODE_APP_UNREACHABLE = "app_unreachable"
@@ -327,14 +346,13 @@ class UIBridgeClient:
 
         Args:
             host: Runner host. Defaults to QONTINUI_RUNNER_HOST, else 127.0.0.1.
-            port: Runner port. Defaults to QONTINUI_RUNNER_PORT, else 9876.
+            port: Runner port. Defaults to QONTINUI_RUNNER_PORT, else 9876. Only
+                the environment value is validated; an explicit port is used as given.
         """
-        self.host = host or os.environ.get("QONTINUI_RUNNER_HOST") or LOOPBACK_HOST
-        self.port = (
-            port
-            if port is not None
-            else int(os.environ.get("QONTINUI_RUNNER_PORT") or DEFAULT_RUNNER_PORT)
+        self.host = (
+            host or os.environ.get("QONTINUI_RUNNER_HOST", "").strip() or LOOPBACK_HOST
         )
+        self.port = port if port is not None else _port_from_environment()
         self.base_url = f"http://{self.host}:{self.port}"
         self._client: httpx.AsyncClient | None = None
 
