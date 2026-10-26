@@ -735,6 +735,13 @@ FAILURE_PATHS: list[FailurePath] = [
         "Element list UNKNOWN: the response carried no element list (got NoneType)",
     ),
     FailurePath(
+        "sdk_elements: Element list UNKNOWN{}: none proven present. {}",
+        "sdk_elements",
+        {},
+        {"/ui-bridge/sdk/elements": ok(["junk"])},
+        "Element list UNKNOWN: none proven present. 1 element(s) were not objects.",
+    ),
+    FailurePath(
         "sdk_ai_search: Search result UNKNOWN for '{}': the response carried no "
         "`results` list (got {}). This is not 'no elements found'.",
         "sdk_ai_search",

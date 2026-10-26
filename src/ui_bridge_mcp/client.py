@@ -754,9 +754,9 @@ class UIBridgeClient:
             content_types: Filter to elements matching these content types
                 (e.g., ['heading', 'paragraph', 'badge']).
 
-        Note: These query parameters require SDK handler support.
-        The Rust relay currently does not forward query params for GET requests,
-        so these parameters will only take effect once the relay is updated.
+        The runner (qontinui-runner ``handle_elements``) reads these query
+        parameters and filters before answering; the tool filters again on
+        what comes back.
         """
         params: dict[str, str] | None = None
         if content_only or content_types:

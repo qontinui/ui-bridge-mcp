@@ -1483,11 +1483,77 @@ def test_elements_type_filter_reads_roles_the_way_the_sdk_does(
 def test_elements_type_filter_names_malformed_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    elements = [_el("odd", contentMetadata="heading"), _el("save")]
+    elements = [
+        _el("odd", contentMetadata="heading"),
+        _el("title", type="h2"),
+        _el("save"),
+    ]
     answering(monkeypatch, {ELEMENTS: ok(elements)})
     result = call("sdk_elements", {"content_types": ["heading"]})
     assert result.isError is False
     assert text(result).splitlines()[-1] == (
         "1 element(s) carried a malformed contentMetadata, so whether they match "
         "the filter is UNKNOWN."
+    )
+
+
+def test_elements_made_only_of_non_objects_is_unknown_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {ELEMENTS: ok(["junk"])})
+    result = call("sdk_elements", {})
+    assert result.isError is True
+    assert text(result) == (
+        "Element list UNKNOWN: none proven present. 1 element(s) were not objects."
+    )
+
+
+def test_elements_filter_with_only_malformed_metadata_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {ELEMENTS: ok([_el("odd", contentMetadata="heading")])})
+    result = call("sdk_elements", {"content_types": ["heading"]})
+    assert result.isError is True
+    assert text(result) == (
+        "Element list UNKNOWN (filtered: heading): none proven present. 1 "
+        "element(s) carried a malformed contentMetadata, so whether they match "
+        "the filter is UNKNOWN."
+    )
+
+
+def test_elements_with_no_elements_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {ELEMENTS: ok([])})
+    result = call("sdk_elements", {})
+    assert result.isError is False
+    assert text(result).splitlines()[0] == "SDK Elements (0):"
+
+
+def test_elements_content_only_reads_content_the_way_the_sdk_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    elements = [
+        _el("title", type="h2"),
+        _el("note", contentMetadata={}),
+        _el("body", category="content"),
+        _el("save"),
+    ]
+    answering(monkeypatch, {ELEMENTS: ok(elements)})
+    result = call("sdk_elements", {"content_only": True})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "SDK Elements (3) (content only):",
+        "",
+        "- title (h2): Title",
+        "- note (button): Note",
+        "- body (button): Body",
+    ]
+
+
+def test_elements_label_names_both_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    answering(monkeypatch, {ELEMENTS: ok([_el("title", type="h2")])})
+    result = call("sdk_elements", {"content_only": True, "content_types": ["heading"]})
+    assert text(result).splitlines()[0] == (
+        "SDK Elements (1) (content only; filtered: heading):"
     )

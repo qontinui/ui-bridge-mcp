@@ -22,6 +22,7 @@ from mcp.server.stdio import stdio_server
 from .client import AI_ASSERT_STATES, UIBridgeClient, UIBridgeResponse
 from .elements import (
     element_state,
+    is_content_element,
     stated_content_role,
     stated_enabled,
     stated_visibility,
@@ -5603,10 +5604,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             unreadable = len(raw) - len(elements)
 
             # Client-side content filtering as fallback until SDK handlers
-            # support the contentOnly/contentTypes parameters natively. The
-            # role is read the way the SDK reads it (see sdk_ai_search).
+            # support the contentOnly/contentTypes parameters natively. Content
+            # and roles are read the way the SDK reads them.
             if content_only:
-                elements = [el for el in elements if el.get("category") == "content"]
+                elements = [el for el in elements if is_content_element(el)]
             unjudged = 0
             if content_types:
                 ct_set = set(content_types)
@@ -5641,11 +5642,25 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 elements = elements[:max_elements]
 
             total_count = len(elements) + overflow
-            filter_desc = ""
+            filters = []
             if content_only:
-                filter_desc = " (content only)"
-            elif content_types:
-                filter_desc = f" (filtered: {', '.join(content_types)})"
+                filters.append("content only")
+            if content_types:
+                filters.append(f"filtered: {', '.join(content_types)}")
+            filter_desc = f" ({'; '.join(filters)})" if filters else ""
+            notes = []
+            if unreadable:
+                notes.append(f"{unreadable} element(s) were not objects.")
+            if unjudged:
+                notes.append(
+                    f"{unjudged} element(s) carried a malformed contentMetadata, "
+                    "so whether they match the filter is UNKNOWN."
+                )
+            if not elements and notes:
+                return _tool_error(
+                    f"Element list UNKNOWN{filter_desc}: none proven present. "
+                    f"{' '.join(notes)}"
+                )
 
             if agent_mode:
                 ref_manager.reset()
@@ -5663,13 +5678,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
             if overflow:
                 lines.append(f"\n+{overflow} more elements not shown")
-            if unreadable:
-                lines.append(f"\n{unreadable} element(s) were not objects.")
-            if unjudged:
-                lines.append(
-                    f"\n{unjudged} element(s) carried a malformed contentMetadata, "
-                    "so whether they match the filter is UNKNOWN."
-                )
+            for note in notes:
+                lines.append(f"\n{note}")
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_discover":

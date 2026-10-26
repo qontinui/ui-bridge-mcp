@@ -78,3 +78,20 @@ def stated_content_role(el: dict[str, Any]) -> tuple[bool, str | None]:
     if re.fullmatch(r"h[1-6]", el_type):
         return True, "heading"
     return True, _TYPE_ROLES.get(el_type)
+
+
+def is_content_element(el: dict[str, Any]) -> bool:
+    """Whether the SDK counts the element as content, not interactive.
+
+    ui-bridge ai/content-comparison.ts isContentElement: a ``content``
+    category, any ``contentMetadata`` at all, or a content role read by
+    :func:`stated_content_role`.
+    """
+    if el.get("category") == "content":
+        return True
+    meta = el.get("contentMetadata")
+    # JavaScript truthiness: any object, array or non-empty string counts.
+    if meta is not None and meta is not False and meta != "" and meta != 0:
+        return True
+    known, role = stated_content_role(el)
+    return known and role is not None
