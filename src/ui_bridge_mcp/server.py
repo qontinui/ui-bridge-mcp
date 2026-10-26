@@ -5893,19 +5893,25 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"`results` list (got {type(results).__name__}). This is not "
                     "'no elements found'."
                 )
-            # A result with no element object is not a match we can show, and
-            # dropping it would shrink the count: the whole answer is UNKNOWN.
-            malformed = sum(
-                1
+            # A result with no element object cannot be shown or filtered. The
+            # readable ones are still an answer, but the count of the rest is
+            # always said, and an answer made only of them is UNKNOWN.
+            matches = [
+                (r["element"], r.get("confidence"))
                 for r in results
-                if not isinstance(r, dict) or not isinstance(r.get("element"), dict)
+                if isinstance(r, dict) and isinstance(r.get("element"), dict)
+            ]
+            unreadable = len(results) - len(matches)
+            unreadable_note = (
+                f"({unreadable} more result(s) carried no readable element)"
+                if unreadable
+                else ""
             )
-            if malformed:
+            if unreadable and not matches:
                 return _tool_error(
-                    f"Search result UNKNOWN for '{text}': {malformed} of "
-                    f"{len(results)} result(s) carried no `element` object."
+                    f"Search result UNKNOWN for '{text}': {unreadable} result(s) "
+                    "carried no readable element. This is not 'no elements found'."
                 )
-            matches = [(r["element"], r.get("confidence")) for r in results]
 
             # Client-side content filtering as fallback until SDK handlers
             # support the contentRole/contentTypes parameters natively. An
@@ -5949,12 +5955,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 if unjudged
                 else ""
             )
+            notes = [n for n in (unreadable_note, unjudged_note) if n]
 
             if not matches:
-                if unjudged:
+                if notes:
                     return _tool_error(
                         f"Search result UNKNOWN for '{text}'{filter_desc}: none "
-                        f"proven to match; {unjudged_note}"
+                        f"proven to match; {' '.join(notes)}"
                     )
                 return [
                     types.TextContent(
@@ -5969,10 +5976,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             for el, conf in matches:
                 line = format_element_summary(el)
                 if isinstance(conf, (int, float)) and not isinstance(conf, bool):
-                    line += f" ({conf:.0%})"
+                    line += f" (confidence {conf:.2f})"
                 lines.append(line)
-            if unjudged_note:
-                lines += ["", unjudged_note]
+            if notes:
+                lines += ["", *notes]
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_find":

@@ -130,14 +130,18 @@ def test_content_types_filter_keeps_matching_roles(
     assert "- save" not in out
 
 
-def test_malformed_content_metadata_does_not_crash(
+def test_malformed_content_metadata_is_unjudged_not_a_non_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # A contentMetadata that is not an object says nothing about the role, so
+    # whether the element matches the filter is UNKNOWN, not "none found".
     hit = _hit("save")
     hit["element"]["contentMetadata"] = "not-a-dict"
     answering(monkeypatch, {PATH: _sdk_body([hit])})
-    out = _text(call("sdk_ai_search", {"text": "x", "content_role": "heading"}))
-    assert "No elements found" in out
+    result = call("sdk_ai_search", {"text": "x", "content_role": "heading"})
+    assert result.isError
+    assert "UNKNOWN" in _text(result)
+    assert "No elements found" not in _text(result)
 
 
 def test_filtered_out_with_unreadable_results_is_unknown(

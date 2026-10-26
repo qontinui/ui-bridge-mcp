@@ -1186,8 +1186,8 @@ def test_search_lists_the_results_the_sdk_sends(
     assert text(result).splitlines() == [
         "Found 2 element(s) matching 'button':",
         "",
-        "- save (button): Save (90%)",
-        "- cancel (button): Cancel (40%)",
+        "- save (button): Save (confidence 0.90)",
+        "- cancel (button): Cancel (confidence 0.40)",
     ]
 
 
@@ -1240,7 +1240,7 @@ def test_search_content_types_filter_reads_the_element_type(
     answering(monkeypatch, {SEARCH: ok({"results": [link, _hit("save", 0.9)]})})
     result = call("sdk_ai_search", {"text": "x", "content_types": ["nav-text"]})
     assert result.isError is False
-    assert "- docs (nav-text): Docs (70%)" in text(result)
+    assert "- docs (nav-text): Docs (confidence 0.70)" in text(result)
     assert "save" not in text(result)
 
 
@@ -1249,15 +1249,35 @@ def test_search_content_types_filter_reads_the_element_type(
     ["x", {"confidence": 0.5}, {"element": None, "confidence": 0.5}],
     ids=["not-an-object", "element-absent", "element-null"],
 )
-def test_search_result_without_an_element_is_unknown_not_dropped(
+def test_search_result_without_an_element_is_counted_not_dropped(
     bad: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     answering(monkeypatch, {SEARCH: ok({"results": [_hit("save", 0.9), bad]})})
     result = call("sdk_ai_search", {"text": "button"})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "Found 1 element(s) matching 'button':",
+        "",
+        "- save (button): Save (confidence 0.90)",
+        "",
+        "(1 more result(s) carried no readable element)",
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["x", {"confidence": 0.5}, {"element": None, "confidence": 0.5}],
+    ids=["not-an-object", "element-absent", "element-null"],
+)
+def test_search_of_only_unreadable_results_is_unknown(
+    bad: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answering(monkeypatch, {SEARCH: ok({"results": [bad]})})
+    result = call("sdk_ai_search", {"text": "button"})
     assert result.isError is True
     assert text(result) == (
-        "Search result UNKNOWN for 'button': 1 of 2 result(s) carried no "
-        "`element` object."
+        "Search result UNKNOWN for 'button': 1 result(s) carried no readable "
+        "element. This is not 'no elements found'."
     )
 
 

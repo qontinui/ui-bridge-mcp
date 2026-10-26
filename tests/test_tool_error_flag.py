@@ -735,12 +735,12 @@ FAILURE_PATHS: list[FailurePath] = [
         "Search result UNKNOWN for 'Save':",
     ),
     FailurePath(
-        "sdk_ai_search: Search result UNKNOWN for '{}': {} of {} result(s) "
-        "carried no `element` object.",
+        "sdk_ai_search: Search result UNKNOWN for '{}': {} result(s) carried no "
+        "readable element. This is not 'no elements found'.",
         "sdk_ai_search",
         {"text": "Save"},
         {"/ui-bridge/sdk/ai/search": ok({"results": [{"confidence": 0.5}]})},
-        "Search result UNKNOWN for 'Save': 1 of 1",
+        "Search result UNKNOWN for 'Save': 1 result(s) carried no readable",
     ),
     FailurePath(
         "sdk_ai_search: Search result UNKNOWN for '{}'{}: none proven to match; {}",
