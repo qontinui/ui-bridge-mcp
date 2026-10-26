@@ -743,10 +743,14 @@ FAILURE_PATHS: list[FailurePath] = [
         "Search result UNKNOWN for 'Save': 1 result(s) carried no readable",
     ),
     FailurePath(
-        "sdk_ai_search: Search result UNKNOWN for '{}'{}: none proven to match; {}",
+        "sdk_ai_search: Search result UNKNOWN for '{}'{}: none proven to match. {}",
         "sdk_ai_search",
         {"text": "Save", "content_role": "heading"},
-        {"/ui-bridge/sdk/ai/search": ok({"results": [{"element": {"id": "a"}}]})},
+        {
+            "/ui-bridge/sdk/ai/search": ok(
+                {"results": [{"element": {"id": "a", "contentMetadata": "x"}}]}
+            )
+        },
         "Search result UNKNOWN for 'Save' (role: heading): none proven",
     ),
     FailurePath(

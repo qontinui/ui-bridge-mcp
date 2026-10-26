@@ -98,7 +98,7 @@ def test_partly_unreadable_results_are_counted(monkeypatch: pytest.MonkeyPatch) 
     answering(monkeypatch, {PATH: _sdk_body([_hit("save"), "junk"])})
     out = _text(call("sdk_ai_search", {"text": "save"}))
     assert "Found 1 element(s)" in out
-    assert "(1 more result(s) carried no readable element)" in out
+    assert "1 result(s) carried no readable element." in out
 
 
 def test_content_role_filter_reads_the_element(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -148,6 +148,8 @@ def test_filtered_out_with_unreadable_results_is_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     answering(monkeypatch, {PATH: _sdk_body([_hit("save"), "junk"])})
-    out = _text(call("sdk_ai_search", {"text": "x", "content_role": "heading"}))
+    result = call("sdk_ai_search", {"text": "x", "content_role": "heading"})
+    out = _text(result)
+    assert result.isError
     assert "UNKNOWN" in out
     assert "No elements found" not in out

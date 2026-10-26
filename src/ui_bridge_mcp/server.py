@@ -20,7 +20,12 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .client import AI_ASSERT_STATES, UIBridgeClient, UIBridgeResponse
-from .elements import element_state, stated_enabled, stated_visibility
+from .elements import (
+    element_state,
+    stated_content_role,
+    stated_enabled,
+    stated_visibility,
+)
 from .screenshot import (
     AnnotationOptions,
     BaselineStore,
@@ -5896,72 +5901,58 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             # A result with no element object cannot be shown or filtered. The
             # readable ones are still an answer, but the count of the rest is
             # always said, and an answer made only of them is UNKNOWN.
-            matches = [
+            readable = [
                 (r["element"], r.get("confidence"))
                 for r in results
                 if isinstance(r, dict) and isinstance(r.get("element"), dict)
             ]
-            unreadable = len(results) - len(matches)
-            unreadable_note = (
-                f"({unreadable} more result(s) carried no readable element)"
-                if unreadable
-                else ""
-            )
-            if unreadable and not matches:
+            unreadable = len(results) - len(readable)
+            if unreadable and not readable:
                 return _tool_error(
                     f"Search result UNKNOWN for '{text}': {unreadable} result(s) "
                     "carried no readable element. This is not 'no elements found'."
                 )
 
             # Client-side content filtering as fallback until SDK handlers
-            # support the contentRole/contentTypes parameters natively. An
-            # element with no contentMetadata cannot be judged by role; say
-            # how many were dropped that way rather than reading them as
-            # non-matches silently.
-            unfiltered = matches
+            # support the contentRole/contentTypes parameters natively. The
+            # role is read the way the SDK reads it; an element whose
+            # contentMetadata is malformed cannot be judged, and is counted
+            # rather than read as a non-match.
+            ct_set = set(content_types or [])
+            hits: list[tuple[dict[str, Any], Any]] = []
+            unjudged = 0
+            for el, conf in readable:
+                if content_role or ct_set:
+                    known, role = stated_content_role(el)
+                    if not known:
+                        unjudged += 1
+                        continue
+                    if content_role and role != content_role:
+                        continue
+                    if ct_set and role not in ct_set and el.get("type") not in ct_set:
+                        continue
+                hits.append((el, conf))
+
+            filters = []
             if content_role:
-                matches = [
-                    (el, conf)
-                    for el, conf in matches
-                    if _as_dict(el.get("contentMetadata")).get("contentRole")
-                    == content_role
-                ]
+                filters.append(f"role: {content_role}")
             if content_types:
-                ct_set = set(content_types)
-                matches = [
-                    (el, conf)
-                    for el, conf in matches
-                    if _as_dict(el.get("contentMetadata")).get("contentRole") in ct_set
-                    or el.get("type") in ct_set
-                ]
-
-            filter_desc = ""
-            if content_role:
-                filter_desc = f" (role: {content_role})"
-            elif content_types:
-                filter_desc = f" (types: {', '.join(content_types)})"
-            kept = {id(el) for el, _ in matches}
-            unjudged = sum(
-                1
-                for el, _ in unfiltered
-                if id(el) not in kept
-                and not isinstance(
-                    _as_dict(el.get("contentMetadata")).get("contentRole"), str
+                filters.append(f"types: {', '.join(content_types)}")
+            filter_desc = f" ({'; '.join(filters)})" if filters else ""
+            notes = []
+            if unreadable:
+                notes.append(f"{unreadable} result(s) carried no readable element.")
+            if unjudged:
+                notes.append(
+                    f"{unjudged} result(s) carried a malformed contentMetadata, so "
+                    "whether they match the filter is UNKNOWN."
                 )
-            )
-            unjudged_note = (
-                f"{unjudged} other result(s) carried no contentMetadata.contentRole, "
-                "so whether they match the filter is UNKNOWN."
-                if unjudged
-                else ""
-            )
-            notes = [n for n in (unreadable_note, unjudged_note) if n]
 
-            if not matches:
+            if not hits:
                 if notes:
                     return _tool_error(
                         f"Search result UNKNOWN for '{text}'{filter_desc}: none "
-                        f"proven to match; {' '.join(notes)}"
+                        f"proven to match. {' '.join(notes)}"
                     )
                 return [
                     types.TextContent(
@@ -5970,10 +5961,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     )
                 ]
             lines = [
-                f"Found {len(matches)} element(s) matching '{text}'{filter_desc}:",
+                f"Found {len(hits)} element(s) matching '{text}'{filter_desc}:",
                 "",
             ]
-            for el, conf in matches:
+            for el, conf in hits:
                 line = format_element_summary(el)
                 if isinstance(conf, (int, float)) and not isinstance(conf, bool):
                     line += f" (confidence {conf:.2f})"
@@ -5981,7 +5972,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if notes:
                 lines += ["", *notes]
             return [types.TextContent(type="text", text="\n".join(lines))]
-
         elif name == "sdk_find":
             query = arguments["query"]
             context = arguments.get("context")

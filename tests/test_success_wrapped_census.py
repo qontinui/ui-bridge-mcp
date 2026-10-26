@@ -1260,7 +1260,7 @@ def test_search_result_without_an_element_is_counted_not_dropped(
         "",
         "- save (button): Save (confidence 0.90)",
         "",
-        "(1 more result(s) carried no readable element)",
+        "1 result(s) carried no readable element.",
     ]
 
 
@@ -1286,41 +1286,109 @@ def test_search_of_only_unreadable_results_is_unknown(
     [_NO_META, {}, {"contentRole": None}],
     ids=["metadata-absent", "role-absent", "role-null"],
 )
-def test_search_filter_with_only_unjudged_results_is_unknown_not_none(
+def test_search_filter_reads_an_unstated_role_as_not_content(
     meta: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A result with no contentMetadata.contentRole is not a proven non-match."""
+    """ui-bridge getContentRole: no stated role and no role-bearing type is no role."""
     extra = {} if meta is _NO_META else {"contentMetadata": meta}
     answering(monkeypatch, {SEARCH: ok({"results": [_hit("save", 0.9, **extra)]})})
     result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
-    assert result.isError is True
-    assert text(result) == (
-        "Search result UNKNOWN for 't' (role: heading): none proven to match; "
-        "1 other result(s) carried no contentMetadata.contentRole, so whether "
-        "they match the filter is UNKNOWN."
+    assert result.isError is False
+    assert text(result) == "No elements found matching: t (role: heading)"
+
+
+@pytest.mark.parametrize("el_type", ["h2", "heading", "H3"])
+def test_search_filter_falls_back_to_the_element_type(
+    el_type: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answering(
+        monkeypatch, {SEARCH: ok({"results": [_hit("title", 0.8, type=el_type)]})}
+    )
+    result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
+    assert result.isError is False
+    assert text(result).splitlines()[0] == (
+        "Found 1 element(s) matching 't' (role: heading):"
     )
 
 
-def test_search_filter_names_unjudged_results_beside_its_matches(
+@pytest.mark.parametrize(
+    "meta",
+    ["heading", {"contentRole": 7}, ["heading"]],
+    ids=["metadata-string", "role-not-a-string", "metadata-list"],
+)
+def test_search_filter_with_only_malformed_metadata_is_unknown_not_none(
+    meta: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hit = _hit("save", 0.9, contentMetadata=meta)
+    answering(monkeypatch, {SEARCH: ok({"results": [hit]})})
+    result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
+    assert result.isError is True
+    assert text(result) == (
+        "Search result UNKNOWN for 't' (role: heading): none proven to match. "
+        "1 result(s) carried a malformed contentMetadata, so whether they match "
+        "the filter is UNKNOWN."
+    )
+
+
+def test_search_filter_names_malformed_results_beside_its_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    heading = _hit("title", 0.8, contentMetadata={"contentRole": "heading"})
+    odd = _hit("odd", 0.5, contentMetadata="heading")
+    answering(
+        monkeypatch,
+        {SEARCH: ok({"results": [heading, _hit("save", 0.9), odd]})},
+    )
+    result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "Found 1 element(s) matching 't' (role: heading):",
+        "",
+        "- title (button): Title (confidence 0.80)",
+        "",
+        "1 result(s) carried a malformed contentMetadata, so whether they match "
+        "the filter is UNKNOWN.",
+    ]
+
+
+def test_search_filter_with_plain_non_matches_carries_no_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     heading = _hit("title", 0.8, contentMetadata={"contentRole": "heading"})
     answering(monkeypatch, {SEARCH: ok({"results": [heading, _hit("save", 0.9)]})})
     result = call("sdk_ai_search", {"text": "t", "content_role": "heading"})
     assert result.isError is False
-    assert text(result).splitlines()[-1] == (
-        "1 other result(s) carried no contentMetadata.contentRole, so whether "
-        "they match the filter is UNKNOWN."
-    )
+    assert text(result).splitlines() == [
+        "Found 1 element(s) matching 't' (role: heading):",
+        "",
+        "- title (button): Title (confidence 0.80)",
+    ]
 
 
-def test_search_filter_counts_only_unjudged_results_it_dropped(
+def test_search_type_filter_keeps_a_type_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A type match without contentMetadata is kept, so it is not counted."""
     answering(
         monkeypatch,
         {SEARCH: ok({"results": [_hit("docs", 0.7, type="nav-text")]})},
     )
     result = call("sdk_ai_search", {"text": "x", "content_types": ["nav-text"]})
-    assert "contentMetadata" not in text(result)
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "Found 1 element(s) matching 'x' (types: nav-text):",
+        "",
+        "- docs (nav-text): Docs (confidence 0.70)",
+    ]
+
+
+def test_search_names_both_filters_when_both_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {SEARCH: ok({"results": [_hit("save", 0.9)]})})
+    result = call(
+        "sdk_ai_search",
+        {"text": "x", "content_role": "heading", "content_types": ["badge"]},
+    )
+    assert text(result) == (
+        "No elements found matching: x (role: heading; types: badge)"
+    )

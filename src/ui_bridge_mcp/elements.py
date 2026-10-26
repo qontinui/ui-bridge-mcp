@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -36,3 +37,44 @@ def stated_enabled(state: dict[str, Any]) -> bool | None:
     """
     enabled = state.get("enabled")
     return None if enabled is None else bool(enabled)
+
+
+# ui-bridge ai/content-comparison.ts getContentRole: the roles an element's
+# `type` implies when it states no contentMetadata.contentRole.
+_TYPE_ROLES = {
+    "heading": "heading",
+    "metric-value": "metric",
+    "metric": "metric",
+    "status-message": "status",
+    "status": "status",
+    "label": "label",
+    "badge": "badge",
+    "table-cell": "table-cell",
+    "table-header": "table-header",
+    "caption": "caption",
+}
+
+
+def stated_content_role(el: dict[str, Any]) -> tuple[bool, str | None]:
+    """The element's content role as the SDK reads it.
+
+    Returns ``(True, role)``, or ``(True, None)`` for an element that is not
+    content: ``contentMetadata`` is optional, and the SDK reads its absence as
+    "no role" after falling back to the element's ``type``. A
+    ``contentMetadata`` that is not an object, or a ``contentRole`` that is not
+    a string, says nothing either way: ``(False, None)``, the role is UNKNOWN.
+    """
+    meta = el.get("contentMetadata")
+    if meta is not None:
+        if not isinstance(meta, dict):
+            return False, None
+        role = meta.get("contentRole")
+        if role is not None and not isinstance(role, str):
+            return False, None
+        if role:
+            return True, role
+    el_type = el.get("type")
+    el_type = el_type.lower() if isinstance(el_type, str) else ""
+    if re.fullmatch(r"h[1-6]", el_type):
+        return True, "heading"
+    return True, _TYPE_ROLES.get(el_type)
