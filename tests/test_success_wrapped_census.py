@@ -1381,6 +1381,30 @@ def test_search_type_filter_keeps_a_type_match(
     ]
 
 
+def test_search_type_match_holds_despite_malformed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = _hit("docs", 0.7, type="nav-text", contentMetadata="x")
+    answering(monkeypatch, {SEARCH: ok({"results": [docs]})})
+    result = call("sdk_ai_search", {"text": "x", "content_types": ["nav-text"]})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "Found 1 element(s) matching 'x' (types: nav-text):",
+        "",
+        "- docs (nav-text): Docs (confidence 0.70)",
+    ]
+
+
+def test_search_with_an_unhashable_type_is_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    odd = _hit("odd", 0.5, type=["nav-text"])
+    answering(monkeypatch, {SEARCH: ok({"results": [odd]})})
+    result = call("sdk_ai_search", {"text": "x", "content_types": ["nav-text"]})
+    assert result.isError is False
+    assert text(result) == "No elements found matching: x (types: nav-text)"
+
+
 def test_search_names_both_filters_when_both_apply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

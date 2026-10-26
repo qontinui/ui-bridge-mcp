@@ -5924,12 +5924,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             for el, conf in readable:
                 if content_role or ct_set:
                     known, role = stated_content_role(el)
-                    if not known:
+                    # Under content_types the element's own type can prove a
+                    # match whatever its role says.
+                    el_type = el.get("type")
+                    type_proves = isinstance(el_type, str) and el_type in ct_set
+                    if not known and (content_role or not type_proves):
                         unjudged += 1
                         continue
                     if content_role and role != content_role:
                         continue
-                    if ct_set and role not in ct_set and el.get("type") not in ct_set:
+                    if ct_set and not type_proves and role not in ct_set:
                         continue
                 hits.append((el, conf))
 
