@@ -727,6 +727,14 @@ FAILURE_PATHS: list[FailurePath] = [
         "Page was not refreshed: no-op",
     ),
     FailurePath(
+        "sdk_elements: Element list UNKNOWN: the response carried no element list "
+        "(got {}). This is not 'no elements'.",
+        "sdk_elements",
+        {},
+        {"/ui-bridge/sdk/elements": ok({"total": 0})},
+        "Element list UNKNOWN: the response carried no element list (got NoneType)",
+    ),
+    FailurePath(
         "sdk_ai_search: Search result UNKNOWN for '{}': the response carried no "
         "`results` list (got {}). This is not 'no elements found'.",
         "sdk_ai_search",

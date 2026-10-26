@@ -1416,3 +1416,78 @@ def test_search_names_both_filters_when_both_apply(
     assert text(result) == (
         "No elements found matching: x (role: heading; types: badge)"
     )
+
+
+# --- sdk_elements: qontinui-runner handle_elements sends `data` as a list ---
+
+ELEMENTS = "/ui-bridge/sdk/elements"
+
+
+def _el(elem_id: str, **element: Any) -> dict[str, Any]:
+    return {
+        "id": elem_id,
+        "type": "button",
+        "label": elem_id.title(),
+        "state": {"visible": True, "enabled": True},
+        **element,
+    }
+
+
+@pytest.mark.parametrize(
+    "data",
+    [[_el("save")], {"elements": [_el("save")]}],
+    ids=["runner-list", "elements-key"],
+)
+def test_elements_reads_the_list_the_runner_sends(
+    data: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answering(monkeypatch, {ELEMENTS: ok(data)})
+    result = call("sdk_elements", {})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "SDK Elements (1):",
+        "",
+        "- save (button): Save",
+    ]
+
+
+def test_elements_counts_entries_that_are_not_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answering(monkeypatch, {ELEMENTS: ok([_el("save"), "junk", None])})
+    result = call("sdk_elements", {})
+    assert result.isError is False
+    assert text(result).splitlines()[-1] == "2 element(s) were not objects."
+
+
+def test_elements_type_filter_reads_roles_the_way_the_sdk_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    elements = [
+        _el("title", type="h2"),
+        _el("status", contentMetadata={"contentRole": "heading"}),
+        _el("blank", contentMetadata=None),
+        _el("save"),
+    ]
+    answering(monkeypatch, {ELEMENTS: ok(elements)})
+    result = call("sdk_elements", {"content_types": ["heading"]})
+    assert result.isError is False
+    assert text(result).splitlines() == [
+        "SDK Elements (2) (filtered: heading):",
+        "",
+        "- title (h2): Title",
+        "- status (button): Status",
+    ]
+
+
+def test_elements_type_filter_names_malformed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    elements = [_el("odd", contentMetadata="heading"), _el("save")]
+    answering(monkeypatch, {ELEMENTS: ok(elements)})
+    result = call("sdk_elements", {"content_types": ["heading"]})
+    assert result.isError is False
+    assert text(result).splitlines()[-1] == (
+        "1 element(s) carried a malformed contentMetadata, so whether they match "
+        "the filter is UNKNOWN."
+    )

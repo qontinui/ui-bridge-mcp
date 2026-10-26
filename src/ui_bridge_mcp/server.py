@@ -5588,21 +5588,40 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not response.success:
                 return _error_result(response)
-            data = response.data or {}
-            elements = data.get("elements", [])
+            # qontinui-runner handle_elements answers {success, data: [element,
+            # ...]} on both transports; an SDK app's own /control/elements
+            # nests them under `elements`. Anything else is UNKNOWN, not an
+            # empty page.
+            payload = response.data
+            raw = payload.get("elements") if isinstance(payload, dict) else payload
+            if not isinstance(raw, list):
+                return _tool_error(
+                    "Element list UNKNOWN: the response carried no element list "
+                    f"(got {type(raw).__name__}). This is not 'no elements'."
+                )
+            elements = [el for el in raw if isinstance(el, dict)]
+            unreadable = len(raw) - len(elements)
 
             # Client-side content filtering as fallback until SDK handlers
-            # support the contentOnly/contentTypes parameters natively
+            # support the contentOnly/contentTypes parameters natively. The
+            # role is read the way the SDK reads it (see sdk_ai_search).
             if content_only:
                 elements = [el for el in elements if el.get("category") == "content"]
+            unjudged = 0
             if content_types:
                 ct_set = set(content_types)
-                elements = [
-                    el
-                    for el in elements
-                    if el.get("contentMetadata", {}).get("contentRole") in ct_set
-                    or el.get("type") in ct_set
-                ]
+                kept = []
+                for el in elements:
+                    el_type = el.get("type")
+                    if isinstance(el_type, str) and el_type in ct_set:
+                        kept.append(el)
+                        continue
+                    known, role = stated_content_role(el)
+                    if not known:
+                        unjudged += 1
+                    elif role in ct_set:
+                        kept.append(el)
+                elements = kept
 
             # Truncate content fields
             if max_content_length:
@@ -5644,6 +5663,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
             if overflow:
                 lines.append(f"\n+{overflow} more elements not shown")
+            if unreadable:
+                lines.append(f"\n{unreadable} element(s) were not objects.")
+            if unjudged:
+                lines.append(
+                    f"\n{unjudged} element(s) carried a malformed contentMetadata, "
+                    "so whether they match the filter is UNKNOWN."
+                )
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_discover":
