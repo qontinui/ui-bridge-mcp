@@ -90,13 +90,8 @@ def _number_value(value: Any) -> str | None:
     return format_number(value) if _is_number(value) else None
 
 
-def _degradation(observation: dict[str, Any]) -> str:
-    """`` [degraded: …]`` when ``provenance.coverage.unmeasured`` is non-empty."""
-    provenance = observation.get("provenance")
-    coverage = provenance.get("coverage") if isinstance(provenance, dict) else None
-    unmeasured = coverage.get("unmeasured") if isinstance(coverage, dict) else None
-    if not isinstance(unmeasured, list) or not unmeasured:
-        return ""
+def format_unmeasured(unmeasured: Sequence[Any]) -> list[str]:
+    """Each ``UnmeasuredDimension`` as ``<dimension> x<count> <code>``."""
     parts = []
     for entry in unmeasured:
         if not isinstance(entry, dict):
@@ -110,7 +105,17 @@ def _degradation(observation: dict[str, Any]) -> str:
         count = entry.get("count")
         shown = format_number(count) if _is_number(count) else "?"
         parts.append(f"{dimension} x{shown} {code}")
-    return f" [degraded: {'; '.join(parts)}]"
+    return parts
+
+
+def _degradation(observation: dict[str, Any]) -> str:
+    """`` [degraded: …]`` when ``provenance.coverage.unmeasured`` is non-empty."""
+    provenance = observation.get("provenance")
+    coverage = provenance.get("coverage") if isinstance(provenance, dict) else None
+    unmeasured = coverage.get("unmeasured") if isinstance(coverage, dict) else None
+    if not isinstance(unmeasured, list) or not unmeasured:
+        return ""
+    return f" [degraded: {'; '.join(format_unmeasured(unmeasured))}]"
 
 
 def render_unknown(unknown: Any) -> str:

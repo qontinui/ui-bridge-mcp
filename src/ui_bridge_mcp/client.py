@@ -7,6 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from typing import Any, NamedTuple
+from urllib.parse import quote
 
 import httpx
 
@@ -324,6 +325,9 @@ def render_body_error(body: Any, raw_text: str) -> str:
         lines.append(f"context: {_compact(detail['context'])}")
     if unknown_detail is not None:
         lines.append(f"detail: {_compact(unknown_detail)}")
+    elif _str_field(body, "detail") is not None:
+        # A plain ``{error, detail}`` body (the runner's 400 refusals, FastAPI).
+        lines.append(f"detail: {_compact(body['detail'])}")
     return "\n".join(lines)
 
 
@@ -376,6 +380,8 @@ class UIBridgeClient:
         timeout: float = DEFAULT_TIMEOUT,
         params: dict[str, str] | None = None,
         bare_list_key: str | None = None,
+        *,
+        unwrapped: bool = False,
     ) -> UIBridgeResponse:
         """Make an HTTP request to the UI Bridge API.
 
@@ -390,6 +396,10 @@ class UIBridgeClient:
                 but carries a list under this key is the route's answer, and
                 is returned whole as ``data``. Every other route keeps the
                 rule that an absent ``success`` is a failure.
+            unwrapped: The route answers its body directly, with no
+                ``{success, data}`` wrapper (the journey routes answer an
+                Observation envelope or a health object). A 2xx JSON object is
+                then returned whole as ``data``; it is the caller's to read.
         """
         client = await self._get_client()
         url = f"{self.base_url}{endpoint}"
@@ -420,7 +430,7 @@ class UIBridgeClient:
                     code=CODE_PRODUCER_FAILED,
                     status=response.status_code,
                 )
-            if (
+            if unwrapped or (
                 bare_list_key is not None
                 and "success" not in data
                 and isinstance(data.get(bare_list_key), list)
@@ -510,6 +520,27 @@ class UIBridgeClient:
     async def health(self) -> UIBridgeResponse:
         """Check runner health."""
         return await self._request("GET", "/health")
+
+    # -------------------------------------------------------------------------
+    # Journey queries (runner ``journey/routes.rs``)
+    # -------------------------------------------------------------------------
+
+    async def journey(
+        self, app_id: str, route: str, params: dict[str, str] | None = None
+    ) -> UIBridgeResponse:
+        """``GET /apps/{app_id}/journey/{route}``; ``data`` is the body as served.
+
+        Every route but ``health`` answers an Observation envelope; ``health``
+        answers ``JourneyHealthResponse``. The runner refuses an unknown or
+        unused query parameter with a 400, so only parameters the caller set
+        are sent.
+        """
+        return await self._request(
+            "GET",
+            f"/apps/{quote(app_id, safe='')}/journey/{route}",
+            params=params or None,
+            unwrapped=True,
+        )
 
     # -------------------------------------------------------------------------
     # Control Mode - Runner's Own UI (/ui-bridge/control/*)

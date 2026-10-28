@@ -924,6 +924,27 @@ FAILURE_PATHS: list[FailurePath] = [
         "Snapshot diff verdict UNKNOWN:",
     ),
     FailurePath(
+        "_journey_tool: _error_result(response)",
+        "journey_dead_ends",
+        {"app_id": "web"},
+        {},
+        "journey_dead_ends (web): [code=producer_failed status=404]",
+    ),
+    FailurePath(
+        "_journey_tool: {}: `app_id` is required",
+        "journey_dead_ends",
+        {"app_id": ""},
+        {},
+        "journey_dead_ends: `app_id` is required",
+    ),
+    FailurePath(
+        "_journey_tool: {}: {} required",
+        "journey_steps_to",
+        {"app_id": "web", "from": "a#x", "to": ""},
+        {},
+        "journey_steps_to: `to` required",
+    ),
+    FailurePath(
         "call_tool: Unknown tool: {}",
         "no_such_tool",
         {},

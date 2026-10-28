@@ -114,6 +114,27 @@ request whose `Host` is neither a loopback name with the runner's bound port nor
 | `sdk_click` | Click an element by ID |
 | `sdk_type` | Type into an element by ID |
 
+### Journey Queries (the runner's observed navigation graph)
+
+Each reads `GET /apps/{app_id}/journey/*` on the runner and takes `app_id`,
+plus the optional filter `since` / `app_version` / `run_kind` (not
+`journey_health`). The first line of every answer is `COVERAGE:` (ledger state,
+edges and nodes observed, open frontier, unmeasured dimensions, the filter the
+runner applied), so a truncated result still carries it. The second line is
+`ANSWER: MEASURED`, `ANSWER: ABSENT` (a settled negative) or
+`ANSWER: UNKNOWN (<code>)`, which is never a negative; the affordances and
+departures that would settle it follow.
+
+| Tool | Description |
+|------|-------------|
+| `journey_health` | Whether the journey ledger is being written, and its counters |
+| `journey_reachable_from` | Nodes reachable from `from`, with step counts |
+| `journey_steps_to` | Shortest observed path from `from` to `to` |
+| `journey_dead_ends` | Settled dead ends (with `back_only`), separate from unexplored nodes |
+| `journey_requires_prior_knowledge` | Nodes reached only by URL, never by an affordance |
+| `journey_frontier` | Affordances seen and never activated, per node |
+| `journey_edge_timing` | One edge's timing as a distribution (n, min/median/p90/max per metric) |
+
 > **Note:** The MCP server also includes legacy `extension_*` tools for browser tab access via a Chrome extension. These are deprecated and will be removed in a future release. Use the SDK tools instead.
 
 ## Tool Results and Errors
