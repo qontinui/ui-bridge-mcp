@@ -42,7 +42,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          # Pinned, not '3.x': '3.x' floats to each new CPython the day it ships
+          # (3.15.1 on 2026-10-28), before Pillow<12 publishes a wheel for it, and
+          # Pillow then fails to build from source (no libjpeg on the runner).
+          # 3.13 sits inside pyproject's `python = "^3.12"`.
+          python-version: '3.13'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
