@@ -1,0 +1,227 @@
+{
+  "elements": [
+    {
+      "id": "img-hero",
+      "type": "image",
+      "label": "Hero",
+      "tagName": "img",
+      "accessibleName": "Hero",
+      "actions": [],
+      "state": {
+        "visible": true,
+        "scrollWidth": 0,
+        "clientWidth": 0,
+        "enabled": true,
+        "disabled": false,
+        "ariaDisabled": false,
+        "focused": false,
+        "accessibleName": "Hero",
+        "nameSource": "text",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 100,
+          "height": 100,
+          "top": 0,
+          "right": 100,
+          "bottom": 100,
+          "left": 0
+        },
+        "computedStyles": {
+          "display": "",
+          "visibility": "visible",
+          "opacity": "",
+          "pointerEvents": "auto",
+          "cursor": "",
+          "color": "canvastext",
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "colorScheme": "",
+          "fontSize": "",
+          "fontWeight": "",
+          "lineHeight": "",
+          "overflow": "",
+          "textOverflow": "",
+          "whiteSpace": "",
+          "position": "",
+          "zIndex": "",
+          "padding": "",
+          "margin": "",
+          "borderColor": "",
+          "borderWidth": "",
+          "borderRadius": ""
+        },
+        "inViewport": true,
+        "normalizedRect": {
+          "x": 0,
+          "y": 0,
+          "width": 0.09765625,
+          "height": 0.13020833333333334
+        },
+        "dataset": {
+          "uiBridgeImageSlot": "hero"
+        },
+        "mediaMetadata": {
+          "status": "measured",
+          "value": {
+            "mediaType": "image",
+            "isDecorative": false,
+            "renderedWidth": 100,
+            "renderedHeight": 100,
+            "devicePixelRatio": 2,
+            "src": "http://localhost:3000/img/hero.png",
+            "altText": "Hero",
+            "loading": "lazy",
+            "decoding": "auto",
+            "fetchPriority": "auto",
+            "loadingState": "loaded",
+            "widthAttribute": 100,
+            "heightAttribute": 100,
+            "dimsReserved": true,
+            "naturalWidth": 400,
+            "naturalHeight": 400,
+            "effectiveResolution": 2,
+            "format": "png",
+            "slotId": "hero"
+          },
+          "provenance": {
+            "producer": {
+              "id": "sdk/media-discovery",
+              "version": "0.30.0"
+            },
+            "observedAt": "2026-10-13T08:12:27.592Z",
+            "evaluatedAt": "2026-10-13T08:12:27.592Z",
+            "coverage": {
+              "considered": 1,
+              "measured": 0,
+              "unmeasured": [
+                {
+                  "dimension": "objectFit",
+                  "count": 1,
+                  "code": "capability_unavailable_in_build"
+                },
+                {
+                  "dimension": "objectPosition",
+                  "count": 1,
+                  "code": "capability_unavailable_in_build"
+                },
+                {
+                  "dimension": "aspectRatio",
+                  "count": 1,
+                  "code": "capability_unavailable_in_build"
+                },
+                {
+                  "dimension": "encodedBodySize",
+                  "count": 1,
+                  "code": "input_missing"
+                },
+                {
+                  "dimension": "isLcpCandidate",
+                  "count": 1,
+                  "code": "capability_unavailable_in_build"
+                },
+                {
+                  "dimension": "clsSources",
+                  "count": 1,
+                  "code": "capability_unavailable_in_build"
+                }
+              ]
+            },
+            "confidence": null,
+            "cache": null,
+            "source": null
+          }
+        }
+      },
+      "registered": true,
+      "registeredAt": 1791879147560,
+      "category": "media",
+      "mediaMetadata": {
+        "status": "measured",
+        "value": {
+          "mediaType": "image",
+          "isDecorative": false,
+          "renderedWidth": 100,
+          "renderedHeight": 100,
+          "devicePixelRatio": 2,
+          "src": "http://localhost:3000/img/hero.png",
+          "altText": "Hero",
+          "loading": "lazy",
+          "decoding": "auto",
+          "fetchPriority": "auto",
+          "loadingState": "loaded",
+          "widthAttribute": 100,
+          "heightAttribute": 100,
+          "dimsReserved": true,
+          "naturalWidth": 400,
+          "naturalHeight": 400,
+          "effectiveResolution": 2,
+          "format": "png",
+          "slotId": "hero"
+        },
+        "provenance": {
+          "producer": {
+            "id": "sdk/media-discovery",
+            "version": "0.30.0"
+          },
+          "observedAt": "2026-10-13T08:12:27.592Z",
+          "evaluatedAt": "2026-10-13T08:12:27.592Z",
+          "coverage": {
+            "considered": 1,
+            "measured": 0,
+            "unmeasured": [
+              {
+                "dimension": "objectFit",
+                "count": 1,
+                "code": "capability_unavailable_in_build"
+              },
+              {
+                "dimension": "objectPosition",
+                "count": 1,
+                "code": "capability_unavailable_in_build"
+              },
+              {
+                "dimension": "aspectRatio",
+                "count": 1,
+                "code": "capability_unavailable_in_build"
+              },
+              {
+                "dimension": "encodedBodySize",
+                "count": 1,
+                "code": "input_missing"
+              },
+              {
+                "dimension": "isLcpCandidate",
+                "count": 1,
+                "code": "capability_unavailable_in_build"
+              },
+              {
+                "dimension": "clsSources",
+                "count": 1,
+                "code": "capability_unavailable_in_build"
+              }
+            ]
+          },
+          "confidence": null,
+          "cache": null,
+          "source": null
+        }
+      }
+    }
+  ],
+  "total": 1,
+  "signature": {
+    "count": 1,
+    "content": "f95a7b2d217ae5f9",
+    "generation": "15bfb69d6afa866f",
+    "mountEvidence": 1
+  },
+  "durationMs": 15.555421999999908,
+  "timestamp": 1791879147597,
+  "unevaluated": [
+    {
+      "id": "img-pending",
+      "option": "oversizeThreshold",
+      "code": "input_missing"
+    }
+  ]
+}

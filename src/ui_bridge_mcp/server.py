@@ -40,6 +40,11 @@ from .journey import (
     format_steps,
 )
 from .journey import format_health as format_journey_health
+from .media_projection import (
+    image_assertions,
+    project_audit_snapshot,
+    unread_image_ids,
+)
 from .screenshot import (
     AnnotationOptions,
     BaselineStore,
@@ -4061,6 +4066,50 @@ individual design tools separately.""",
         },
     ),
     types.Tool(
+        name="ui_audit_images",
+        description="""Audit every image on the page: loaded, sharp enough, undistorted,
+layout-safe, described, not oversized or heavy, lazy off-screen, not duplicated.
+
+Discovers the page and evaluates vision-core's image assertions from the facts the
+SDK measured. They read no pixels; the route still attempts a capture and reports
+any `frameError`, which does not affect them. Returns the runner's outcomes verbatim:
+passed, failed, or unknown with a code. An unknown is not a pass, and an image whose
+facts could not be read answers unknown on every check.
+
+Per image, a check that does not apply also answers unknown, with a detail saying so:
+lcp_image_prioritized on any other image, offscreen_image_lazy on one on screen, a
+density check on a vector. So the overall pass stays false in this mode; read each
+outcome. Thresholds are yours (the visual system's); one you omit answers unknown for
+its assertion.""",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "min_effective": {
+                    "type": "number",
+                    "description": "Fewest source pixels per device pixel an image may carry.",
+                },
+                "max_aspect_delta": {
+                    "type": "number",
+                    "description": "Largest aspect-ratio difference a stretched image may show (0.05 = 5%).",
+                },
+                "max_effective": {
+                    "type": "number",
+                    "description": "Most source pixels per device pixel an image may carry.",
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "description": "Largest encoded body size an image may have.",
+                },
+                "per_image": {
+                    "type": "boolean",
+                    "description": "One outcome per image and check. False gives one page-wide outcome per check, plus one per image whose facts could not be read.",
+                    "default": True,
+                },
+            },
+            "required": [],
+        },
+    ),
+    types.Tool(
         name="sdk_design_evaluate",
         description="""Run holistic UI quality evaluation. Returns the 0-100 overall and UX scores,
 per-metric scores across ux/density/spacing/color/typography/consistency,
@@ -7516,6 +7565,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         # =====================================================================
         # Quality Evaluation
         # =====================================================================
+
+        elif name == "ui_audit_images":
+            discovered = await ui_client.discover_media()
+            if not discovered.success:
+                return _error_result(discovered)
+            snapshot = project_audit_snapshot(discovered.data)
+            response = await ui_client.vision_assert(
+                snapshot,
+                image_assertions(
+                    [row["id"] for row in snapshot["elements"]],
+                    arguments,
+                    per_image=arguments.get("per_image", True),
+                    unread=unread_image_ids(discovered.data),
+                ),
+            )
+            if not response.success:
+                return _error_result(response)
+            return [
+                types.TextContent(type="text", text=json.dumps(response.data, indent=2))
+            ]
 
         elif name == "sdk_design_evaluate":
             context = arguments.get("context")

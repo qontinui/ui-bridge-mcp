@@ -6,8 +6,9 @@ Plan 2026-10-13-image-generation-and-visual-judgment, Phase 6 (ui-bridge-mcp):
   called the runner's ``/ui-bridge/sdk/ai/media/*`` proxies, whose SDK routes
   were deleted on 2026-05-14. Measured live in the plan's Phase 1, every one
   answered ``No active SDK app connection``, ``Not found``, or a 30 s relay
-  timeout. They are retired with their eight client methods (decision D6);
-  ``ui_audit_images`` returns in Phase 8 over the vision surface.
+  timeout. They are retired with their eight client methods (decision D6).
+  ``ui_audit_images`` came back in Phase 8 over the vision surface
+  (``test_audit_images.py``).
 - ``/design/evaluate`` no longer carries an A-F ``grade`` (decision D7: values,
   not verdicts), so neither renderer prints one. A stale SDK that still sends
   ``grade`` must not get it rendered either: the MCP surface hands out values.
@@ -34,7 +35,6 @@ RETIRED_TOOLS = (
     "sdk_media_compare",
     "sdk_media_analyze_batch",
     "ui_analyze_image",
-    "ui_audit_images",
 )
 
 RETIRED_CLIENT_METHODS = (

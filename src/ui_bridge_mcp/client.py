@@ -636,6 +636,25 @@ class UIBridgeClient:
             {"interactive_only": interactive_only},
         )
 
+    async def discover_media(self) -> UIBridgeResponse:
+        """Discover every element, hidden and non-interactive ones included, with
+        the media rows stated, as the runner's own sweeps ask."""
+        return await self._request(
+            "POST",
+            "/ui-bridge/control/discover",
+            {"interactive_only": False, "includeHidden": True, "includeMedia": True},
+        )
+
+    async def vision_assert(
+        self, snapshot: dict[str, Any], assertions: list[dict[str, Any]]
+    ) -> UIBridgeResponse:
+        """Evaluate vision-core assertions over a caller-supplied ElementSnapshot."""
+        return await self._request(
+            "POST",
+            "/ui-bridge/vision/assert",
+            {"snapshot": snapshot, "assertions": assertions},
+        )
+
     async def control_list_elements(self) -> UIBridgeResponse:
         """List all registered UI elements in the runner's webview."""
         return await self._request("GET", "/ui-bridge/control/elements")
