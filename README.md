@@ -117,8 +117,10 @@ request whose `Host` is neither a loopback name with the runner's bound port nor
 ### Journey Queries (the runner's observed navigation graph)
 
 Each reads `GET /apps/{app_id}/journey/*` on the runner and takes `app_id`,
-plus the optional filter `since` / `app_version` / `run_kind` (not
-`journey_health`). The first line of every answer is `COVERAGE:` (ledger state,
+plus the optional filter `since` / `app_version` / `run_kind` and a `limit` on
+the items listed per section (not `journey_health`). A `from` / `to` / `node`
+argument is a node key; `journey_graph` lists them and
+needs no starting key. The first line of every answer is `COVERAGE:` (ledger state,
 edges and nodes observed, open frontier, unmeasured dimensions, the filter the
 runner applied), so a truncated result still carries it. The second line is
 `ANSWER: MEASURED`, `ANSWER: ABSENT` (a settled negative) or
@@ -128,6 +130,7 @@ departures that would settle it follow.
 | Tool | Description |
 |------|-------------|
 | `journey_health` | Whether the journey ledger is being written, and its counters |
+| `journey_graph` | Observed node keys and edges, and the rows left out |
 | `journey_reachable_from` | Nodes reachable from `from`, with step counts |
 | `journey_steps_to` | Shortest observed path from `from` to `to` |
 | `journey_dead_ends` | Settled dead ends (with `back_only`), separate from unexplored nodes |

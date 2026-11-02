@@ -363,6 +363,304 @@ def graph_edge(frm: str, to: str, action: str = "click") -> dict[str, Any]:
     }
 
 
+def graph_node(key: str, **over: Any) -> dict[str, Any]:
+    """``JourneyGraphNode``."""
+    n: dict[str, Any] = {
+        "key": key,
+        "node": node(key),
+        "frontier": [],
+        "unobservedDepartures": 0,
+        "unmeasuredDepartures": departures(),
+        "arrivalDoubt": {"filtered": 0, "withdrawn": 0},
+        "unconfirmedDestination": False,
+    }
+    n.update(over)
+    return n
+
+
+def a_since_filter() -> dict[str, Any]:
+    """Only a filter can exclude a row: ``JourneyFilter::keeps`` holds for every
+    row when all three fields are ``None``."""
+    return {**no_filter(), "since": "2026-10-01T00:00:00Z"}
+
+
+def empty_graph_coverage(**over: Any) -> dict[str, Any]:
+    """``JourneyCoverage`` of a graph with no kept edge."""
+    return coverage(
+        **{
+            "nodesObserved": 0,
+            "nodesUnmodelled": 0,
+            "edgesObserved": 0,
+            "runs": 0,
+            "oldestEdgeAt": None,
+            "newestEdgeAt": None,
+            "appVersions": [],
+            **over,
+        }
+    )
+
+
+NO_EDGE_DETAIL = (
+    "graph: the ledger holds no edge under this filter, so nothing can be answered"
+)
+
+
+def graph_result(**over: Any) -> dict[str, Any]:
+    """``JourneyGraph``, the value of ``answer_graph``."""
+    result: dict[str, Any] = {
+        "filterEcho": a_since_filter(),
+        "nodes": [
+            graph_node(HOME, unmeasuredDepartures=departures(filteredOut=1)),
+            graph_node(
+                RUNS,
+                frontier=[
+                    frontier_entry(RUNS, "fp-a"),
+                    frontier_entry(RUNS, "fp-b", "effect_write", effect="write"),
+                ],
+                unobservedDepartures=1,
+                unmeasuredDepartures=departures(settleTimeout=2),
+                arrivalDoubt={"filtered": 1, "withdrawn": 0},
+            ),
+            graph_node(SETTINGS, unconfirmedDestination=True),
+        ],
+        "edges": [
+            graph_edge(HOME, RUNS),
+            {
+                **graph_edge(RUNS, HOME),
+                "trigger": {
+                    "chokePoint": "navigation",
+                    "actionType": "navigate",
+                    "navigationTrigger": "pop",
+                },
+                "observations": 1,
+            },
+            {
+                **graph_edge(RUNS, SETTINGS),
+                "outcome": "settle_timeout",
+                "observations": 2,
+            },
+        ],
+        "rejected": [],
+        "offGraphDepartures": departures(),
+        "unplacedRejectedRows": 0,
+        "unplacedRejectedFrontier": 0,
+        "rejectedFrontierDoublePlaced": 0,
+        # The settle_timeout edge and the departure that closed to_node_unobserved.
+        "unknownDestinationArrivals": 3,
+        "coverage": coverage(
+            nodesObserved=3,
+            edgesObserved=7,
+            edgesToNodeUnobserved=1,
+            edgesFilteredOut=1,
+            frontierOpen=2,
+            frontierNodes=1,
+            frontierByReason={
+                **{r: 0 for r in FRONTIER_REASONS},
+                "not_yet_activated": 1,
+                "effect_write": 1,
+            },
+        ),
+    }
+    result.update(over)
+    return result
+
+
+def graph_measured() -> dict[str, Any]:
+    """``answer_graph``: measured over any edge; ``unmeasured`` as
+    ``JourneySearchFrontier::unmeasured`` orders it for ``graph_result``. Two of
+    the three nodes are unsettled, so ``measured`` is 1 (``routes.rs`` ``answer``)."""
+    return envelope(
+        "graph",
+        "measured",
+        graph_result(),
+        unmeasured=[
+            dim("frontier", 2, "frontier_open"),
+            dim("unobserved_departures", 1, "to_node_unobserved"),
+            dim("settle_timeout_departures", 2, "no_event_before_timeout"),
+            dim("filtered_departures", 1, "input_missing"),
+        ],
+        measured=1,
+    )
+
+
+def graph_settled() -> dict[str, Any]:
+    """The same answer over a graph nothing was left out of."""
+    return envelope(
+        "graph",
+        "measured",
+        graph_result(
+            filterEcho=no_filter(),
+            nodes=[graph_node(HOME), graph_node(RUNS)],
+            edges=[graph_edge(HOME, RUNS)],
+            unknownDestinationArrivals=0,
+            coverage=coverage(nodesObserved=2, nodesUnmodelled=0, edgesObserved=3),
+        ),
+    )
+
+
+def graph_read_gap() -> dict[str, Any]:
+    """``answer_graph`` is ``Positive::Witnessed``: a read gap leaves it measured,
+    the gap in ``unmeasured``. Only the listings fall to ``unknown`` over one."""
+    body = graph_settled()
+    cov = body["provenance"]["coverage"]
+    cov["unmeasured"] = [
+        dim("edges_beyond_read_bound_20000", 1, "input_missing"),
+        dim("rows_unparseable", 3, "producer_failed"),
+    ]
+    cov["measured"] = 1
+    return body
+
+
+OTHER = "console#other"
+
+
+def _off_node_doubt_rows(off_graph_rejected_frontier: int) -> dict[str, Any]:
+    """Rows the graph places at no listed node, and a frontier row counted at two
+    keys: its column names ``HOME``, its valid node ``OTHER``. ``rejected`` is
+    sorted by kind, then row."""
+    return {
+        "filterEcho": a_since_filter(),
+        "rejected": [
+            {
+                "kind": "edge",
+                "row": "edge-9",
+                "reason": 'observedAt "yesterday" is not RFC 3339: input contains '
+                "invalid characters",
+                "rows": 2,
+            },
+            {
+                "kind": "frontier",
+                "row": "bad#node#key fp-y",
+                "reason": "node is not canonical: specId must not contain '#' (the "
+                "key's spec/state separator)",
+                "rows": 1,
+            },
+            {
+                "kind": "frontier",
+                "row": f"{HOME} fp-x",
+                "reason": f'nodeKey "{HOME}" does not match node.key() "{OTHER}"',
+                "rows": 1,
+            },
+        ],
+        "offGraphDepartures": departures(
+            filteredOut=4, rejectedFrontier=off_graph_rejected_frontier
+        ),
+        "unplacedRejectedRows": 2,
+        "unplacedRejectedFrontier": 1,
+        "rejectedFrontierDoublePlaced": 1,
+        "unknownDestinationArrivals": 0,
+    }
+
+
+# ``rejected_frontier`` counts distinct rows: its two placements, less the one
+# counted twice.
+_OFF_NODE_DOUBT_DIMENSIONS = (
+    ("rejected_frontier", 1, "frontier_open"),
+    ("unplaced_rejected_frontier", 1, "frontier_open"),
+    ("unplaced_rejected_rows", 2, "producer_failed"),
+    ("filtered_departures", 4, "input_missing"),
+)
+
+
+def graph_off_node_doubt() -> dict[str, Any]:
+    """The double-placed row lands at the listed ``HOME`` and off the graph."""
+    return envelope(
+        "graph",
+        "measured",
+        graph_result(
+            nodes=[
+                graph_node(HOME, unmeasuredDepartures=departures(rejectedFrontier=1)),
+                graph_node(RUNS),
+            ],
+            edges=[graph_edge(HOME, RUNS)],
+            coverage=coverage(
+                nodesObserved=2,
+                nodesUnmodelled=0,
+                edgesObserved=3,
+                edgesFilteredOut=4,
+                rowsRejected=3,
+            ),
+            **_off_node_doubt_rows(off_graph_rejected_frontier=1),
+        ),
+        unmeasured=[dim(*d) for d in _OFF_NODE_DOUBT_DIMENSIONS],
+    )
+
+
+def graph_only_rejected_rows() -> dict[str, Any]:
+    """Every edge row failed its contract or was filtered: no node and no edge,
+    and the rows left out are the whole answer. With no node listed, both keys
+    of the double-placed row are off the graph."""
+    return envelope(
+        "graph",
+        "unknown",
+        graph_result(
+            nodes=[],
+            edges=[],
+            coverage=empty_graph_coverage(edgesFilteredOut=4, rowsRejected=3),
+            **_off_node_doubt_rows(off_graph_rejected_frontier=2),
+        ),
+        unmeasured=[
+            dim("no_observations", 1, "no_observations"),
+            *(dim(*d) for d in _OFF_NODE_DOUBT_DIMENSIONS),
+        ],
+        code="no_observations",
+        detail=NO_EDGE_DETAIL,
+    )
+
+
+def graph_empty() -> dict[str, Any]:
+    """An empty ledger, as ``answer_graph`` serves it."""
+    return envelope(
+        "graph",
+        "unknown",
+        graph_result(
+            filterEcho=no_filter(),
+            nodes=[],
+            edges=[],
+            unknownDestinationArrivals=0,
+            coverage=empty_graph_coverage(
+                ledger={
+                    "state": "writing",
+                    "detail": "journey tables present and readable; no edge written "
+                    "yet by this process",
+                }
+            ),
+        ),
+        unmeasured=[dim("no_observations", 1, "no_observations")],
+        code="no_observations",
+        detail=NO_EDGE_DETAIL,
+    )
+
+
+def graph_frontier_only() -> dict[str, Any]:
+    """No edge under the filter, yet an open frontier row still names a node:
+    the frontier is never filtered, and no edge is ``unknown``."""
+    return envelope(
+        "graph",
+        "unknown",
+        graph_result(
+            nodes=[graph_node(HOME, frontier=[frontier_entry(HOME, "fp-a")])],
+            edges=[],
+            unknownDestinationArrivals=0,
+            coverage=empty_graph_coverage(
+                nodesObserved=1,
+                frontierOpen=1,
+                frontierNodes=1,
+                frontierByReason={
+                    **{r: 0 for r in FRONTIER_REASONS},
+                    "not_yet_activated": 1,
+                },
+            ),
+        ),
+        unmeasured=[
+            dim("no_observations", 1, "no_observations"),
+            dim("frontier", 1, "frontier_open"),
+        ],
+        code="no_observations",
+        detail=NO_EDGE_DETAIL,
+    )
+
+
 def steps_measured() -> dict[str, Any]:
     result = {
         "fromKey": HOME,
@@ -781,6 +1079,35 @@ def health() -> dict[str, Any]:
             "lastPruneAt": None,
             "lastPruneDeleted": None,
             "lastPruneSkipped": None,
+        },
+    }
+
+
+PASSIVE_NEVER_RECEIVED_EVICTED = (
+    "no relayed interaction for this app is RECORDED as accepted or refused, but "
+    "counts for apps with no slot have been evicted since this process started, so "
+    "whether any was accepted or refused is UNKNOWN (and 0 refusal(s) had an app id "
+    "that was not an identifier)"
+)
+
+
+def health_with_passive_capture() -> dict[str, Any]:
+    """A runner that also serves ``passiveCapture``: every field of
+    ``PassiveCaptureHealth`` at qontinui-runner#2478's ``health.rs``."""
+    return {
+        **health(),
+        "passiveCapture": {
+            "scope": "this app, since this runner process started",
+            "state": "never_received",
+            "lastReceivedAt": None,
+            "receivedTotal": 0,
+            "refusedTotal": None,
+            "closingSnapshotsRefusedTotal": None,
+            "countsComplete": False,
+            "lastRefusal": None,
+            "lastClosingSnapshotRefusal": None,
+            "unattributedRefusals": 0,
+            "detail": PASSIVE_NEVER_RECEIVED_EVICTED,
         },
     }
 

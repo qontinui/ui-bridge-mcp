@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 import ui_bridge_mcp.server as server_mod
+from ui_bridge_mcp.journey import _graph_node_text
 from ui_bridge_mcp.timeline import format_timeline
 
 from . import journey_fixtures as F
@@ -170,6 +171,7 @@ def test_degraded_measured_answer_says_unlisted_is_not_ruled_out(
             F.reachable_measured(),
             {"from": F.HOME},
         ),
+        ("journey_graph", "graph", F.graph_measured(), {}),
         ("journey_dead_ends", "dead-ends", F.dead_ends_measured(), {}),
         (
             "journey_requires_prior_knowledge",
@@ -298,6 +300,7 @@ def test_only_set_parameters_are_sent(monkeypatch: pytest.MonkeyPatch) -> None:
     ("tool", "route", "args"),
     [
         ("journey_steps_to", "steps", {"from": F.HOME, "to": F.RUNS}),
+        ("journey_graph", "graph", {}),
         ("journey_dead_ends", "dead-ends", {}),
         ("journey_edge_timing", "edge-timing", {"from": F.HOME, "to": F.RUNS}),
     ],
@@ -664,9 +667,452 @@ def test_health_prints_ledger_first(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "  lastError: none recorded" in out
 
 
+def test_health_prints_every_field_it_has_no_place_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A block a newer runner adds is shown whole and uninterpreted, never
+    dropped: its ``null`` may mean UNKNOWN, so it is not read as zero or "none"."""
+    out, is_error, _ = run(
+        monkeypatch, "journey_health", "health", F.health_with_passive_capture()
+    )
+    assert not is_error
+    assert first_line(out) == "LEDGER: ledger=writing"
+    lines = out.splitlines()
+    block = lines[lines.index("passiveCapture (as served, uninterpreted):") :]
+    assert block == [
+        "passiveCapture (as served, uninterpreted):",
+        "  closingSnapshotsRefusedTotal: null",
+        "  countsComplete: false",
+        f"  detail: {F.PASSIVE_NEVER_RECEIVED_EVICTED}",
+        "  lastClosingSnapshotRefusal: null",
+        "  lastReceivedAt: null",
+        "  lastRefusal: null",
+        "  receivedTotal: 0",
+        "  refusedTotal: null",
+        "  scope: this app, since this runner process started",
+        "  state: never_received",
+        "  unattributedRefusals: 0",
+    ]
+    assert "appId" not in out
+
+
+def test_health_without_counters_still_prints_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.health_with_passive_capture()
+    del body["counters"]
+    out, _, _ = run(monkeypatch, "journey_health", "health", body)
+    assert "counters: UNKNOWN (the health answer carried none)" in out
+    assert "  state: never_received" in out
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        (None, "null"),
+        (0, "0"),
+        (False, "false"),
+        ("text", "text"),
+        ({}, "{}"),
+        (["é" * 300], '["' + "é" * 300 + '"]'),
+    ],
+)
+def test_health_prints_a_bare_field_whole(
+    monkeypatch: pytest.MonkeyPatch, value: Any, shown: str
+) -> None:
+    out, _, _ = run(
+        monkeypatch, "journey_health", "health", {**F.health(), "newField": value}
+    )
+    assert f"newField (as served, uninterpreted): {shown}" in out.splitlines()
+
+
 def test_health_takes_no_filter() -> None:
     schema = next(t for t in server_mod.TOOLS if t.name == "journey_health").inputSchema
     assert set(schema["properties"]) == {"app_id"}
+
+
+# =============================================================================
+# the graph
+# =============================================================================
+
+
+NODES_TITLE = (
+    "every node of a row the filter kept, plus every node with a valid open "
+    "frontier row, which no filter narrows"
+)
+EDGES_TITLE = (
+    "every trigger and outcome; a departure with no observed destination is not an "
+    "edge (toNodeUnobserved in COVERAGE); only affordance + changed is a navigation "
+    "step"
+)
+
+
+def test_graph_lists_every_node_key_with_what_is_open_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, is_error, runner = run(
+        monkeypatch, "journey_graph", "graph", F.graph_measured()
+    )
+    assert not is_error
+    assert runner.requests[0][1] == f"{ROOT}/graph"
+    lines = out.splitlines()
+    assert lines[0].startswith("COVERAGE: ledger=writing | edgesObserved=7 ")
+    assert lines[1].startswith(
+        "ANSWER: MEASURED - 3 node(s) and 3 aggregated edge(s) listed [DEGRADED:"
+    )
+    assert f"  Nodes, {NODES_TITLE} (3):" in lines
+    assert (
+        f"    {F.HOME} (console, modelled): unmeasured departures: "
+        "filtered_departures 1"
+    ) in lines
+    assert (
+        f"    {F.RUNS} (console, modelled): open frontier effect_write 1, "
+        "not_yet_activated 1; 1 unobserved departure(s); unmeasured departures: "
+        "settle_timeout_departures 2; 1 filtered out click/back arrival(s)"
+    ) in lines
+    assert (
+        f"    {F.SETTINGS} (/admin/settings, unmodelled): unconfirmed destination "
+        "(no arrival ended changed or no_change - it may be an intermediate state, "
+        "not a page)"
+    ) in lines
+
+
+def test_a_node_with_nothing_open_is_a_bare_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_settled())
+    assert f"    {F.HOME} (console, modelled)" in out.splitlines()
+
+
+def test_graph_lists_edges_of_every_trigger_with_their_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_measured())
+    lines = out.splitlines()
+    assert f"  Edges, {EDGES_TITLE} (3):" in lines
+    assert (
+        f"    {F.HOME} -> {F.RUNS} via click/affordance [role=link, target=fp-"
+        f"{F.RUNS}] outcome=changed seen 3x between 2026-10-20T09:00:00Z and "
+        "2026-10-23T17:30:00Z"
+    ) in lines
+    assert any(
+        f"{F.RUNS} -> {F.HOME} via navigate/pop outcome=changed seen 1x" in line
+        for line in lines
+    )
+    assert any(
+        f"{F.RUNS} -> {F.SETTINGS} via click/affordance" in line
+        and "outcome=settle_timeout seen 2x" in line
+        for line in lines
+    )
+
+
+def test_settled_graph_is_measured_and_not_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_settled())
+    assert out.splitlines()[1] == (
+        "ANSWER: MEASURED - 2 node(s) and 1 aggregated edge(s) listed"
+    )
+    assert "Left out" not in out
+    assert "Rejected rows" not in out
+    assert "UNKNOWN" not in out
+
+
+def test_graph_names_what_it_placed_at_no_listed_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_off_node_doubt())
+    lines = out.splitlines()
+    assert "unplacedRejectedRows=2" in lines[0]
+    assert "rowsRejected 3 entries = 4 distinct row(s)" in lines[0]
+    assert "  Rejected rows, which failed their contract (3):" in lines
+    assert any(
+        line.startswith('    edge edge-9 x2: observedAt "yesterday" is not RFC 3339')
+        for line in lines
+    )
+    assert (
+        "    frontier bad#node#key fp-y x1: node is not canonical: specId must not "
+        "contain '#' (the key's spec/state separator)"
+    ) in lines
+    assert "  Left out at no listed node:" in lines
+    assert (
+        "    2 rejected edge row(s) placeable at no node (could be anywhere)" in lines
+    )
+    assert (
+        "    1 rejected frontier row(s) placeable at no node (could be anywhere)"
+        in lines
+    )
+    assert (
+        "    off-graph unmeasured departures: rejected_frontier 1, "
+        "filtered_departures 4"
+    ) in lines
+    assert (
+        "  1 rejected frontier row(s) are counted at two node keys, listed or "
+        "off-graph (their key column and their node disagree)."
+    ) in lines
+
+
+def test_graph_with_no_node_or_edge_still_names_the_rows_it_left_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_only_rejected_rows())
+    lines = out.splitlines()
+    assert lines[1].startswith("ANSWER: UNKNOWN (no_observations)")
+    assert "Nodes" not in out
+    assert "Edges" not in out
+    assert any(line.startswith("    edge edge-9 x2: ") for line in lines)
+    assert (
+        "    off-graph unmeasured departures: rejected_frontier 2, "
+        "filtered_departures 4"
+    ) in lines
+
+
+def test_graph_with_no_edge_is_unknown_and_still_names_its_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontier is never filtered, so a node can outlive every edge."""
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_frontier_only())
+    lines = out.splitlines()
+    assert lines[1].startswith("ANSWER: UNKNOWN (no_observations) - NOT a negative")
+    assert f"    {F.HOME} (console, modelled): open frontier not_yet_activated 1" in (
+        lines
+    )
+    assert "    (none)" in lines
+
+
+def test_empty_graph_lists_nothing_as_if_it_were_a_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_empty())
+    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (no_observations)")
+    assert "Nodes" not in out
+    assert "Edges" not in out
+    assert "UNKNOWN, not zero" not in out
+
+
+def test_failed_graph_read_carries_no_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, is_error, _ = run(
+        monkeypatch, "journey_graph", "graph", F.read_failed("graph")
+    )
+    assert not is_error
+    assert "edgesObserved=UNKNOWN nodes=UNKNOWN frontierOpen=UNKNOWN" in first_line(out)
+    assert out.splitlines()[1].startswith("ANSWER: UNKNOWN (producer_failed)")
+    assert "Nodes" not in out
+
+
+def test_graph_read_gap_says_the_listing_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_read_gap())
+    lines = out.splitlines()
+    assert lines[1].startswith("ANSWER: MEASURED")
+    assert "[DEGRADED:" in lines[1]
+    assert lines[2].startswith("  Read gap: edges_beyond_read_bound_20000 x1")
+    assert (
+        "  Nodes among the rows read - NOT complete, the read had a gap, "
+        f"{NODES_TITLE} (2):"
+    ) in lines
+    assert (
+        "  Edges among the rows read - NOT complete, the read had a gap, "
+        f"{EDGES_TITLE} (1):"
+    ) in lines
+
+
+def test_graph_limit_cuts_the_lists_and_never_the_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_measured(), limit=1)
+    lines = out.splitlines()
+    assert f"  Nodes, {NODES_TITLE} (3):" in lines
+    assert f"  Edges, {EDGES_TITLE} (3):" in lines
+    assert lines.count("    ... and 2 more (not listed; raise `limit`)") == 2
+    assert lines[1].startswith("ANSWER: MEASURED - 3 node(s) and 3 aggregated edge(s)")
+
+
+def test_graph_sends_only_the_filter_and_flags_a_dropped_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``limit`` is the tool's own; the runner refuses a parameter it does not read."""
+    answering(monkeypatch)
+    seen: list[httpx.Request] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=F.graph_measured())
+
+    server_mod.client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(capture)
+    )
+    result = call(
+        "journey_graph", {"app_id": F.APP, "run_kind": "explorer", "limit": 5}
+    )
+    assert dict(seen[0].url.params) == {"run_kind": "explorer"}
+    assert "FILTER NOT APPLIED AS ASKED: run_kind asked 'explorer'" in first_line(
+        text(result)
+    )
+
+
+@pytest.mark.parametrize("missing", ["nodes", "edges"])
+def test_a_graph_without_a_list_is_unknown_not_zero(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    body = F.graph_settled()
+    del body["value"][missing]
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", body)
+    lines = out.splitlines()
+    assert (
+        "UNKNOWN " + ("node(s)" if missing == "nodes" else "aggregated edge(s)")
+        in (lines[1])
+    )
+    title = f"Nodes, {NODES_TITLE}" if missing == "nodes" else f"Edges, {EDGES_TITLE}"
+    assert f"  {title}: UNKNOWN (the answer carried no list)" in lines
+
+
+def test_a_graph_without_its_left_out_fields_is_unknown_not_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.graph_settled()
+    for key in (
+        "rejected",
+        "offGraphDepartures",
+        "unplacedRejectedRows",
+        "unplacedRejectedFrontier",
+        "rejectedFrontierDoublePlaced",
+        "unknownDestinationArrivals",
+    ):
+        del body["value"][key]
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", body)
+    lines = out.splitlines()
+    assert "  Rejected rows: UNKNOWN (the answer carried no list)" in lines
+    assert (
+        "  UNKNOWN, not zero (the answer did not carry them): unplacedRejectedRows, "
+        "unplacedRejectedFrontier, rejectedFrontierDoublePlaced, "
+        "unknownDestinationArrivals, offGraphDepartures"
+    ) in lines
+
+
+def test_a_partial_departures_block_names_the_missing_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.graph_settled()
+    del body["value"]["offGraphDepartures"]["withdrawn"]
+    del body["value"]["nodes"][0]["unmeasuredDepartures"]["errored"]
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", body)
+    lines = out.splitlines()
+    assert (
+        "  UNKNOWN, not zero (the answer did not carry them): "
+        "offGraphDepartures.withdrawn_departures"
+    ) in lines
+    assert (
+        f"    {F.HOME} (console, modelled): UNKNOWN, not clear: errored_departures"
+    ) in lines
+
+
+def test_a_node_missing_its_doubt_fields_never_reads_as_explored() -> None:
+    assert _graph_node_text({"key": "a#b", "node": {"modelled": True}}) == (
+        "a#b (modelled): UNKNOWN, not clear: frontier, unobservedDepartures, "
+        "unmeasuredDepartures, arrivalDoubt, unconfirmedDestination"
+    )
+    assert _graph_node_text({"key": "a#b"}).startswith("a#b (modelled UNKNOWN): ")
+
+
+@pytest.mark.parametrize(
+    ("field", "served"),
+    [
+        ("frontier", None),
+        ("frontier", "3"),
+        ("unobservedDepartures", None),
+        ("unobservedDepartures", "3"),
+        ("unobservedDepartures", True),
+        ("unmeasuredDepartures", None),
+        ("unmeasuredDepartures", []),
+        ("arrivalDoubt", None),
+        ("arrivalDoubt", []),
+        ("unconfirmedDestination", None),
+        ("unconfirmedDestination", "false"),
+    ],
+)
+def test_a_served_null_or_wrong_type_is_unknown_not_nothing_open(
+    field: str, served: Any
+) -> None:
+    text = _graph_node_text({**F.graph_node(F.HOME), field: served})
+    assert text.endswith(f"UNKNOWN, not clear: {field}")
+
+
+@pytest.mark.parametrize("served", [None, "3", True])
+@pytest.mark.parametrize("field", ["filtered", "withdrawn"])
+def test_a_null_arrival_doubt_counter_is_unknown(field: str, served: Any) -> None:
+    node = F.graph_node(
+        F.HOME, arrivalDoubt={"filtered": 0, "withdrawn": 0, field: served}
+    )
+    assert _graph_node_text(node).endswith(f"UNKNOWN, not clear: arrivalDoubt.{field}")
+
+
+@pytest.mark.parametrize("served", [None, "3", True])
+def test_a_null_departure_counter_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, served: Any
+) -> None:
+    body = F.graph_settled()
+    body["value"]["offGraphDepartures"]["withdrawn"] = served
+    body["value"]["nodes"][0]["unmeasuredDepartures"]["errored"] = served
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", body)
+    lines = out.splitlines()
+    assert (
+        "  UNKNOWN, not zero (the answer did not carry them): "
+        "offGraphDepartures.withdrawn_departures"
+    ) in lines
+    assert (
+        f"    {F.HOME} (console, modelled): UNKNOWN, not clear: errored_departures"
+    ) in lines
+
+
+def test_arrival_doubt_labels_say_which_exclusion_it_was() -> None:
+    node = F.graph_node(F.HOME, arrivalDoubt={"filtered": 1, "withdrawn": 2})
+    assert _graph_node_text(node).endswith(
+        "1 filtered out click/back arrival(s); 2 withdrawn click/back arrival(s)"
+    )
+
+
+def test_a_rejected_row_without_a_count_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.graph_off_node_doubt()
+    body["value"]["rejected"][0]["rows"] = None
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", body)
+    assert any(
+        line.startswith("    edge edge-9 xUNKNOWN: ") for line in out.splitlines()
+    )
+
+
+def test_the_answer_does_not_call_a_frontier_node_observed_under_the_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", F.graph_measured())
+    assert "observed under" not in out
+    assert "which no filter narrows" in out
+
+
+def test_every_journey_tool_has_a_route_and_every_route_a_tool() -> None:
+    """The runner's ``journey/routes.rs`` ``router()``, as of its landed routes."""
+    tools = {t.name for t in server_mod.TOOLS if t.name.startswith("journey_")}
+    assert tools == set(server_mod._JOURNEY_ROUTES)
+    assert {route for route, _, _ in server_mod._JOURNEY_ROUTES.values()} == {
+        "health",
+        "graph",
+        "reachable",
+        "steps",
+        "dead-ends",
+        "prior-knowledge",
+        "frontier",
+        "edge-timing",
+    }
+
+
+def test_node_key_description_names_the_tool_that_lists_every_key() -> None:
+    schema = next(
+        t for t in server_mod.TOOLS if t.name == "journey_reachable_from"
+    ).inputSchema
+    assert "journey_graph" in schema["properties"]["from"]["description"]
 
 
 # =============================================================================

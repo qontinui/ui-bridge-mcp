@@ -31,6 +31,7 @@ timing is a distribution with its sample size, never a single latency.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
@@ -471,6 +472,14 @@ def unsettled_lines(search: Any, limit: int, heading: str) -> list[str]:
 
 _SETTLE_HEADING = "Unsettled part (explore these to settle the question):"
 
+# ``JourneyGraph`` fields shaped like a ``JourneySearchFrontier``'s: what the
+# graph left out at no listed node.
+_GRAPH_OFF_NODE_KEYS: tuple[str, ...] = (
+    "offGraphDepartures",
+    "unplacedRejectedRows",
+    "unplacedRejectedFrontier",
+)
+
 
 # =============================================================================
 # Per-query renderers
@@ -873,13 +882,252 @@ def format_frontier(
     )
 
 
+def _missing_departures(departures: dict[str, Any]) -> list[str]:
+    """The ``JourneyUnmeasuredDepartures`` counters the answer did not carry."""
+    return [
+        dimension
+        for key, dimension in _DEPARTURE_FIELDS
+        if not _is_number(departures.get(key))
+    ]
+
+
+def _graph_node_text(raw: Any) -> str:
+    """One observed node: its key, what names it, and what is left open there.
+
+    A field the answer did not carry is named UNKNOWN: a bare key reads as a
+    node with nothing open, so only a served zero may render as nothing.
+    """
+    n = _dict(raw)
+    inner = _dict(n.get("node"))
+    names = [
+        value
+        for value in (inner.get("pageLabel"), inner.get("pathnameTemplate"))
+        if isinstance(value, str) and value
+    ]
+    modelled = inner.get("modelled")
+    if modelled is True:
+        kind = "modelled"
+    else:
+        kind = "unmodelled" if modelled is False else "modelled UNKNOWN"
+    facts = []
+    unknown = []
+    if isinstance(n.get("frontier"), list):
+        reasons = Counter(str(_dict(e).get("reason", "?")) for e in n["frontier"])
+        if reasons:
+            facts.append(f"open frontier {_by_reason(dict(reasons))}")
+    else:
+        unknown.append("frontier")
+    unobserved = n.get("unobservedDepartures")
+    if not _is_number(unobserved):
+        unknown.append("unobservedDepartures")
+    elif unobserved:
+        facts.append(f"{format_number(unobserved)} unobserved departure(s)")
+    if isinstance(n.get("unmeasuredDepartures"), dict):
+        departures = _departures_text(n["unmeasuredDepartures"])
+        if departures:
+            facts.append(f"unmeasured departures: {departures}")
+        unknown.extend(_missing_departures(n["unmeasuredDepartures"]))
+    else:
+        unknown.append("unmeasuredDepartures")
+    if isinstance(n.get("arrivalDoubt"), dict):
+        for key, label in (("filtered", "filtered out"), ("withdrawn", "withdrawn")):
+            value = n["arrivalDoubt"].get(key)
+            if not _is_number(value):
+                unknown.append(f"arrivalDoubt.{key}")
+            elif value:
+                facts.append(f"{format_number(value)} {label} click/back arrival(s)")
+    else:
+        unknown.append("arrivalDoubt")
+    if n.get("unconfirmedDestination") is True:
+        facts.append(
+            "unconfirmed destination (no arrival ended changed or no_change - it "
+            "may be an intermediate state, not a page)"
+        )
+    elif n.get("unconfirmedDestination") is not False:
+        unknown.append("unconfirmedDestination")
+    if unknown:
+        facts.append(f"UNKNOWN, not clear: {', '.join(unknown)}")
+    head = f"{n.get('key', '?')} ({', '.join([*names, kind])})"
+    return f"{head}: {'; '.join(facts)}" if facts else head
+
+
+def _graph_edge_text(raw: Any) -> str:
+    e = _dict(raw)
+    return (
+        f"{_edge_text(e)} between {e.get('firstObservedAt', '?')} "
+        f"and {e.get('lastObservedAt', '?')}"
+    )
+
+
+def _rejected_row_text(raw: Any) -> str:
+    r = _dict(raw)
+    return (
+        f"{r.get('kind', '?')} {r.get('row', '?')} x{_count(r.get('rows'))}: "
+        f"{r.get('reason', '?')}"
+    )
+
+
+def _graph_section(
+    title: str, items: Any, render: Callable[[Any], str], limit: int
+) -> list[str]:
+    if not isinstance(items, list):
+        return [f"  {title}: UNKNOWN (the answer carried no list)"]
+    lines = _limited(items, limit, render, "    ") or ["    (none)"]
+    return [f"  {title} ({len(items)}):", *lines]
+
+
+def _graph_left_out_lines(result: dict[str, Any], limit: int) -> list[str]:
+    """What the graph left out of its nodes and edges, with why it was left out."""
+    lines = []
+    rejected = result.get("rejected")
+    if not isinstance(rejected, list):
+        lines.append("  Rejected rows: UNKNOWN (the answer carried no list)")
+    elif rejected:
+        lines.extend(
+            _graph_section(
+                "Rejected rows, which failed their contract",
+                rejected,
+                _rejected_row_text,
+                limit,
+            )
+        )
+    lines.extend(
+        unsettled_lines(
+            {key: result.get(key) for key in _GRAPH_OFF_NODE_KEYS},
+            limit,
+            "  Left out at no listed node:",
+        )
+    )
+    double_placed = result.get("rejectedFrontierDoublePlaced")
+    if _is_number(double_placed) and double_placed:
+        lines.append(
+            f"  {format_number(double_placed)} rejected frontier row(s) are counted "
+            "at two node keys, listed or off-graph (their key column and their "
+            "node disagree)."
+        )
+    missing = [
+        key
+        for key in (
+            "unplacedRejectedRows",
+            "unplacedRejectedFrontier",
+            "rejectedFrontierDoublePlaced",
+            "unknownDestinationArrivals",
+        )
+        if not _is_number(result.get(key))
+    ]
+    off_graph = result.get("offGraphDepartures")
+    if isinstance(off_graph, dict):
+        missing.extend(
+            f"offGraphDepartures.{d}" for d in _missing_departures(off_graph)
+        )
+    else:
+        missing.append("offGraphDepartures")
+    if missing:
+        lines.append(
+            f"  UNKNOWN, not zero (the answer did not carry them): {', '.join(missing)}"
+        )
+    return lines
+
+
+_GRAPH_NODES_TITLE = (
+    "every node of a row the filter kept, plus every node with a valid open "
+    "frontier row, which no filter narrows"
+)
+_GRAPH_EDGES_TITLE = (
+    "every trigger and outcome; a departure with no observed destination is not "
+    "an edge (toNodeUnobserved in COVERAGE); only affordance + changed is a "
+    "navigation step"
+)
+
+
+def format_graph(body: Any, requested: dict[str, str] | None, limit: int) -> str:
+    """The whole observed graph: node keys, edges, and what was left out.
+
+    The answer that needs no starting key and is not limited to one kind of
+    node, so it is where a ``from`` / ``to`` / ``node`` argument comes from. The
+    other no-argument tools list a node only for what is open or unsettled at it,
+    for having no way out, or for having no click or back arrival, so a settled
+    page with a click or back arrival appears in none of them.
+
+    The nodes are those of every row the filter kept (a departure with no observed
+    destination included, though it is no edge) plus every node with a valid open
+    frontier row, which no filter narrows: a listed node is not evidence of
+    activity inside the filter, and a node whose rows were all filtered out is not
+    listed.
+    """
+
+    def details(answer: JourneyAnswer) -> list[str]:
+        r = answer.result
+        if not r:
+            return _ledger_unknown_lines(answer)
+        lines = []
+        nodes = r.get("nodes")
+        edges = r.get("edges")
+        if not (_no_edges(answer) and nodes == [] and edges == []):
+            gap = " among the rows read - NOT complete, the read had a gap"
+            where = gap if read_gaps(answer) else ""
+            lines.extend(
+                _graph_section(
+                    f"Nodes{where}, {_GRAPH_NODES_TITLE}",
+                    nodes,
+                    _graph_node_text,
+                    limit,
+                )
+            )
+            lines.extend(
+                _graph_section(
+                    f"Edges{where}, {_GRAPH_EDGES_TITLE}",
+                    edges,
+                    _graph_edge_text,
+                    limit,
+                )
+            )
+        lines.extend(_graph_left_out_lines(r, limit))
+        return lines
+
+    def positive(answer: JourneyAnswer) -> str:
+        counts = [
+            str(len(items)) if isinstance(items, list) else "UNKNOWN"
+            for items in (answer.result.get("nodes"), answer.result.get("edges"))
+        ]
+        return f"{counts[0]} node(s) and {counts[1]} aggregated edge(s) listed"
+
+    return _render(
+        body,
+        requested,
+        positive=positive,
+        negative="no edge observed",
+        not_this="that the app has no navigation",
+        details=details,
+        limit=limit,
+    )
+
+
 # =============================================================================
 # health (not an envelope)
 # =============================================================================
 
 
+# ``JourneyHealthResponse`` fields ``format_health`` prints in their own place.
+# ``appId`` is the argument the caller passed.
+_HEALTH_RENDERED = frozenset({"appId", "ledger", "schemaProbe", "counters"})
+
+
+def _health_value(value: Any) -> str:
+    """A field whole and uninterpreted: ``null`` may mean "never" or "not counted"."""
+    if isinstance(value, str):
+        return value
+    if _is_number(value):
+        return format_number(value)
+    return json.dumps(
+        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=str
+    )
+
+
 def format_health(body: Any) -> str:
-    """``JourneyHealthResponse``: the ledger line first, then the counters."""
+    """``JourneyHealthResponse``: the ledger line first, then the counters, then
+    every other field as served, so a block a newer runner adds is never dropped.
+    """
     h = _dict(body)
     lines = [
         f"LEDGER: {_ledger_text(_dict(h['ledger']) if isinstance(h.get('ledger'), dict) else None)}"
@@ -889,14 +1137,23 @@ def format_health(body: Any) -> str:
         f"schemaProbe: {probe if isinstance(probe, str) and probe else 'UNKNOWN (not reported)'}"
     )
     counters = h.get("counters")
-    if not isinstance(counters, dict):
+    if isinstance(counters, dict):
+        lines.append("counters (this runner process only):")
+        for key in sorted(counters):
+            value = counters[key]
+            shown = "none recorded" if value is None else format_number(value)
+            lines.append(f"  {key}: {shown}")
+    else:
         lines.append("counters: UNKNOWN (the health answer carried none)")
-        return "\n".join(lines)
-    lines.append("counters (this runner process only):")
-    for key in sorted(counters):
-        value = counters[key]
-        shown = "none recorded" if value is None else format_number(value)
-        lines.append(f"  {key}: {shown}")
+    for key in sorted(h.keys() - _HEALTH_RENDERED):
+        value = h[key]
+        if isinstance(value, dict) and value:
+            lines.append(f"{key} (as served, uninterpreted):")
+            lines.extend(
+                f"  {field}: {_health_value(value[field])}" for field in sorted(value)
+            )
+        else:
+            lines.append(f"{key} (as served, uninterpreted): {_health_value(value)}")
     return "\n".join(lines)
 
 

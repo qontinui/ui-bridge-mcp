@@ -34,6 +34,7 @@ from .journey import (
     format_dead_ends,
     format_edge_timing,
     format_frontier,
+    format_graph,
     format_prior_knowledge,
     format_reachable,
     format_steps,
@@ -2071,7 +2072,7 @@ def _journey_schema(
     }
 
 
-_NODE_KEY = "A JourneyNode key (from journey_frontier / journey_dead_ends output)."
+_NODE_KEY = "A JourneyNode key (journey_graph lists the observed ones)."
 
 TOOLS = [
     # Health check
@@ -4952,6 +4953,18 @@ Examples:
             "answer: a ledger that is not writing describes a stale graph."
         ),
         inputSchema=_journey_schema({}, filtered=False),
+    ),
+    types.Tool(
+        name="journey_graph",
+        description=(
+            "The observed graph: each node key (the `from` / `to` / `node` the "
+            "other journey tools take) with what is left open at it, each "
+            "aggregated edge with an observed destination, whatever its trigger or "
+            "outcome, and the rows left out. A node with a valid open frontier row "
+            "is listed whatever the filter. Start here when you have no node key."
+            + _JOURNEY_COMMON
+        ),
+        inputSchema=_journey_schema({}),
     ),
     types.Tool(
         name="journey_reachable_from",
@@ -8470,6 +8483,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 # Tool name -> (runner route, the node-key arguments it takes, required ones).
 _JOURNEY_ROUTES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
     "journey_health": ("health", (), ()),
+    "journey_graph": ("graph", (), ()),
     "journey_reachable_from": ("reachable", ("from",), ("from",)),
     "journey_steps_to": ("steps", ("from", "to"), ("from", "to")),
     "journey_dead_ends": ("dead-ends", (), ()),
@@ -8521,6 +8535,8 @@ async def _journey_tool(
     body = response.data
     if route == "health":
         text = format_journey_health(body)
+    elif route == "graph":
+        text = format_graph(body, requested, limit)
     elif route == "reachable":
         text = format_reachable(body, params["from"], requested, limit)
     elif route == "steps":
