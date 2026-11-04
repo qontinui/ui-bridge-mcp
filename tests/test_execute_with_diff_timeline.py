@@ -280,8 +280,12 @@ def test_unknown_codes_mirror_the_sdk_closed_set() -> None:
     assert CODE_PRODUCER_FAILED in UNKNOWN_CODES
 
 
-def test_unknown_codes_comment_names_the_sdk_twin_not_schemas_main() -> None:
-    """The comment must not claim schemas main already carries the 16 codes."""
+def test_unknown_codes_comment_names_both_twins() -> None:
+    """The comment names the SDK and schemas twins, which both carry all 16 codes.
+
+    qontinui-schemas#264 landed the seven timeline codes in ``UnknownCode::ALL``,
+    so the comment must no longer say schemas main lacks them.
+    """
     import inspect
 
     import ui_bridge_mcp.client as client_module
@@ -290,8 +294,10 @@ def test_unknown_codes_comment_names_the_sdk_twin_not_schemas_main() -> None:
     start = source.index("# The closed Observation ``UnknownCode`` set")
     comment = source[start : source.index("UNKNOWN_CODES: tuple", start)]
     assert "packages/ui-bridge/src/observation/observation.ts" in comment
-    assert "twin of qontinui-schemas" not in comment
-    assert "once it does" in comment
+    assert "rust-vision-core/src/observation.rs" in comment
+    assert f"{len(UNKNOWN_CODES)} members in both" in comment
+    assert "not yet in qontinui-schemas" not in comment
+    assert "once it does" not in comment
 
 
 @pytest.mark.parametrize("code", NEW_CODES)

@@ -56,11 +56,10 @@ CODE_PRODUCER_FAILED = "producer_failed"
 
 # The closed Observation ``UnknownCode`` set, in the canonical wire-contract
 # order: the twin of the ui-bridge SDK's
-# ``packages/ui-bridge/src/observation/observation.ts`` ``UNKNOWN_CODES``. The
-# last seven members are not yet in qontinui-schemas
-# ``rust-vision-core/src/observation.rs`` ``UnknownCode::ALL`` on its main (nine
-# members there); they land with this same plan's schemas branch, and this
-# list is the twin of that file only once it does. A code outside it still renders as
+# ``packages/ui-bridge/src/observation/observation.ts`` ``UNKNOWN_CODES``, and
+# of qontinui-schemas ``rust-vision-core/src/observation.rs``
+# ``UnknownCode::ALL`` (16 members in both; the last seven landed in schemas
+# with qontinui-schemas#264). A code outside it still renders as
 # UNKNOWN with the code it carried (``timeline.render_unknown``), flagged as
 # one this server does not know, never as an error.
 UNKNOWN_CODES: tuple[str, ...] = (
