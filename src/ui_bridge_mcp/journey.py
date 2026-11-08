@@ -248,6 +248,7 @@ def _by_reason(counts: Any, *, nonzero_only: bool = True) -> str:
 # that did not parse. Any listed item may be wrong when one is present.
 _READ_GAP_PREFIXES: tuple[str, ...] = (
     "edges_beyond_read_bound_",
+    "older_groups_beyond_read_bound_",
     "frontier_beyond_read_bound_",
     "rows_unparseable",
 )
@@ -300,6 +301,25 @@ def _graph_doubt(answer: JourneyAnswer) -> list[str]:
     return parts
 
 
+def _summarized_text(coverage: dict[str, Any]) -> str | None:
+    """Rows before ``since`` were read as one row per distinct transition.
+
+    ``filteredOut``, ``withdrawn`` and ``unplacedRejectedRows`` still count rows.
+    Every other count of excluded rows counts each group once, so it can
+    undercount and only means zero or non-zero. Absent when nothing was
+    summarized, and on a runner that does not summarize.
+    """
+    block = _dict(coverage.get("edgesSummarized"))
+    if not block:
+        return None
+    return (
+        f"edgesSummarized={_count(block.get('rows'))} row(s) before `since` as "
+        f"{_count(block.get('groups'))} group(s) (filteredOut, withdrawn and "
+        "unplacedRejectedRows count rows; read other excluded-row counts only as "
+        "zero or non-zero)"
+    )
+
+
 def graph_coverage_line(answer: JourneyAnswer, requested: dict[str, str] | None) -> str:
     """The one-line COVERAGE header of a graph-backed answer."""
     cov = answer.coverage
@@ -322,6 +342,9 @@ def graph_coverage_line(answer: JourneyAnswer, requested: dict[str, str] | None)
             f"({_by_reason(cov.get('frontierByReason'))})"
         )
         parts.extend(_graph_doubt(answer))
+        summarized = _summarized_text(cov)
+        if summarized is not None:
+            parts.append(summarized)
     else:
         parts.append(
             "edgesObserved=UNKNOWN nodes=UNKNOWN frontierOpen=UNKNOWN (no counts: "

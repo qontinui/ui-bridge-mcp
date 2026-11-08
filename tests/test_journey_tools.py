@@ -546,6 +546,53 @@ def test_graph_doubt_is_absent_from_coverage_when_zero(
     assert "unknownDestinationArrivals" not in first_line(out)
 
 
+def test_summarized_older_rows_are_disclosed_in_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.steps_unknown()
+    body["provenance"]["coverage"]["edgesSummarized"] = {"rows": 30001, "groups": 5}
+    out, _, _ = run(
+        monkeypatch,
+        "journey_steps_to",
+        "steps",
+        body,
+        **{"from": F.HOME, "to": F.RUN_DETAIL},
+    )
+    assert (
+        "edgesSummarized=30001 row(s) before `since` as 5 group(s) "
+        "(filteredOut, withdrawn and unplacedRejectedRows count rows; read other "
+        "excluded-row counts only as zero or non-zero)"
+    ) in first_line(out)
+
+
+def test_nothing_is_disclosed_when_no_rows_were_summarized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, _, _ = run(
+        monkeypatch,
+        "journey_steps_to",
+        "steps",
+        F.steps_unknown(),
+        **{"from": F.HOME, "to": F.RUN_DETAIL},
+    )
+    assert "edgesSummarized" not in first_line(out)
+
+
+def test_a_truncated_older_groups_read_is_a_read_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = F.graph_settled()
+    cov = body["provenance"]["coverage"]
+    cov["unmeasured"] = [
+        F.dim("older_groups_beyond_read_bound_20000", 1, "input_missing")
+    ]
+    cov["measured"] = 1
+    out, _, _ = run(monkeypatch, "journey_graph", "graph", body)
+    lines = out.splitlines()
+    assert lines[2].startswith("  Read gap: older_groups_beyond_read_bound_20000 x1")
+    assert "NOT complete, the read had a gap" in out
+
+
 def test_prior_knowledge_without_unsettled_list_says_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
