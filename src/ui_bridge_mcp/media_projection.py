@@ -88,7 +88,10 @@ def media_alt(alt_text: Any, decorative: bool) -> dict[str, Any]:
 def _finite(v: Any) -> float | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    f = float(v)
+    try:
+        f = float(v)
+    except OverflowError:  # a huge JSON integer (`10**400`) is a Python int
+        return None
     return f if math.isfinite(f) else None
 
 

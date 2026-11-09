@@ -4067,7 +4067,7 @@ individual design tools separately.""",
     ),
     types.Tool(
         name="ui_audit_images",
-        description="""Audit every image on the page: loaded, sharp enough, undistorted,
+        description="""Audit every image on the page: loaded, high-enough resolution, undistorted,
 layout-safe, described, not oversized or heavy, lazy off-screen, not duplicated.
 
 Discovers the page and evaluates vision-core's image assertions from the facts the

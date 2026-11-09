@@ -435,6 +435,41 @@ def test_an_out_of_range_rect_is_dropped_rather_than_failing_the_snapshot() -> N
         assert "bbox" not in row
 
 
+def test_a_huge_integer_is_no_measurement_and_never_a_crash() -> None:
+    # A JSON integer past a float (`10**400`) parses as a Python int; float() raises
+    # OverflowError on it, which once escaped the projection and failed the tool.
+    huge = 10**400
+    row = project_audit_row(
+        media_row(
+            measured(IMAGE_FACTS),
+            state={"rect": {"x": huge, "y": 0, "width": 1, "height": 1}},
+        )
+    )
+    assert row is not None
+    assert "bbox" not in row
+    for fact in (
+        "naturalWidth",
+        "naturalHeight",
+        "renderedWidth",
+        "renderedHeight",
+        "encodedBodySize",
+        "effectiveResolution",
+    ):
+        row = project_audit_row(media_row(measured({**IMAGE_FACTS, fact: huge})))
+        assert row is not None and "media" in row, fact
+
+
+def test_a_boolean_coordinate_is_dropped() -> None:
+    row = project_audit_row(
+        media_row(
+            measured(IMAGE_FACTS),
+            state={"rect": {"x": True, "y": 0, "width": 1, "height": 1}},
+        )
+    )
+    assert row is not None
+    assert "bbox" not in row
+
+
 def test_unread_ids_are_every_media_row_with_no_readable_facts() -> None:
     unknown = {"status": "unknown", "unknown": {"code": "producer_failed"}}
     discover = {
