@@ -435,6 +435,23 @@ def test_an_out_of_range_rect_is_dropped_rather_than_failing_the_snapshot() -> N
         assert "bbox" not in row
 
 
+def test_the_origin_keeps_the_whole_i32_range() -> None:
+    # vision-core's Region origin is an i32, whose minimum is -(2**31): that value
+    # parses on the runner, so it is kept. One past either end is dropped.
+    for x, y, kept in (
+        (-(2**31), 0, True),
+        (0, -(2**31), True),
+        (2**31 - 1, 0, True),
+        (-(2**31) - 1, 0, False),
+        (0, -(2**31) - 1, False),
+        (2**31, 0, False),
+    ):
+        rect = {"x": x, "y": y, "width": 1, "height": 1}
+        row = project_audit_row(media_row(measured(IMAGE_FACTS), state={"rect": rect}))
+        assert row is not None
+        assert ("bbox" in row) is kept, (x, y)
+
+
 def test_a_huge_integer_is_no_measurement_and_never_a_crash() -> None:
     # A JSON integer past a float (`10**400`) parses as a Python int; float() raises
     # OverflowError on it, which once escaped the projection and failed the tool.

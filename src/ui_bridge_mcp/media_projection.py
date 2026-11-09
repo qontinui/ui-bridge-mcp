@@ -334,8 +334,8 @@ def _project_bbox(state: dict[str, Any]) -> dict[str, int] | None:
         return None
     bbox = {"x": round(x), "y": round(y), "w": max(0, round(w)), "h": max(0, round(h))}
     in_range = (
-        abs(bbox["x"]) < 2**31
-        and abs(bbox["y"]) < 2**31
+        -(2**31) <= bbox["x"] < 2**31
+        and -(2**31) <= bbox["y"] < 2**31
         and bbox["w"] < 2**32
         and bbox["h"] < 2**32
     )
