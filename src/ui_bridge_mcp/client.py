@@ -310,7 +310,7 @@ def extract_code(body: Any) -> str | None:
     - SDK ``APIResponse`` — top-level ``code``;
     - legacy / recovery bodies — top-level ``error_code``;
     - SDK action results (``NLActionResponse``) — top-level ``errorCode``;
-    - runner ``ApiResponse`` — ``error_detail.code``;
+    - runner ``ApiResponse`` — ``error_detail.code``, then ``refusal.code``;
     - a bare Observation envelope — ``unknown.code`` when ``status == "unknown"``;
     - an ``ApiResponse`` wrapping an envelope — ``data.unknown.code``.
 
@@ -324,6 +324,7 @@ def extract_code(body: Any) -> str | None:
         or _str_field(body, "error_code")
         or _str_field(body, "errorCode")
         or _str_field(body.get("error_detail"), "code")
+        or _str_field(body.get("refusal"), "code")
         or _envelope_unknown_code(body)
         or _envelope_unknown_code(body.get("data"))
     )
@@ -344,13 +345,76 @@ def _compact(value: Any, limit: int = FIELD_LIMIT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
 
+def render_next_action(value: Any) -> str | None:
+    """One-line rendering of a recovery value, in either runner wire shape.
+
+    Runners are deployed independently of this client, so one MCP session can
+    talk to builds on either side of the change that replaced the runner's
+    ``RecoveryHint`` with the shared refusal vocabulary's ``NextAction``
+    (qontinui-runner#3131). Both shapes are read:
+
+    - ``NextAction`` — ``{"kind": "retry_later", "target"?: str,
+      "retry_after_s"?: int}``, rendered ``retry_later target=<t>
+      retry_after_s=<n>`` with the absent parts left out;
+    - the older ``RecoveryHint`` serde spelling — a bare string
+      (``"RESNAPSHOT"``) or a one-key object (``{"RETRY_AFTER_MS": 1000}``) —
+      rendered verbatim, unmapped, so the reader sees what the runner said.
+
+    Returns ``None`` for an absent value. Any other shape is compacted as JSON
+    rather than dropped.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict) and isinstance(value.get("kind"), str):
+        parts = [value["kind"]]
+        if value.get("target") is not None:
+            parts.append(f"target={_compact(value['target'])}")
+        if value.get("retry_after_s") is not None:
+            parts.append(f"retry_after_s={_compact(value['retry_after_s'])}")
+        return _compact(" ".join(parts))
+    if isinstance(value, dict) and len(value) == 1:
+        ((name, arg),) = value.items()
+        return _compact(f"{name} {_compact(arg)}")
+    return _compact(value)
+
+
+def render_refusal(refusal: Any) -> list[str]:
+    """The lines a runner's typed ``refusal`` contributes to a failure render.
+
+    ``refusal`` is the qontinui-schemas ``Refusal``: ``{code, discriminator?,
+    next_action, glossary_terms, detail?, observed_at, source}``. Its sentence
+    is the body's own ``error`` (rendered first by the caller), so this adds
+    the machine half: the code and its discriminator, what to do next, the raw
+    detail, and the glossary terms. A body without one (every runner predating
+    qontinui-runner#3131) contributes nothing.
+    """
+    if not isinstance(refusal, dict):
+        return []
+    head = _str_field(refusal, "code") or "(no code)"
+    discriminator = _str_field(refusal, "discriminator")
+    if discriminator is not None:
+        head = f"{head} ({discriminator})"
+    lines = [f"refusal: {_compact(head)}"]
+    next_action = render_next_action(refusal.get("next_action"))
+    if next_action is not None:
+        lines.append(f"next: {next_action}")
+    if refusal.get("detail") is not None:
+        lines.append(f"refusal detail: {_compact(refusal['detail'])}")
+    terms = refusal.get("glossary_terms")
+    if isinstance(terms, list) and terms:
+        lines.append(f"glossary: {_compact(', '.join(map(str, terms)))}")
+    return lines
+
+
 def render_body_error(body: Any, raw_text: str) -> str:
     """Render a failure body for a human AND keep every recovery field.
 
     The body's ``error`` comes first, then one compact line per recovery field
-    the producer sent: runner ``hint`` / SDK+runner ``suggestions`` /
-    ``error_detail.recovery`` / ``error_detail.context``, and an Observation
-    envelope's ``unknown.detail``. A body that is not a JSON object falls back
+    the producer sent: the runner's typed ``refusal`` (``render_refusal``),
+    runner ``hint`` / SDK ``suggestions`` (no longer sent by a runner carrying
+    qontinui-runner#3131, so absent is normal) / ``error_detail.recovery`` in
+    either wire shape (``render_next_action``) / ``error_detail.context``, and
+    an Observation envelope's ``unknown.detail``. A body that is not a JSON object falls back
     to the raw response text, truncated.
     """
     if not isinstance(body, dict):
@@ -373,13 +437,15 @@ def render_body_error(body: Any, raw_text: str) -> str:
         unknown_detail = None
     lines = [head if head is not None else "(no error message in body)"]
 
+    lines.extend(render_refusal(body.get("refusal")))
     if body.get("hint") is not None:
         lines.append(f"hint: {_compact(body['hint'])}")
     suggestions = body.get("suggestions")
     if isinstance(suggestions, list) and suggestions:
         lines.append(f"suggestions: {_compact('; '.join(map(str, suggestions)))}")
-    if detail.get("recovery") is not None:
-        lines.append(f"recovery: {_compact(detail['recovery'])}")
+    recovery = render_next_action(detail.get("recovery"))
+    if recovery is not None:
+        lines.append(f"recovery: {recovery}")
     if detail.get("context") is not None:
         lines.append(f"context: {_compact(detail['context'])}")
     if unknown_detail is not None:

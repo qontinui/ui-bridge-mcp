@@ -32,6 +32,7 @@ from ui_bridge_mcp.client import (
     UIBridgeClient,
     UIBridgeResponse,
     extract_code,
+    render_body_error,
 )
 from ui_bridge_mcp.screenshot import ABSENT_FIELD, generate_visual_description
 
@@ -627,6 +628,95 @@ def test_http_422_runner_body_keeps_recovery_fields(
     assert "suggestions: Re-take a snapshot; Use btn-save" in lines
     assert "recovery: RESNAPSHOT" in lines
     assert 'context: {"element_id":"btn-sav"}' in lines
+
+
+def test_http_422_refusal_body_keeps_refusal_and_next_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-qontinui-runner#3131 envelope: a typed ``refusal``, a
+    NextAction-shaped ``recovery``, and no ``suggestions``."""
+    body = {
+        "success": False,
+        "error": "Element 'btn-sav' not found",
+        "code": "ELEMENT_NOT_FOUND",
+        "hint": {"closestMatch": "btn-save", "distance": 1},
+        "refusal": {
+            "code": "element_not_found",
+            "discriminator": "btn-sav",
+            "next_action": {"kind": "resnapshot"},
+            "glossary_terms": ["snapshot"],
+            "detail": "no element with id btn-sav in the registry",
+            "observed_at": "2026-11-22T00:00:00Z",
+            "source": "runner",
+        },
+        "error_detail": {
+            "code": "ELEMENT_NOT_FOUND",
+            "message": "Element 'btn-sav' not found",
+            "recovery": {"kind": "resnapshot"},
+            "context": {"element_id": "btn-sav"},
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json=body)
+
+    resp = _run(_mocked(monkeypatch, handler))
+    assert resp.code == "ELEMENT_NOT_FOUND"
+    assert resp.error is not None
+    lines = resp.error.splitlines()
+    assert lines[0] == "API error 422: Element 'btn-sav' not found"
+    assert "refusal: element_not_found (btn-sav)" in lines
+    assert "next: resnapshot" in lines
+    assert "refusal detail: no element with id btn-sav in the registry" in lines
+    assert "glossary: snapshot" in lines
+    assert "recovery: resnapshot" in lines
+    assert not any(line.startswith("suggestions:") for line in lines)
+    assert 'context: {"element_id":"btn-sav"}' in lines
+
+
+def test_refusal_code_is_the_code_when_no_other_field_carries_one() -> None:
+    body = {
+        "error": "x",
+        "refusal": {
+            "code": "upstream_timeout",
+            "next_action": {"kind": "retry_later", "retry_after_s": 2},
+            "glossary_terms": [],
+            "observed_at": "2026-11-22T00:00:00Z",
+            "source": "runner",
+        },
+    }
+    assert extract_code(body) == "upstream_timeout"
+    lines = render_body_error(body, "").splitlines()
+    assert lines == [
+        "x",
+        "refusal: upstream_timeout",
+        "next: retry_later retry_after_s=2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("recovery", "rendered"),
+    [
+        # Legacy RecoveryHint serde spellings, rendered verbatim.
+        ("RESNAPSHOT", "RESNAPSHOT"),
+        ({"RETRY_AFTER_MS": 1000}, "RETRY_AFTER_MS 1000"),
+        # NextAction (qontinui-runner#3131 and later).
+        ({"kind": "resnapshot"}, "resnapshot"),
+        ({"kind": "retry_later", "retry_after_s": 1}, "retry_later retry_after_s=1"),
+        (
+            {"kind": "retry_later", "target": "GET /x", "retry_after_s": 3},
+            "retry_later target=GET /x retry_after_s=3",
+        ),
+        (
+            {"kind": "set_setting", "target": "paths.plans_dir"},
+            "set_setting target=paths.plans_dir",
+        ),
+    ],
+)
+def test_recovery_renders_both_wire_shapes(recovery: Any, rendered: str) -> None:
+    body = {"error": "x", "error_detail": {"recovery": recovery}}
+    lines = render_body_error(body, "").splitlines()
+    assert lines == ["x", f"recovery: {rendered}"]
 
 
 def test_http_error_unparseable_body_is_truncated(
