@@ -931,6 +931,8 @@ class UIBridgeClient:
         fmt = sniff_image_format(data)
         try:
             with Image.open(io.BytesIO(data)) as img:
+                # Decode fully: the header alone gives a size for truncated bytes.
+                img.load()
                 width, height = img.size
         except Exception as e:  # any decode failure leaves the frame UNKNOWN
             return UIBridgeResponse(

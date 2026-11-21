@@ -463,7 +463,12 @@ def test_annotated_frame_of_unknown_format_is_an_error(
     _install(monkeypatch, runner)
     items, is_error = _call(tool, arguments)
     assert is_error
-    assert "Annotated screenshot: the frame's image format is UNKNOWN" in _text(items)
+    assert (
+        "Annotated screenshot: the frame's image format is UNKNOWN (its bytes "
+        "are not PNG, JPEG or WebP), so it is not returned as an image. Size "
+        "40x20px, runner cache key abc."
+    ) in _text(items)
+    assert "named no known format" not in _text(items)
     assert _images(items) == []
 
 
@@ -1369,3 +1374,54 @@ def test_client_requests_no_deleted_diagnose_route() -> None:
     source = inspect.getsource(client_mod)
     assert "/ui-bridge/control/diagnose-stuck" not in source
     assert "/ui-bridge/sdk/diagnose-stuck" in source
+
+
+def test_truncated_cached_capture_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cache serves a PNG whose header is whole and whose pixels are not."""
+    truncated = base64.b64decode(_png(40, 20))[:60]
+    runner = Runner(
+        {
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(
+                200, content=truncated, headers={"content-type": "image/png"}
+            ),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert "is not a decodable image" in _text(items)
+    assert "Baseline saved" not in _text(items)
+    assert server_mod.baseline_store.get_baseline("home") is None
+
+
+def test_delta_first_frame_with_no_image_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = Runner({CAPTURE: {**_frame(_NOT_AN_IMAGE), "format": "png"}})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
+    assert is_error
+    assert "format is UNKNOWN" in _text(items)
+    assert _images(items) == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [{}, {"connected": None}, {"connected": "yes"}],
+    ids=["missing", "null", "string"],
+)
+def test_diagnose_status_without_boolean_connected_is_unknown(
+    status: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = Runner({"/ui-bridge/sdk/status": status})
+    _install(monkeypatch, runner)
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert is_error
+    assert (
+        "whether an SDK app is connected is UNKNOWN (the SDK status answer "
+        "carried no boolean `connected`)"
+    ) in _text(items)
+    assert "no SDK app is connected" not in _text(items)

@@ -766,7 +766,7 @@ def _unknown_format_text(frame: dict[str, Any], what: str) -> str:
     """Why a frame of UNKNOWN format is not returned as an image."""
     return (
         f"{what}: the frame's image format is UNKNOWN (its bytes are not PNG, "
-        "JPEG or WebP, and the runner named no known format), so it is not "
+        "JPEG or WebP), so it is not "
         f"returned as an image. Size {frame.get('width', '?')}x"
         f"{frame.get('height', '?')}px, runner cache key "
         f"{frame.get('sha256') or 'unknown'}."
@@ -7560,6 +7560,18 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return frame
             screenshot_b64 = frame["base64"]
 
+            # Sniffed and fully decoded BEFORE the encoder sees it: bytes that
+            # are no image (or a truncated one) are refused with the reason,
+            # not handed to the encoder to fail on. The returned copy is
+            # bounded by its own size and labelled by its own bytes.
+            first_image, first_note = _bounded_image(
+                screenshot_b64,
+                "no comparison ran on this first frame; the delta encoder "
+                "keeps it at full resolution for the next call",
+            )
+            if first_image is None:
+                return _tool_error(f"Delta frame not used: {first_note}")
+
             delta = delta_encoder.encode_delta(screenshot_b64)
 
             if delta["is_first"]:
@@ -7567,21 +7579,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"First capture (full image): {delta['image_width']}x{delta['image_height']}px, "
                     f"{delta['total_tiles']} tiles"
                 )
-                # The encoder keeps the full frame; only the returned image is
-                # bounded, by its own size, and labelled by its own bytes.
-                first_image, first_note = _bounded_image(
-                    screenshot_b64,
-                    "no comparison ran on this first frame; the delta encoder "
-                    "keeps it at full resolution for the next call",
-                )
                 if first_note is not None:
                     summary += f"\n{first_note}"
-                first_result: list[types.TextContent | types.ImageContent] = [
-                    types.TextContent(type="text", text=summary)
-                ]
-                if first_image is not None:
-                    first_result.append(first_image)
-                return first_result
+                return [types.TextContent(type="text", text=summary), first_image]
             else:
                 ratio_pct = round(delta["change_ratio"] * 100, 1)
                 summary = (
@@ -8270,22 +8270,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             dom_mutation_threshold = arguments.get("dom_mutation_threshold", 3)
             # Auto-detect mode
             sdk_check = await ui_client.sdk_status()
-            use_sdk = (
-                sdk_check.success
-                and sdk_check.data
-                and sdk_check.data.get("connected", False)
+            connected = (
+                _as_dict(sdk_check.data).get("connected") if sdk_check.success else None
             )
-            if not use_sdk:
+            if connected is not True:
                 # The runner deleted its own-UI diagnosis route,
                 # /ui-bridge/control/diagnose-stuck (qontinui-runner
                 # ui_bridge/removed_routes.rs, VISION_STUCK); only the SDK
                 # route is served. Calling the deleted route answered 404.
-                mode = (
-                    "no SDK app is connected"
-                    if sdk_check.success
-                    else "whether an SDK app is connected is UNKNOWN "
-                    f"({sdk_check.describe_error()})"
-                )
+                if sdk_check.success and connected is False:
+                    mode = "no SDK app is connected"
+                elif sdk_check.success:
+                    mode = (
+                        "whether an SDK app is connected is UNKNOWN (the SDK "
+                        "status answer carried no boolean `connected`)"
+                    )
+                else:
+                    mode = (
+                        "whether an SDK app is connected is UNKNOWN "
+                        f"({sdk_check.describe_error()})"
+                    )
                 return _tool_error(
                     f"Diagnosis not run: {mode}, and the runner no longer "
                     "serves a stuck-screen diagnosis of its own UI (the route "
@@ -8307,10 +8311,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             suggestions = data.get("suggestions", [])
             obs_ms = data.get("observationWindowMs", 0)
             capture_source = data.get("captureSource", "unknown")
-            mode_label = "SDK app" if use_sdk else "Runner"
 
             lines = [
-                f"Stuck Screen Diagnosis ({mode_label})",
+                "Stuck Screen Diagnosis (SDK app)",
                 f"Verdict: {verdict.upper()} (confidence: {confidence:.0%})",
                 "",
                 summary,

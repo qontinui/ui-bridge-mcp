@@ -27,7 +27,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import ui_bridge_mcp.server as server_mod
 from ui_bridge_mcp.client import UIBridgeResponse
-from ui_bridge_mcp.screenshot import BaselineStore
+from ui_bridge_mcp.screenshot import BaselineStore, DeltaEncoder
 
 from .mcp_session import answering, call, install, text
 
@@ -1005,6 +1005,18 @@ FAILURE_PATHS: list[FailurePath] = [
         {},
         {"/ui-bridge/sdk/status": ok({"connected": False})},
         "Diagnosis not run: no SDK app is connected",
+    ),
+    FailurePath(
+        "sdk_screenshot_delta: Delta frame not used: {}",
+        "sdk_screenshot_delta",
+        {"target": "web"},
+        {
+            "/ui-bridge/vision/capture": ok(
+                {"base64": "aGk=", "width": 10, "height": 10, "format": "png"}
+            )
+        },
+        "Delta frame not used: The image's format is UNKNOWN",
+        setup=_fresh("delta_encoder", DeltaEncoder),
     ),
     FailurePath(
         "call_tool: Unknown tool: {}",
