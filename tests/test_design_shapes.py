@@ -502,6 +502,174 @@ def test_audit_with_an_unknown_mode_is_unknown(
     assert "(its mode 'vibes' is not one this server reads)" in text
 
 
+def test_heuristic_audit_header_names_what_the_sdk_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: _HEURISTIC_AUDIT})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert text.startswith(
+        "Heuristic design audit (no style guide; the SDK runs its built-in "
+        "heuristics: contrast, select-dark-mode, font-size, touch-target)\n"
+    )
+
+
+def test_heuristic_audit_discloses_the_tool_side_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issues = [
+        {"element": f"el-{i}", "issue": "Low contrast", "severity": "warning"}
+        for i in range(23)
+    ]
+    report = {**_HEURISTIC_AUDIT, "issues": issues, "listableResults": 23}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Issues (23 listed):" in text
+    assert "  [warning] el-19: Low contrast" in text
+    assert "el-20" not in text
+    assert "  ... and 3 more (this tool lists at most 20)" in text
+
+
+def test_heuristic_audit_truncated_without_listable_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {k: v for k, v in _HEURISTIC_AUDIT.items() if k != "listableResults"}
+    report.update(maxResults=2, resultsTruncated=True)
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert (
+        "Issues (2 listed of unknown listable; the SDK cut the list at maxResults=2):"
+    ) in text
+
+
+def _with_rows(*rows: dict[str, Any]) -> dict[str, Any]:
+    """The heuristic fixture with ``rows`` replacing the matching heuristics."""
+    names = {row["heuristic"] for row in rows}
+    kept = [
+        r for r in _HEURISTIC_AUDIT["heuristicCoverage"] if r["heuristic"] not in names
+    ]
+    return {**_HEURISTIC_AUDIT, "heuristicCoverage": [*kept, *rows]}
+
+
+def test_heuristic_coverage_row_with_no_status_is_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _with_rows({"heuristic": "font-size", "checked": 5, "notMeasured": 0})
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "  font-size: unknown (checked 5, not measured 0)" in text
+    assert "all 4 heuristics measured" not in text
+
+
+def test_heuristic_coverage_measured_row_with_unmeasured_elements_is_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``measured`` with ``notMeasured > 0`` contradicts itself: shown, not hidden."""
+    report = _with_rows(
+        {"heuristic": "contrast", "status": "measured", "checked": 5, "notMeasured": 2}
+    )
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "  contrast: measured (checked 5, not measured 2)" in text
+    assert "all 4 heuristics measured" not in text
+
+
+def test_heuristic_coverage_measured_row_without_a_count_is_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _with_rows({"heuristic": "contrast", "status": "measured", "checked": 5})
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "  contrast: measured (checked 5, not measured unknown)" in text
+
+
+@pytest.mark.parametrize("malformed", [None, {"contrast": "measured"}, "all"])
+def test_heuristic_coverage_malformed_is_unknown_not_an_old_sdk(
+    monkeypatch: pytest.MonkeyPatch, malformed: Any
+) -> None:
+    report = {**_HEURISTIC_AUDIT, "heuristicCoverage": malformed}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Heuristic coverage: UNKNOWN (heuristicCoverage was malformed: " in text
+    assert "predates" not in text
+    assert "measured" not in text.split("Heuristic coverage:")[1].split("(")[0]
+
+
+def test_style_guide_mode_missing_counts_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        k: v for k, v in _AUDIT.items() if k not in ("passedCount", "failedCount")
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert (
+        "(its mode is 'style-guide' but passedCount/failedCount are missing or not "
+        "numbers)"
+    ) in text
+    assert "is not one this server reads" not in text
+
+    report = {**_AUDIT, "passedCount": "1"}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert "missing or not numbers" in text
+
+
+def test_unknown_mode_with_counts_stays_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counts under a ``mode`` this server does not know are no style-guide verdict."""
+    report = {**_AUDIT, "mode": "lighthouse"}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert "(its mode 'lighthouse' is not one this server reads)" in text
+    assert "Passed:" not in text
+
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_review", _REVIEW_ARGS)
+    assert "Style audit: UNKNOWN" in text
+    assert "1 passed, 3 failed" not in text
+
+
+def test_audit_with_no_mode_and_counts_is_a_style_guide_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An SDK predating ``mode`` still answers with counts: read as style-guide."""
+    report = {k: v for k, v in _AUDIT.items() if k != "mode"}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Passed: 1 | Failed: 3" in text
+
+
 _REVIEW_ARGS = {"include_state_variations": False, "include_quality_evaluation": False}
 
 
