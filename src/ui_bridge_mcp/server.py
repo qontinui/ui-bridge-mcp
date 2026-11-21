@@ -707,6 +707,9 @@ def _displayable(
     from PIL import Image
 
     with Image.open(io.BytesIO(base64.b64decode(b64_png))) as img:
+        # Decode fully before trusting the header's size: truncated bytes
+        # raise here instead of being returned as an image.
+        img.load()
         width, height = img.size
         if max(width, height) <= _OVERSIZE_DISPLAY_LONG_EDGE:
             return b64_png, None
@@ -803,20 +806,17 @@ def _css_viewport(snapshot: dict[str, Any]) -> tuple[int, int] | None:
 
 
 def _frame_format(frame: dict[str, Any]) -> str | None:
-    """The frame's image format, read from its own magic bytes.
+    """The frame's image format, read from its own magic bytes ONLY.
 
-    The runner's ``format`` field is not trusted over the bytes; ``None``
-    when neither the bytes nor the field name a known format.
+    The runner's ``format`` field is never used: bytes that match no known
+    magic are UNKNOWN (``None``) whatever the field says, so non-image bytes
+    are never labelled ``image/png``.
     """
     try:
         head = base64.b64decode(str(frame.get("base64", ""))[:64])
     except ValueError:
         head = b""
-    sniffed = sniff_image_format(head)
-    if sniffed is not None:
-        return sniffed
-    fmt = frame.get("format")
-    return fmt if fmt in ("png", "jpeg", "webp") else None
+    return sniff_image_format(head)
 
 
 def _annotated_result(
@@ -4073,7 +4073,7 @@ Supports smart cropping:
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Scale factor (0.25-2.0). Default: 1.0. Above 1 it adds detail only with crop=viewport or modal: a full frame is returned bounded to a 1568px long edge.",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0. A resample after annotation; it adds no detail. Any result over 1568px long edge is downscaled back to 1568px.",
                 },
                 "format": {
                     "type": "string",
@@ -4142,7 +4142,7 @@ Supports smart cropping:
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Scale factor (0.25-2.0). Default: 1.0. Above 1 it adds detail only with crop=viewport or modal: a full frame is returned bounded to a 1568px long edge.",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0. A resample after annotation; it adds no detail. Any result over 1568px long edge is downscaled back to 1568px.",
                 },
                 "format": {
                     "type": "string",
@@ -4878,8 +4878,9 @@ Returns a verdict:
 Includes detailed evidence (what indicators were found, DOM mutation count,
 pending network requests) and suggestions for recovery.
 
-Automatically detects the connection mode: if an SDK app is connected,
-diagnoses the SDK app; otherwise diagnoses the runner's own UI.
+Diagnoses the connected SDK app (POST /ui-bridge/sdk/diagnose-stuck). The
+runner deleted its own-UI diagnosis route, so with no SDK app connected this
+returns an error naming the capture-and-diff alternative.
 
 Use this when:
 - The app seems to be taking too long to load
@@ -7567,22 +7568,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"{delta['total_tiles']} tiles"
                 )
                 # The encoder keeps the full frame; only the returned image is
-                # bounded, by its own size.
-                first_b64, first_note = _displayable(
+                # bounded, by its own size, and labelled by its own bytes.
+                first_image, first_note = _bounded_image(
                     screenshot_b64,
                     "no comparison ran on this first frame; the delta encoder "
                     "keeps it at full resolution for the next call",
                 )
                 if first_note is not None:
                     summary += f"\n{first_note}"
-                return [
-                    types.TextContent(type="text", text=summary),
-                    types.ImageContent(
-                        type="image",
-                        data=first_b64,
-                        mimeType="image/png",
-                    ),
+                first_result: list[types.TextContent | types.ImageContent] = [
+                    types.TextContent(type="text", text=summary)
                 ]
+                if first_image is not None:
+                    first_result.append(first_image)
+                return first_result
             else:
                 ratio_pct = round(delta["change_ratio"] * 100, 1)
                 summary = (
@@ -8276,15 +8275,28 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 and sdk_check.data
                 and sdk_check.data.get("connected", False)
             )
-            if use_sdk:
-                response = await ui_client.sdk_diagnose_stuck(
-                    observation_window_ms=observation_window_ms,
-                    dom_mutation_threshold=dom_mutation_threshold,
+            if not use_sdk:
+                # The runner deleted its own-UI diagnosis route,
+                # /ui-bridge/control/diagnose-stuck (qontinui-runner
+                # ui_bridge/removed_routes.rs, VISION_STUCK); only the SDK
+                # route is served. Calling the deleted route answered 404.
+                mode = (
+                    "no SDK app is connected"
+                    if sdk_check.success
+                    else "whether an SDK app is connected is UNKNOWN "
+                    f"({sdk_check.describe_error()})"
                 )
-            else:
-                response = await ui_client.control_diagnose_stuck(
-                    observation_window_ms=observation_window_ms,
+                return _tool_error(
+                    f"Diagnosis not run: {mode}, and the runner no longer "
+                    "serves a stuck-screen diagnosis of its own UI (the route "
+                    "was deleted). Connect the SDK app, or capture twice with "
+                    "POST /ui-bridge/vision/capture and compare the two with "
+                    "POST /ui-bridge/vision/diff."
                 )
+            response = await ui_client.sdk_diagnose_stuck(
+                observation_window_ms=observation_window_ms,
+                dom_mutation_threshold=dom_mutation_threshold,
+            )
             if not response.success:
                 return _tool_error(f"Diagnosis failed: {response.describe_error()}")
             data = response.data or {}
@@ -8354,7 +8366,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             screenshot_b64 = data.get("screenshot", "")
             if isinstance(screenshot_b64, str) and screenshot_b64:
                 evidence_image, evidence_note = _bounded_image(
-                    screenshot_b64, "the diagnosis ran on the full-resolution capture"
+                    screenshot_b64,
+                    "only the copy returned here was downscaled, by the MCP",
                 )
                 if evidence_note is not None:
                     diagnosis_result.append(

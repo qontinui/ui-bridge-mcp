@@ -32,6 +32,21 @@ from ui_bridge_mcp.screenshot import BaselineStore
 from .mcp_session import answering, call, install, text
 
 
+def _real_png_b64() -> str:
+    """Real PNG bytes: an image the tools sniff and decode, not a stand-in."""
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (10, 10), "white").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+_REAL_PNG = _real_png_b64()
+
+
 def _closed_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -824,7 +839,7 @@ FAILURE_PATHS: list[FailurePath] = [
                     }
                 ),
                 "/ui-bridge/vision/capture": ok(
-                    {"base64": "aGk=", "width": 10, "height": 10, "format": "png"}
+                    {"base64": _REAL_PNG, "width": 10, "height": 10, "format": "png"}
                 ),
             },
             "Element 'box' has no bounding rect.",
@@ -980,6 +995,16 @@ FAILURE_PATHS: list[FailurePath] = [
         {"app_id": "web", "from": "a#x", "to": ""},
         {},
         "journey_steps_to: `to` required",
+    ),
+    FailurePath(
+        "diagnose_stuck_screen: Diagnosis not run: {}, and the runner no longer "
+        "serves a stuck-screen diagnosis of its own UI (the route was deleted). "
+        "Connect the SDK app, or capture twice with POST /ui-bridge/vision/capture "
+        "and compare the two with POST /ui-bridge/vision/diff.",
+        "diagnose_stuck_screen",
+        {},
+        {"/ui-bridge/sdk/status": ok({"connected": False})},
+        "Diagnosis not run: no SDK app is connected",
     ),
     FailurePath(
         "call_tool: Unknown tool: {}",

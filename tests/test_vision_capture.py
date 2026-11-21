@@ -1240,8 +1240,9 @@ def test_native_capture_fallback_is_bounded(monkeypatch: pytest.MonkeyPatch) -> 
 def _stuck_runner(screenshot: str) -> Runner:
     return Runner(
         {
-            "/ui-bridge/sdk/status": {"connected": False},
-            "/ui-bridge/control/diagnose-stuck": {
+            "/ui-bridge/sdk/status": {"connected": True},
+            # The only stuck-screen route the runner serves.
+            "/ui-bridge/sdk/diagnose-stuck": {
                 "verdict": "frozen",
                 "confidence": 0.9,
                 "summary": "No change",
@@ -1282,3 +1283,89 @@ def test_diagnose_stuck_screen_unknown_format_is_text_only(
     assert not is_error, _text(items)
     assert "Screenshot: The image's format is UNKNOWN" in _text(items)
     assert _images(items) == []
+
+
+@pytest.mark.parametrize(
+    "tool,routes,arguments",
+    [
+        ("sdk_screenshot", {}, {"target": "web"}),
+        (
+            "ui_annotated_screenshot",
+            {"/ui-bridge/control/snapshot": {"elements": _SNAPSHOT["elements"]}},
+            {},
+        ),
+    ],
+)
+def test_non_image_bytes_labelled_png_are_unknown(
+    tool: str,
+    routes: dict[str, Any],
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner's `format: png` field never labels bytes that are no image."""
+    frame = {**_frame(_NOT_AN_IMAGE), "format": "png"}
+    runner = Runner({**routes, CAPTURE: frame})
+    _install(monkeypatch, runner)
+    items, is_error = _call(tool, arguments)
+    assert is_error
+    assert "image format is UNKNOWN" in _text(items)
+    assert _images(items) == []
+
+
+def test_truncated_png_is_refused_not_returned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 60-byte truncated PNG: its header says a size, its pixels are absent."""
+    truncated = base64.b64decode(_png(40, 20))[:60]
+    assert len(truncated) == 60 and truncated.startswith(b"\x89PNG")
+    runner = _stuck_runner(base64.b64encode(truncated).decode())
+    _install(monkeypatch, runner)
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert not is_error, _text(items)
+    assert "Screenshot: The png image could not be decoded" in _text(items)
+    assert _images(items) == []
+
+
+def test_delta_first_frame_mime_is_sniffed(monkeypatch: pytest.MonkeyPatch) -> None:
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 20), "white").save(buf, format="JPEG")
+    runner = Runner({CAPTURE: _frame(base64.b64encode(buf.getvalue()).decode())})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
+    assert not is_error, _text(items)
+    assert _images(items)[0].mimeType == "image/jpeg"
+
+
+def test_diagnose_without_sdk_does_not_call_the_deleted_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner deleted /ui-bridge/control/diagnose-stuck; only the SDK
+    route /ui-bridge/sdk/diagnose-stuck is served (removed_routes.rs)."""
+    runner = Runner({"/ui-bridge/sdk/status": {"connected": False}})
+    _install(monkeypatch, runner)
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert is_error
+    assert "Diagnosis not run: no SDK app is connected" in _text(items)
+    assert "POST /ui-bridge/vision/capture" in _text(items)
+    assert [p for p, _ in runner.requests] == ["/ui-bridge/sdk/status"]
+
+
+def test_diagnose_requests_the_served_sdk_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _stuck_runner(_png())
+    _install(monkeypatch, runner)
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert not is_error, _text(items)
+    assert [p for p, _ in runner.requests] == [
+        "/ui-bridge/sdk/status",
+        "/ui-bridge/sdk/diagnose-stuck",
+    ]
+
+
+def test_client_requests_no_deleted_diagnose_route() -> None:
+    import ui_bridge_mcp.client as client_mod
+
+    source = inspect.getsource(client_mod)
+    assert "/ui-bridge/control/diagnose-stuck" not in source
+    assert "/ui-bridge/sdk/diagnose-stuck" in source

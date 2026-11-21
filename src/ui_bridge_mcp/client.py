@@ -1474,29 +1474,6 @@ class UIBridgeClient:
             "POST", "/ui-bridge/control/wait-for-idle", body, timeout=http_timeout
         )
 
-    async def control_diagnose_stuck(
-        self,
-        observation_window_ms: int = 3000,
-    ) -> UIBridgeResponse:
-        """Diagnose whether the runner is stuck on a loading screen.
-
-        Uses native screenshot capture — works even if React hasn't mounted.
-
-        Args:
-            observation_window_ms: How long to observe in ms. Defaults to 3000.
-        """
-        body: dict[str, Any] = {
-            "observationWindowMs": observation_window_ms,
-        }
-        # HTTP timeout must exceed the observation window + screenshot capture + DOM probes
-        http_timeout = (observation_window_ms / 1000) + 15.0
-        return await self._request(
-            "POST",
-            "/ui-bridge/control/diagnose-stuck",
-            body,
-            timeout=http_timeout,
-        )
-
     async def control_wait_for_signal(
         self,
         signal: str,
