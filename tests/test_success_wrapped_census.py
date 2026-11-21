@@ -725,8 +725,7 @@ def test_relay_style_audit_is_unknown_not_clean(
     assert text(result).startswith("Style audit UNKNOWN")
     # Flagged, and the relay's own findings are not dropped.
     assert text(result).endswith(
-        "The relay's own contrast and size scan reported 2 issue(s) over 3 "
-        "elements:\n"
+        "The response listed 2 issue(s) over 3 elements:\n"
         "  [warning] save-btn: Low contrast: 2.10:1 (#999 on #fff) (fix: Increase "
         "contrast to at least 4.5:1)\n"
         "  [error] title: Text nearly invisible"

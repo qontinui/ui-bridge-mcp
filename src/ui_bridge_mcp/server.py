@@ -385,50 +385,149 @@ def _state_style_entries(data: Any) -> list[dict[str, Any]] | None:
 
 
 def _is_style_audit(data: Any) -> bool:
-    """``data`` is a ``StyleAuditReport``: it carries both counts.
+    """``data`` is a style-guide audit: it carries both counts.
 
-    The browser relay audits with its own contrast/size scan, never reads the
-    loaded guide, and answers ``{issues, checkedElements}`` (``react/
-    commandHandlers.ts`` runDesignAudit; coord finding c577a740). Read with
-    defaults, that rendered as a clean "Passed: 0 | Failed: 0" audit.
+    A ``mode: 'style-guide'`` report always does; an answer without them (a
+    heuristic report, or an unrecognised shape) read with defaults rendered as
+    a clean "Passed: 0 | Failed: 0" audit (coord finding c577a740).
     """
     report = _as_dict(data)
     return _number(report.get("passedCount")) and _number(report.get("failedCount"))
 
 
-def _style_audit_unknown(report: dict[str, Any]) -> str:
-    """Why an audit is UNKNOWN, with the relay's own findings, which are not lost.
+def _audit_issue_lines(issues: list[Any], limit: int) -> list[str]:
+    """``HeuristicDesignAuditIssue`` rows, ``[severity] element: issue (fix)``.
 
-    The relay's scan answers ``{issues: [{element, issue, severity, fix?}],
-    checkedElements}`` (``react/commandHandlers.ts`` runDesignAudit): contrast
-    and size checks, not the loaded guide's rules, so they say nothing about
-    passing the guide. They are still findings about the page.
+    At most ``limit`` rows, then a count of the rest this tool did not list.
     """
+    lines = []
+    for raw in issues[:limit]:
+        issue = _as_dict(raw)
+        line = (
+            f"  [{issue.get('severity', '?')}] {issue.get('element', '?')}: "
+            f"{issue.get('issue', '?')}"
+        )
+        if issue.get("fix"):
+            line += f" (fix: {issue['fix']})"
+        lines.append(line)
+    if len(issues) > limit:
+        lines.append(f"  ... and {len(issues) - limit} more")
+    return lines
+
+
+def _style_audit_unknown(report: dict[str, Any]) -> str:
+    """Why an audit answer is UNKNOWN, keeping any findings it carried.
+
+    Every SDK ``/design/audit`` answer is self-describing by ``mode``
+    (``specs/design-request.ts`` ``DesignAuditResponse``): ``style-guide``
+    carries ``passedCount``/``failedCount``, ``heuristic`` carries ``issues``.
+    This is the rest: no ``mode`` and no counts (an SDK or transport predating
+    the self-describing answer), or a ``mode`` this server does not know. Read
+    with defaults it would render as a clean "Passed: 0 | Failed: 0" audit
+    (coord finding c577a740), so it is reported as UNKNOWN instead. An
+    ``issues`` list it carries is still listed: those are findings about the
+    page, just not a verdict against the loaded guide.
+    """
+    mode = report.get("mode")
+    shape = (
+        f"its mode {mode!r} is not one this server reads"
+        if mode is not None
+        else "it carries no mode and no passedCount/failedCount"
+    )
     lines = [
-        "Style audit UNKNOWN: the response is not an audit against the style "
-        "guide (no passedCount/failedCount); this transport does not audit "
-        "against the loaded guide."
+        "Style audit UNKNOWN: the response is neither a style-guide audit nor a "
+        f"heuristic audit ({shape}); it says nothing about passing the loaded "
+        "guide."
     ]
     issues = report.get("issues")
     if isinstance(issues, list) and issues:
         checked = report.get("checkedElements")
         over = f" over {checked} elements" if _number(checked) else ""
-        lines.append(
-            f"The relay's own contrast and size scan reported {len(issues)} "
-            f"issue(s){over}:"
-        )
-        for raw in issues[:20]:
-            issue = _as_dict(raw)
-            line = (
-                f"  [{issue.get('severity', '?')}] {issue.get('element', '?')}: "
-                f"{issue.get('issue', '?')}"
-            )
-            if issue.get("fix"):
-                line += f" (fix: {issue['fix']})"
-            lines.append(line)
-        if len(issues) > 20:
-            lines.append(f"  ... and {len(issues) - 20} more")
+        lines.append(f"The response listed {len(issues)} issue(s){over}:")
+        lines.extend(_audit_issue_lines(issues, limit=20))
     return "\n".join(lines)
+
+
+# The heuristics a ``mode: 'heuristic'`` audit runs (SDK ``specs/design-
+# request.ts`` ``HeuristicDesignAuditReport.heuristicCoverage``).
+_AUDIT_HEURISTICS = ("contrast", "select-dark-mode", "font-size", "touch-target")
+
+
+def _heuristic_coverage_lines(report: dict[str, Any]) -> list[str]:
+    """Which heuristics were NOT fully measured, so an empty issue list is read right.
+
+    ``heuristicCoverage`` rows are ``{heuristic, status: 'measured' | 'partial'
+    | 'not-applicable', checked, notMeasured, note?}``. Only the rows whose
+    status is not ``measured`` are listed. A report without the field (an SDK
+    predating it) or without a row for a heuristic says nothing about that
+    heuristic: it is reported as not reported, never as measured.
+    """
+    coverage = report.get("heuristicCoverage")
+    if not isinstance(coverage, list):
+        return [
+            "Heuristic coverage: NOT REPORTED (this SDK predates heuristicCoverage); "
+            "whether every heuristic was measured is unknown, so an empty issue "
+            "list does not show a clean page."
+        ]
+    rows = [row for row in coverage if isinstance(row, dict)]
+    lines = []
+    for row in rows:
+        status = row.get("status")
+        if status == "measured":
+            continue
+        line = (
+            f"  {row.get('heuristic', '?')}: {status if status is not None else 'unknown'} "
+            f"(checked {_count_or_unknown(row.get('checked'))}, not measured "
+            f"{_count_or_unknown(row.get('notMeasured'))})"
+        )
+        if row.get("note"):
+            line += f" - {row['note']}"
+        lines.append(line)
+    reported = {row.get("heuristic") for row in rows}
+    absent = [name for name in _AUDIT_HEURISTICS if name not in reported]
+    if absent:
+        lines.append(f"  no coverage row for: {', '.join(absent)} (coverage unknown)")
+    if not lines:
+        return [f"Heuristic coverage: all {len(rows)} heuristics measured"]
+    return ["Heuristic coverage (heuristics not fully measured):", *lines]
+
+
+def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
+    """A ``mode: 'heuristic'`` ``/design/audit`` answer: no style guide was used.
+
+    ``reason`` says why the heuristics ran; ``issues`` is bounded by the SDK's
+    ``maxResults`` (``resultsTruncated``, ``listableResults``) and then by
+    ``limit`` here; ``heuristicCoverage`` says which heuristics could not be
+    fully measured (SDK ``specs/design-request.ts``
+    ``HeuristicDesignAuditReport``). A missing ``issues`` list is UNKNOWN, not
+    a clean page.
+    """
+    reason = report.get("reason")
+    lines = [
+        "Heuristic design audit (no style guide; built-in contrast, dark-mode "
+        "select, font-size and touch-target checks)",
+        f"Reason: {reason if isinstance(reason, str) and reason else 'not reported'}",
+        _audit_selection(report),
+    ]
+    issues = report.get("issues")
+    if not isinstance(issues, list):
+        lines.append("Issues: UNKNOWN (the report carried no issues list)")
+    else:
+        truncated = report.get("resultsTruncated")
+        header = f"Issues ({len(issues)} listed"
+        if truncated is True:
+            header += (
+                f" of {_count_or_unknown(report.get('listableResults'))} listable; "
+                "the SDK cut the list at "
+                f"maxResults={_count_or_unknown(report.get('maxResults'))}"
+            )
+        elif truncated is not False:
+            header += "; whether the SDK truncated the list is unknown"
+        header += "):" if issues else ")"
+        lines.append(header)
+        lines.extend(_audit_issue_lines(issues, limit=limit))
+    lines.extend(_heuristic_coverage_lines(report))
+    return lines
 
 
 def _count_or_unknown(value: Any) -> str:
@@ -7943,7 +8042,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_design_audit(guide, element_ids)
             if not response.success:
                 return _error_result(response)
-            report = response.data or {}
+            report = _as_dict(response.data)
+            if report.get("mode") == "heuristic":
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="\n".join(_heuristic_audit_lines(report, limit=20)),
+                    )
+                ]
             if not _is_style_audit(report):
                 return _tool_error(_style_audit_unknown(report))
             result_lines = [

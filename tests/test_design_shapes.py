@@ -268,6 +268,240 @@ def test_design_review_audit_block_reads_summary_counts(
     assert "[nav-link] link-size (warning): font too small" in text
 
 
+_HEURISTIC_AUDIT: dict[str, Any] = {
+    "mode": "heuristic",
+    "reason": "No style guide was provided or loaded; ran the built-in heuristics.",
+    "totalElements": 5,
+    "checkedElements": 5,
+    "limit": 200,
+    "truncated": False,
+    "missingElementIds": [],
+    "missingElementCount": 0,
+    "unreadableElementIds": [],
+    "unreadableElementCount": 0,
+    "maxResults": 50,
+    "listableResults": 2,
+    "resultsTruncated": False,
+    "issues": [
+        {
+            "element": "save-btn",
+            "issue": "Low contrast: 2.10:1",
+            "severity": "warning",
+            "fix": "Increase contrast to at least 4.5:1",
+        },
+        {"element": "close-btn", "issue": "Touch target 30x30", "severity": "error"},
+    ],
+    "heuristicCoverage": [
+        {"heuristic": "contrast", "status": "measured", "checked": 5, "notMeasured": 0},
+        {
+            "heuristic": "select-dark-mode",
+            "status": "measured",
+            "checked": 0,
+            "notMeasured": 0,
+        },
+        {
+            "heuristic": "font-size",
+            "status": "measured",
+            "checked": 5,
+            "notMeasured": 0,
+        },
+        {
+            "heuristic": "touch-target",
+            "status": "measured",
+            "checked": 2,
+            "notMeasured": 0,
+        },
+    ],
+    "timestamp": 1,
+}
+
+
+def test_heuristic_audit_with_issues_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: every heuristic answer rendered as ``Style audit UNKNOWN``."""
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: _HEURISTIC_AUDIT})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "UNKNOWN" not in text
+    assert text.startswith("Heuristic design audit (no style guide")
+    assert (
+        "Reason: No style guide was provided or loaded; ran the built-in heuristics."
+    ) in text
+    assert "Elements: checked 5 of 5 selected\n" in text
+    assert "Issues (2 listed):" in text
+    assert (
+        "  [warning] save-btn: Low contrast: 2.10:1 (fix: Increase contrast to at "
+        "least 4.5:1)"
+    ) in text
+    assert "  [error] close-btn: Touch target 30x30" in text
+    assert text.endswith("Heuristic coverage: all 4 heuristics measured")
+    # Never a style-guide verdict.
+    assert "Passed:" not in text
+
+
+def test_heuristic_audit_clean_lists_coverage_not_measured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty issue list on a partly measured page says what was not measured."""
+    report = {
+        **_HEURISTIC_AUDIT,
+        "issues": [],
+        "listableResults": 0,
+        "heuristicCoverage": [
+            {
+                "heuristic": "contrast",
+                "status": "partial",
+                "checked": 3,
+                "notMeasured": 2,
+                "note": "2 Text elements carried no resolvable background",
+            },
+            {
+                "heuristic": "select-dark-mode",
+                "status": "not-applicable",
+                "checked": 0,
+                "notMeasured": 0,
+                "note": "React Native has no <select>",
+            },
+            {
+                "heuristic": "font-size",
+                "status": "measured",
+                "checked": 5,
+                "notMeasured": 0,
+            },
+            {
+                "heuristic": "touch-target",
+                "status": "measured",
+                "checked": 2,
+                "notMeasured": 0,
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Issues (0 listed)\n" in text
+    assert text.endswith(
+        "Heuristic coverage (heuristics not fully measured):\n"
+        "  contrast: partial (checked 3, not measured 2) - 2 Text elements carried "
+        "no resolvable background\n"
+        "  select-dark-mode: not-applicable (checked 0, not measured 0) - React "
+        "Native has no <select>"
+    )
+    # Measured rows are not listed.
+    assert "font-size:" not in text
+    assert "touch-target:" not in text
+
+
+def test_heuristic_audit_discloses_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        **_HEURISTIC_AUDIT,
+        "maxResults": 2,
+        "listableResults": 7,
+        "resultsTruncated": True,
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert (
+        "Issues (2 listed of 7 listable; the SDK cut the list at maxResults=2):"
+    ) in text
+
+
+def test_heuristic_audit_without_coverage_says_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older SDK sends no ``heuristicCoverage``: never read as all measured."""
+    report = {
+        k: v
+        for k, v in _HEURISTIC_AUDIT.items()
+        if k not in ("heuristicCoverage", "resultsTruncated")
+    }
+    report["issues"] = []
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Issues (0 listed; whether the SDK truncated the list is unknown)" in text
+    assert "Heuristic coverage: NOT REPORTED" in text
+    assert "all 4 heuristics measured" not in text
+
+
+def test_heuristic_audit_names_heuristics_with_no_coverage_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        **_HEURISTIC_AUDIT,
+        "heuristicCoverage": _HEURISTIC_AUDIT["heuristicCoverage"][:2],
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert ("  no coverage row for: font-size, touch-target (coverage unknown)") in text
+
+
+def test_heuristic_audit_missing_issues_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {k: v for k, v in _HEURISTIC_AUDIT.items() if k != "issues"}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "Issues: UNKNOWN (the report carried no issues list)" in text
+
+
+def test_style_guide_audit_still_renders_as_style_guide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mode branch leaves the style-guide renderer as it was."""
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: _AUDIT})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert text.startswith("Style Audit: brand\n")
+    assert "Passed: 1 | Failed: 3" in text
+    assert "Heuristic" not in text
+
+
+def test_audit_with_no_mode_and_no_counts_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {"issues": [{"element": "a", "issue": "b", "severity": "info"}]}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert text.startswith(
+        "Style audit UNKNOWN: the response is neither a style-guide audit nor a "
+        "heuristic audit (it carries no mode and no passedCount/failedCount)"
+    )
+    assert "The response listed 1 issue(s):\n  [info] a: b" in text
+
+
+def test_audit_with_an_unknown_mode_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: {"mode": "vibes"}})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert "(its mode 'vibes' is not one this server reads)" in text
+
+
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {RESPONSIVE_ROUTE: _RESPONSIVE})
