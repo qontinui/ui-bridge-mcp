@@ -247,6 +247,29 @@ class UIBridgeResponse:
         return f"[{' '.join(tags)}] {message}"
 
 
+@dataclass(frozen=True)
+class Unknown:
+    """A read whose answer is UNKNOWN: it failed, or was not interpretable.
+
+    Distinct from ``None``, which a reader returns for a field or row that was
+    read and is absent. ``reason`` names what failed.
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class RunnerFrameSources:
+    """The runner's ``/health`` frame-source advertisement, as read.
+
+    ``sources`` is ``None`` when ``visionFrameSources`` is absent (a runner
+    build that predates it); ``build_id`` is ``None`` when ``buildId`` is.
+    """
+
+    sources: list[str] | None
+    build_id: str | None
+
+
 def _str_field(obj: Any, key: str) -> str | None:
     """Return ``obj[key]`` when ``obj`` is a dict and the value is a non-empty str."""
     if isinstance(obj, dict):
@@ -626,6 +649,69 @@ class UIBridgeClient:
     async def health(self) -> UIBridgeResponse:
         """Check runner health."""
         return await self._request("GET", "/health")
+
+    async def vision_frame_sources(self) -> RunnerFrameSources | Unknown:
+        """The runner's ``/health`` ``visionFrameSources``, and its ``buildId``.
+
+        Read from ``data`` first, then the top-level mirror the runner serves
+        beside it (as it does for ``buildId``). ``sources`` is ``None`` when the
+        field is absent: a runner build that predates the frame-source
+        advertisement. A read that failed, or a field that is present but not
+        a list of strings, is :class:`Unknown`, never ``None``.
+        """
+        resp = await self._request("GET", "/health", unwrapped=True)
+        if not resp.success or not isinstance(resp.data, dict):
+            return Unknown(f"GET /health failed: {resp.describe_error()}")
+        body = resp.data
+        inner = body.get("data")
+        layers = [inner, body] if isinstance(inner, dict) else [body]
+        sources: list[str] | None = None
+        for layer in layers:
+            if "visionFrameSources" not in layer:
+                continue
+            value = layer["visionFrameSources"]
+            if not isinstance(value, list) or not all(
+                isinstance(v, str) for v in value
+            ):
+                return Unknown(
+                    "GET /health visionFrameSources is not a list of strings "
+                    f"(got {_compact(value)})"
+                )
+            sources = value
+            break
+        build_id = next(
+            (
+                layer["buildId"]
+                for layer in layers
+                if isinstance(layer.get("buildId"), str) and layer["buildId"]
+            ),
+            None,
+        )
+        return RunnerFrameSources(sources=sources, build_id=build_id)
+
+    async def registered_app(self, target: str) -> dict[str, Any] | None | Unknown:
+        """``target``'s row in ``GET /ui-bridge/apps/registered``.
+
+        ``None`` means the registry was read and holds no live row whose
+        ``appId`` is ``target`` (a paired device or an adb serial, say). A read
+        that failed, or an answer that is not a list, is :class:`Unknown`.
+        """
+        route = "/ui-bridge/apps/registered"
+        resp = await self._request("GET", route, unwrapped=True)
+        if not resp.success or not isinstance(resp.data, dict):
+            return Unknown(f"GET {route} failed: {resp.describe_error()}")
+        body = resp.data
+        rows = body.get("data")
+        if body.get("success") is not True or not isinstance(rows, list):
+            return Unknown(
+                f"GET {route} answered no app list "
+                f"(success={_compact(body.get('success'))}, "
+                f"data={_compact(rows)})"
+            )
+        for row in rows:
+            if isinstance(row, dict) and row.get("appId") == target:
+                return row
+        return None
 
     # -------------------------------------------------------------------------
     # Journey queries (runner ``journey/routes.rs``)

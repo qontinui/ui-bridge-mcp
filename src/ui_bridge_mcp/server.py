@@ -23,8 +23,10 @@ from mcp.server.stdio import stdio_server
 
 from .client import (
     AI_ASSERT_STATES,
+    CODE_INLINE_TOO_LARGE,
     UIBridgeClient,
     UIBridgeResponse,
+    Unknown,
     sniff_image_format,
 )
 from .elements import (
@@ -678,8 +680,54 @@ async def _capture_frame(
         follow_oversize=contract == _LOSSLESS_CONTRACT,
     )
     if not resp.success:
-        return _tool_error(f"Error getting screenshot: {resp.describe_error()}")
+        # Diagnosed only for a target, and only when the frame was not taken:
+        # an INLINE_TOO_LARGE capture succeeded and is merely oversize.
+        if target is None or resp.code == CODE_INLINE_TOO_LARGE:
+            cause = resp.describe_error()
+        else:
+            cause = await _diagnose_capture_failure(ui_client, target, resp)
+        return _tool_error(f"Error getting screenshot: {cause}")
     return _as_dict(resp.data)
+
+
+# The frame source a runner advertises in ``/health`` ``visionFrameSources``
+# once it can capture a WebSocket-transport app over the app's own socket.
+_WEBSOCKET_FRAME_SOURCE = "websocket_relay"
+
+
+async def _diagnose_capture_failure(
+    ui_client: UIBridgeClient, target: str, resp: UIBridgeResponse
+) -> str:
+    """Why a capture of ``target`` failed, read only AFTER it failed.
+
+    Plan 2026-11-21-vision-capture-cannot-frame-a-websocket-transport-app, D5:
+    the capture is never pre-checked, so a successful one costs no extra read.
+    A runner build without the ``websocket_relay`` frame source HTTP-GETs a
+    WebSocket app's page origin and reports the resulting 404, which names the
+    wrong cause; that case is rewritten into a sentence naming the build. A
+    build that has the source keeps its own ``code`` and message. A read that
+    fails leaves the capability UNKNOWN, and the error says so.
+    """
+    original = resp.describe_error()
+    row = await ui_client.registered_app(target)
+    if isinstance(row, Unknown):
+        return f"runner capability UNKNOWN ({row.reason}): {original}"
+    if row is None or row.get("transport") != "websocket":
+        return original
+    health = await ui_client.vision_frame_sources()
+    if isinstance(health, Unknown):
+        return f"runner capability UNKNOWN ({health.reason}): {original}"
+    if health.sources is not None and _WEBSOCKET_FRAME_SOURCE in health.sources:
+        return original
+    build = f" (build {health.build_id})" if health.build_id else ""
+    return (
+        f"the runner{build} cannot capture WebSocket-transport app '{target}': "
+        "its capture route HTTP-GETs the app's page origin, which answers 404. "
+        "A runner built from qontinui-runner origin/main at or after this plan's "
+        "Phase 1 captures it over the app's socket. "
+        f"(plan 2026-11-21-vision-capture-cannot-frame-a-websocket-transport-app; "
+        f"runner said: {original})"
+    )
 
 
 # The longest edge a full-frame-sized image (a frame, a side-by-side
