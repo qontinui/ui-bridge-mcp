@@ -24,6 +24,7 @@ from mcp.server.stdio import stdio_server
 from .client import (
     AI_ASSERT_STATES,
     CODE_APP_UNREACHABLE,
+    CODE_FRAME_SOURCE_MISSING,
     UIBridgeClient,
     UIBridgeResponse,
     Unknown,
@@ -700,9 +701,10 @@ async def _capture_frame(
 # The frame source a runner advertises in ``/health`` ``visionFrameSources``
 # once it can capture a WebSocket-transport app over the app's own socket.
 _WEBSOCKET_FRAME_SOURCE = "websocket_relay"
-# The code this server mints when a runner build has no WebSocket frame
-# source and the target is a WebSocket-transport app.
-CODE_FRAME_SOURCE_MISSING = "FRAME_SOURCE_MISSING"
+# The two diagnosis reads are advisory: they only explain a failure already in
+# hand, so they get a short bound rather than the client's 30 s default. A read
+# that times out leaves the capability UNKNOWN and the original error stands.
+_DIAGNOSIS_READ_TIMEOUT = 5.0
 
 
 async def _diagnose_capture_failure(
@@ -721,12 +723,14 @@ async def _diagnose_capture_failure(
     first) says so after its own words.
     """
     original = resp.describe_error()
-    row = await ui_client.registered_app(target)
+    row = await ui_client.registered_app(target, timeout=_DIAGNOSIS_READ_TIMEOUT)
     if isinstance(row, Unknown):
         return f"{original} (runner capability UNKNOWN ({row.reason}))"
+    # An absent ``transport`` is read as HTTP on purpose: the runner's
+    # ``AppTransport`` defaults to ``Http`` (``app_registry.rs``).
     if row is None or row.get("transport") != "websocket":
         return original
-    health = await ui_client.vision_frame_sources()
+    health = await ui_client.vision_frame_sources(timeout=_DIAGNOSIS_READ_TIMEOUT)
     if isinstance(health, Unknown):
         return f"{original} (runner capability UNKNOWN ({health.reason}))"
     if health.sources is not None and _WEBSOCKET_FRAME_SOURCE in health.sources:

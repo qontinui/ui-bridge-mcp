@@ -129,10 +129,13 @@ class Runner:
     ) -> None:
         self.routes = routes
         self.paths: list[str] = []
+        # The read timeout each request was sent with, by path.
+        self.read_timeouts: dict[str, Any] = {}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.paths.append(path)
+        self.read_timeouts[path] = request.extensions.get("timeout", {}).get("read")
         answer = self.routes.get(path)
         if isinstance(answer, Exception):
             raise answer
@@ -379,6 +382,66 @@ def test_unregistered_target_error_is_unchanged(
         "Error getting screenshot: [code=producer_failed status=500]"
     )
     assert "UNKNOWN" not in text and "cannot capture" not in text
+
+
+def test_unreadable_inline_frame_is_not_diagnosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 capture whose frame lacks base64/width/height was still TAKEN."""
+    runner = Runner(
+        {CAPTURE: {"format": "png"}, REGISTERED: _REGISTRY, HEALTH: _health(None)}
+    )
+    text, is_error = _call(monkeypatch, runner, WS_APP)
+    assert is_error
+    assert runner.paths == [CAPTURE]
+    assert "cannot capture" not in text and "UNKNOWN (" not in text
+
+
+def test_read_timeout_with_no_status_is_not_diagnosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """producer_failed with no HTTP status: pinned by the ``status is None`` guard."""
+    runner = Runner(
+        {
+            CAPTURE: httpx.ReadTimeout("read timed out"),
+            REGISTERED: _REGISTRY,
+            HEALTH: _health(None),
+        }
+    )
+    text, is_error = _call(monkeypatch, runner, WS_APP)
+    assert is_error
+    assert runner.paths == [CAPTURE]
+    assert text.startswith("Error getting screenshot: [code=producer_failed]")
+
+
+def test_runner_window_capture_failure_makes_no_extra_read() -> None:
+    """``target`` None captures the runner's own window: nothing to diagnose."""
+    runner = Runner(
+        {CAPTURE: OLD_BUILD_404, REGISTERED: _REGISTRY, HEALTH: _health(None)}
+    )
+    c = _client(runner)
+
+    async def go() -> Any:
+        try:
+            return await server_mod._capture_frame(c, None)
+        finally:
+            await c.close()
+
+    result = asyncio.run(go())
+    assert isinstance(result, types.CallToolResult) and result.isError
+    assert runner.paths == [CAPTURE]
+
+
+def test_diagnosis_reads_use_the_short_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = Runner(
+        {CAPTURE: OLD_BUILD_404, REGISTERED: _REGISTRY, HEALTH: _health(None)}
+    )
+    _call(monkeypatch, runner, WS_APP)
+    assert runner.read_timeouts[REGISTERED] == server_mod._DIAGNOSIS_READ_TIMEOUT
+    assert runner.read_timeouts[HEALTH] == server_mod._DIAGNOSIS_READ_TIMEOUT
+    assert runner.read_timeouts[CAPTURE] == client_mod.DEFAULT_TIMEOUT
 
 
 # ---------------------------------------------------------------------------

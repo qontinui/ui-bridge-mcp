@@ -62,6 +62,10 @@ CODE_PRODUCER_FAILED = "producer_failed"
 # (``vision_capture_access.rs`` ``INLINE_TOO_LARGE``; ``hint`` carries ``url``).
 VISION_CAPTURE_ROUTE = "/ui-bridge/vision/capture"
 CODE_INLINE_TOO_LARGE = "INLINE_TOO_LARGE"
+# Minted by the screenshot tools (not the runner) when a capture of a
+# WebSocket-transport app failed on a runner build with no WebSocket frame
+# source (plan 2026-11-21-vision-capture-cannot-frame-a-websocket-transport-app).
+CODE_FRAME_SOURCE_MISSING = "FRAME_SOURCE_MISSING"
 # The runner's cache-read route serves raw bytes, not a JSON envelope. A path
 # is followed only when it is exactly what the runner's handler accepts
 # (`vision_cache_get_handler`: 64 hex chars), so a hint cannot steer the read.
@@ -655,7 +659,9 @@ class UIBridgeClient:
         """Check runner health."""
         return await self._request("GET", "/health")
 
-    async def vision_frame_sources(self) -> RunnerFrameSources | Unknown:
+    async def vision_frame_sources(
+        self, timeout: float = DEFAULT_TIMEOUT
+    ) -> RunnerFrameSources | Unknown:
         """The runner's ``/health`` ``visionFrameSources``, and its ``buildId``.
 
         Read from ``data`` first, then the top-level mirror the runner serves
@@ -664,7 +670,7 @@ class UIBridgeClient:
         advertisement. A read that failed, or a field that is present but not
         a list of strings, is :class:`Unknown`, never ``None``.
         """
-        resp = await self._request("GET", "/health", unwrapped=True)
+        resp = await self._request("GET", "/health", timeout=timeout, unwrapped=True)
         if not resp.success or not isinstance(resp.data, dict):
             return Unknown(f"GET /health failed: {resp.describe_error()}")
         body = resp.data
@@ -694,7 +700,9 @@ class UIBridgeClient:
         )
         return RunnerFrameSources(sources=sources, build_id=build_id)
 
-    async def registered_app(self, target: str) -> dict[str, Any] | None | Unknown:
+    async def registered_app(
+        self, target: str, timeout: float = DEFAULT_TIMEOUT
+    ) -> dict[str, Any] | None | Unknown:
         """``target``'s row in ``GET /ui-bridge/apps/registered``.
 
         ``None`` means the registry was read and holds no live row whose
@@ -702,7 +710,7 @@ class UIBridgeClient:
         that failed, or an answer that is not a list, is :class:`Unknown`.
         """
         route = "/ui-bridge/apps/registered"
-        resp = await self._request("GET", route, unwrapped=True)
+        resp = await self._request("GET", route, timeout=timeout, unwrapped=True)
         if not resp.success or not isinstance(resp.data, dict):
             return Unknown(f"GET {route} failed: {resp.describe_error()}")
         body = resp.data
