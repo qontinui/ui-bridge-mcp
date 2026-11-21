@@ -202,6 +202,7 @@ def test_design_audit_discloses_a_selection_the_element_limit_cut(
         "limit": 200,
         "truncated": True,
         "missingElementCount": 2,
+        "unreadableElementCount": 3,
     }
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
@@ -210,7 +211,9 @@ def test_design_audit_discloses_a_selection_the_element_limit_cut(
     assert not is_error, text
     assert (
         "Elements: checked 200 of 250 selected (the SDK's element limit=200 cut "
-        "the selection; the rest were NOT audited); 2 requested ids not registered"
+        "the selection; the rest were NOT audited); 2 requested ids not "
+        "registered; 3 registered elements had no readable node (not in the "
+        "selection)"
     ) in text
     # The selection count is never presented as the checked count.
     assert "Elements: 250" not in text

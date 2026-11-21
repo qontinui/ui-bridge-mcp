@@ -193,7 +193,7 @@ def test_vision_capture_inline_too_large_names_the_url_and_is_not_retried(
             "error": "capture is 6000000 bytes, over the 5242880-byte inline cap",
             "code": "INLINE_TOO_LARGE",
             "hint": {
-                "url": "/ui-bridge/vision/cache/deadbeef",
+                "url": "/ui-bridge/vision/cache/" + "d" * 64,
                 "bytes": 6000000,
                 "maxBytes": 5242880,
             },
@@ -212,7 +212,7 @@ def test_vision_capture_inline_too_large_names_the_url_and_is_not_retried(
     assert not resp.success
     assert resp.code == "INLINE_TOO_LARGE"
     assert resp.status == 413
-    assert "GET http://127.0.0.1:1/ui-bridge/vision/cache/deadbeef" in (
+    assert "GET http://127.0.0.1:1/ui-bridge/vision/cache/" + "d" * 64 in (
         resp.error or ""
     )
     assert "not retried" in (resp.error or "")
@@ -411,30 +411,153 @@ def _jpeg() -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-@pytest.mark.parametrize(
-    "b64,fmt,label,mime",
-    [
-        # The bytes win over a wrong `format` field.
-        (_jpeg(), "png", "jpeg", "image/jpeg"),
-        # Neither the bytes nor the field name a format: UNKNOWN, not png.
-        (
-            base64.b64encode(b"not an image at all").decode(),
-            None,
-            "format UNKNOWN",
-            "application/octet-stream",
-        ),
-    ],
-)
-def test_screenshot_mime_is_sniffed_not_assumed(
-    b64: str, fmt: str | None, label: str, mime: str, monkeypatch: pytest.MonkeyPatch
+def test_screenshot_mime_is_sniffed_from_the_bytes(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frame = {**_frame(b64), "format": fmt}
+    """The bytes win over a wrong ``format`` field."""
+    frame = {**_frame(_jpeg()), "format": "png"}
     runner = Runner({CAPTURE: frame})
     _install(monkeypatch, runner)
     items, is_error = _call("sdk_screenshot", {"target": "web"})
     assert not is_error, _text(items)
-    assert label in _text(items)
-    assert _images(items)[0].mimeType == mime
+    assert "jpeg" in _text(items)
+    assert _images(items)[0].mimeType == "image/jpeg"
+
+
+_NOT_AN_IMAGE = base64.b64encode(b"not an image at all").decode()
+
+
+def test_screenshot_of_unknown_format_returns_no_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither bytes nor field name a format: UNKNOWN, and no ImageContent."""
+    frame = {**_frame(_NOT_AN_IMAGE), "format": None}
+    runner = Runner({CAPTURE: frame})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot", {"target": "web"})
+    assert is_error
+    assert "image format is UNKNOWN" in _text(items)
+    assert _images(items) == []
+
+
+def test_unannotated_frame_of_unknown_format_returns_text_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = {"elements": _SNAPSHOT["elements"]}
+    frame = {**_frame(_NOT_AN_IMAGE), "format": None}
+    runner = Runner({"/ui-bridge/control/snapshot": snapshot, CAPTURE: frame})
+    _install(monkeypatch, runner)
+    items, is_error = _call("ui_annotated_screenshot", {})
+    assert not is_error, _text(items)
+    assert "Annotation scale UNKNOWN" in _text(items)
+    assert "image format is UNKNOWN" in _text(items)
+    assert _images(items) == []
+
+
+def _big_png(width: int, height: int) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _oversize_runner(routes: dict[str, Any], png: bytes) -> Runner:
+    return Runner(
+        {
+            **routes,
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(
+                200, content=png, headers={"content-type": "image/png"}
+            ),
+        }
+    )
+
+
+def test_delta_first_frame_over_the_cap_is_returned_downscaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _oversize_runner({}, _big_png(3200, 1600))
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
+    assert not is_error, _text(items)
+    assert "First capture (full image): 3200x1600px" in _text(items)
+    assert "DOWNSCALED to 1568x784 from 3200x1600" in _text(items)
+    shown = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data)))
+    assert shown.size == (1568, 784)
+
+
+def test_after_composite_over_the_cap_is_returned_downscaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _oversize_runner({}, _big_png(2000, 1000))
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_before", {"target": "web"})
+    assert not is_error, _text(items)
+    items, is_error = _call("sdk_screenshot_after", {"target": "web"}, runner)
+    assert not is_error, _text(items)
+    assert "Change: 0.0%" in _text(items)
+    assert "[comparison] NOTE:" in _text(items)
+    assert "[diff] NOTE: the capture was over the runner's inline cap" in _text(items)
+    for image in _images(items):
+        size = Image.open(io.BytesIO(base64.b64decode(image.data))).size
+        assert max(size) <= 1568
+
+
+def test_frame_under_the_cap_is_not_downscaled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a frame read from the cache is bounded; an inline one is untouched."""
+    b64 = _png(2000, 1000)
+    runner = Runner({CAPTURE: _frame(b64, 2000, 1000)})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
+    assert not is_error, _text(items)
+    assert "DOWNSCALED" not in _text(items)
+    assert _images(items)[0].data == b64
+
+
+def test_cached_capture_read_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cache body over MAX_CACHED_CAPTURE_BYTES fails loudly, unread."""
+    import ui_bridge_mcp.client as client_mod
+
+    monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
+    runner = _oversize_runner({}, _big_png(400, 400) + b"\0" * 4096)
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert "more than MAX_CACHED_CAPTURE_BYTES=1024 bytes" in _text(items)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        _CACHE_URL + "/../../control/snapshot",
+        _CACHE_URL + "?x=1",
+        CACHE + "../" + "a" * 61,
+        CACHE + "a" * 63,
+        "/ui-bridge/control/snapshot",
+    ],
+)
+def test_hint_url_outside_the_cache_route_is_not_followed(
+    bad_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    too_large = httpx.Response(
+        413,
+        json={
+            "success": False,
+            "error": "over the inline cap",
+            "code": "INLINE_TOO_LARGE",
+            "hint": {"url": bad_url, "bytes": 9, "maxBytes": 1},
+        },
+    )
+    runner = Runner({CAPTURE: too_large})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_before", {"target": "web"})
+    assert is_error
+    assert "no followable cache url" in _text(items)
+    # Nothing but the one capture was requested.
+    assert [p for p, _ in runner.requests] == [CAPTURE]
 
 
 @pytest.mark.parametrize(
@@ -591,3 +714,32 @@ def test_delta_first_capture_returns_the_full_frame(
     items, is_error = _call("sdk_screenshot_delta", {"target": "web"}, runner)
     assert not is_error, _text(items)
     assert "No visual changes detected." in _text(items)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A 2xx whose envelope says success: false.
+        {"success": False, "error": "nope", "hint": {"url": "x"}},
+        # A failure inside a success envelope.
+        {
+            "success": True,
+            "data": {"success": False, "error": "no", "hint": {"url": "x"}},
+        },
+    ],
+)
+def test_hint_is_carried_on_a_2xx_failure(
+    body: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = Runner({CAPTURE: httpx.Response(200, json=body)})
+    c = _install(monkeypatch, runner)
+
+    async def go() -> Any:
+        try:
+            return await c.vision_capture()
+        finally:
+            await c.close()
+
+    resp = asyncio.run(go())
+    assert not resp.success
+    assert resp.hint == {"url": "x"}

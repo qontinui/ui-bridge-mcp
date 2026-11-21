@@ -850,6 +850,17 @@ FAILURE_PATHS: list[FailurePath] = [
         )
     ],
     FailurePath(
+        "sdk_screenshot: _unknown_format_text(frame, f\"Screenshot of '{target}'\")",
+        "sdk_screenshot",
+        {"target": "web"},
+        {
+            "/ui-bridge/vision/capture": ok(
+                {"base64": "aGk=", "width": 10, "height": 10, "format": None}
+            )
+        },
+        "Screenshot of 'web': the frame's image format is UNKNOWN",
+    ),
+    FailurePath(
         "sdk_screenshot_diff: No baseline found for '{}'. Save one first with "
         "sdk_screenshot_baseline_save.",
         "sdk_screenshot_diff",

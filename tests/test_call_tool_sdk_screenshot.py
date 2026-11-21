@@ -1,11 +1,16 @@
 """``sdk_screenshot`` entered through the MCP dispatch entry point.
 
 Plan 2026-11-19-the-ui-bridge-design-surface-is-blocked-behind-a-stalled-pr-
-unpublished-packages-and-a-score, Phase 6 arming: the tool is called through
+unpublished-packages-and-a-score, Phase 6. This is the dispatch-path test with a
+mocked transport, NOT the phase's arming check: the tool is called through
 ``server.call_tool`` (what the MCP server dispatches every tool call through)
 and only the HTTP transport is mocked, answering the runner's
 ``POST /ui-bridge/vision/capture`` as the runner does. No client or server
 helper is replaced, so the real client code builds and sends the request.
+
+The live arming check — ``sdk_screenshot`` and ``sdk_annotated_screenshot``
+returning an image against a temp runner's ``/ui-bridge/vision/capture`` — is
+still owed; a mocked transport cannot stand in for it.
 """
 
 from __future__ import annotations

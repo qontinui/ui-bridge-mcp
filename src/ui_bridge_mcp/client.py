@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 from urllib.parse import quote
@@ -60,8 +61,15 @@ CODE_PRODUCER_FAILED = "producer_failed"
 # (``vision_capture_access.rs`` ``INLINE_TOO_LARGE``; ``hint`` carries ``url``).
 VISION_CAPTURE_ROUTE = "/ui-bridge/vision/capture"
 CODE_INLINE_TOO_LARGE = "INLINE_TOO_LARGE"
-# The runner's cache-read route serves raw bytes, not a JSON envelope.
+# The runner's cache-read route serves raw bytes, not a JSON envelope. A path
+# is followed only when it is exactly what the runner's handler accepts
+# (`vision_cache_get_handler`: 64 hex chars), so a hint cannot steer the read.
 VISION_CACHE_PREFIX = "/ui-bridge/vision/cache/"
+_VISION_CACHE_PATH = re.compile(r"/ui-bridge/vision/cache/[0-9a-fA-F]{64}")
+# The most a cached capture read may be. The runner caps INLINE replies at
+# 5 MiB; an over-cap png_strict frame of a 4K / HiDPI window is tens of MiB.
+# Beyond this the read fails loudly rather than buffering an unbounded body.
+MAX_CACHED_CAPTURE_BYTES = 64 * 1024 * 1024
 
 # The closed Observation ``UnknownCode`` set, in the canonical wire-contract
 # order: the twin of the ui-bridge SDK's
@@ -210,8 +218,10 @@ class UIBridgeResponse:
     error: str | None = None
     code: str | None = None
     status: int | None = None
-    # The failure body's own ``hint`` (runner ``ApiResponse.hint``), unrendered,
-    # so a caller reads a structured field rather than parsing ``error``.
+    # A failure body's own ``hint`` (runner ``ApiResponse.hint``), unrendered,
+    # so a caller reads a structured field rather than parsing ``error``. Set
+    # on every failure that carried a body (non-2xx, and a 2xx whose
+    # ``success`` is false); ``None`` when the body had none.
     hint: Any = None
 
     def describe_error(self) -> str:
@@ -345,11 +355,13 @@ def render_body_error(body: Any, raw_text: str) -> str:
 def _inline_too_large_url(response: UIBridgeResponse) -> str | None:
     """The ``hint.url`` of an ``INLINE_TOO_LARGE`` answer, when it names one.
 
-    Only a path under the runner's own cache route is followed.
+    Only a path the runner's cache route itself accepts —
+    ``/ui-bridge/vision/cache/<64 hex>``, nothing before or after it — is
+    returned; anything else (a ``../`` or ``?`` suffix, another route) is not.
     """
     hint = response.hint if isinstance(response.hint, dict) else {}
     url = hint.get("url")
-    if isinstance(url, str) and url.startswith(VISION_CACHE_PREFIX):
+    if isinstance(url, str) and _VISION_CACHE_PATH.fullmatch(url):
         return url
     return None
 
@@ -539,6 +551,7 @@ class UIBridgeClient:
                     error=render_body_error(inner, response.text),
                     code=extract_code(inner) or code or CODE_PRODUCER_FAILED,
                     status=response.status_code,
+                    hint=inner.get("hint", data.get("hint")),
                 )
             if success:
                 return UIBridgeResponse(
@@ -554,6 +567,7 @@ class UIBridgeClient:
                 error=render_body_error(data, response.text),
                 code=code or CODE_PRODUCER_FAILED,
                 status=response.status_code,
+                hint=data.get("hint"),
             )
         except httpx.ConnectTimeout:
             # The connection itself never completed: the app was not reached.
@@ -797,13 +811,16 @@ class UIBridgeClient:
             if follow_oversize and url is not None:
                 return await self._read_cached_capture(url)
             where = (
-                f"GET {self.base_url}{url}"
+                f"Fetch it with GET {self.base_url}{url}."
                 if url is not None
-                else "the url in the runner's hint (the answer carried none)"
+                else (
+                    "The answer carried no followable cache url in its hint "
+                    "(only /ui-bridge/vision/cache/<64 hex> is followed)."
+                )
             )
             response.error = (
                 "capture is too large to return inline; it was taken and "
-                f"cached, and is not retried here. Fetch it with {where}. "
+                f"cached, and is not retried here. {where} "
                 f"Runner said: {response.error}"
             )
             return response
@@ -820,22 +837,49 @@ class UIBridgeClient:
 
         full = f"{self.base_url}{url}"
         client = await self._get_client()
+        too_big = (
+            f"capture over the inline cap; {full} serves more than "
+            f"MAX_CACHED_CAPTURE_BYTES={MAX_CACHED_CAPTURE_BYTES} bytes, so it "
+            "was not read"
+        )
         try:
-            response = await client.get(full, timeout=DEFAULT_TIMEOUT)
+            async with client.stream("GET", full, timeout=DEFAULT_TIMEOUT) as response:
+                if response.status_code != 200:
+                    await response.aread()
+                    failure = self._http_status_failure(response)
+                    failure.error = (
+                        f"capture over the inline cap; reading it from {full} "
+                        f"failed: {failure.error}"
+                    )
+                    return failure
+                declared = response.headers.get("content-length")
+                if declared is not None and declared.isdigit():
+                    if int(declared) > MAX_CACHED_CAPTURE_BYTES:
+                        return UIBridgeResponse(
+                            success=False,
+                            error=f"{too_big} (content-length {declared})",
+                            code=CODE_PRODUCER_FAILED,
+                            status=response.status_code,
+                        )
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_CACHED_CAPTURE_BYTES:
+                        return UIBridgeResponse(
+                            success=False,
+                            error=too_big,
+                            code=CODE_PRODUCER_FAILED,
+                            status=response.status_code,
+                        )
+                    chunks.append(chunk)
         except httpx.HTTPError as e:
             return UIBridgeResponse(
                 success=False,
                 error=f"capture over the inline cap; reading it from {full} failed: {e}",
                 code=CODE_PRODUCER_FAILED,
             )
-        if response.status_code != 200:
-            failure = self._http_status_failure(response)
-            failure.error = (
-                f"capture over the inline cap; reading it from {full} failed: "
-                f"{failure.error}"
-            )
-            return failure
-        data = response.content
+        data = b"".join(chunks)
         fmt = sniff_image_format(data)
         try:
             with Image.open(io.BytesIO(data)) as img:

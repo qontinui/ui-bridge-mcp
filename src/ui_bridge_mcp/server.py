@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import logging
 from collections.abc import Sequence
@@ -451,13 +452,15 @@ def _audit_selection(report: dict[str, Any]) -> str:
         )
     elif truncated is not False:
         line += " (whether the element limit cut the selection is unknown)"
-    for field, label in (
-        ("missingElementCount", "requested ids not registered"),
-        ("unreadableElementCount", "selected elements with no readable node"),
-    ):
-        value = report.get(field)
-        if _number(value) and value > 0:
-            line += f"; {value} {label}"
+    missing = report.get("missingElementCount")
+    if _number(missing) and missing > 0:
+        line += f"; {missing} requested ids not registered"
+    unreadable = report.get("unreadableElementCount")
+    if _number(unreadable) and unreadable > 0:
+        line += (
+            f"; {unreadable} registered elements had no readable node "
+            "(not in the selection)"
+        )
     return line
 
 
@@ -677,6 +680,52 @@ async def _capture_frame(
     return _as_dict(resp.data)
 
 
+# The longest edge an image derived from an over-the-inline-cap frame is
+# returned at: the long edge the runner's own ``claude`` contract bounds a
+# capture to. The comparison itself always runs at full resolution.
+_OVERSIZE_DISPLAY_LONG_EDGE = 1568
+
+
+def _displayable(b64_png: str, frame: dict[str, Any]) -> tuple[str, str | None]:
+    """An image for the caller, bounded when its frame was over the inline cap.
+
+    A frame read from the runner's cache (``fetched_from``) was too large to
+    return inline, and an image the size of it (the frame itself, a
+    side-by-side composite, a full-frame diff) is too. Such an image is
+    downscaled to ``_OVERSIZE_DISPLAY_LONG_EDGE`` and the returned note says
+    so; any other image is returned unchanged with no note.
+    """
+    if "fetched_from" not in frame:
+        return b64_png, None
+    from PIL import Image
+
+    with Image.open(io.BytesIO(base64.b64decode(b64_png))) as img:
+        width, height = img.size
+        if max(width, height) <= _OVERSIZE_DISPLAY_LONG_EDGE:
+            return b64_png, None
+        small = img.copy()
+    small.thumbnail((_OVERSIZE_DISPLAY_LONG_EDGE, _OVERSIZE_DISPLAY_LONG_EDGE))
+    buf = io.BytesIO()
+    small.save(buf, format="PNG")
+    note = (
+        f"NOTE: the capture was over the runner's inline cap; this image is "
+        f"DOWNSCALED to {small.width}x{small.height} from {width}x{height} for "
+        "return (the comparison ran at full resolution)."
+    )
+    return base64.b64encode(buf.getvalue()).decode(), note
+
+
+def _unknown_format_text(frame: dict[str, Any], what: str) -> str:
+    """Why a frame of UNKNOWN format is not returned as an image."""
+    return (
+        f"{what}: the frame's image format is UNKNOWN (its bytes are not PNG, "
+        "JPEG or WebP, and the runner named no known format), so it is not "
+        f"returned as an image. Size {frame.get('width', '?')}x"
+        f"{frame.get('height', '?')}px, runner cache key "
+        f"{frame.get('sha256') or 'unknown'}."
+    )
+
+
 # A tool that dropped ``monitor`` refuses it rather than ignoring it.
 _MONITOR_DROPPED_TOOLS = frozenset(
     {
@@ -736,23 +785,28 @@ def _annotated_result(
     """The annotated frame, or the plain one when the scale is UNKNOWN."""
     css = _css_viewport(snap_data)
     if css is None:
+        scale_note = (
+            "Annotation scale UNKNOWN: the snapshot reported no viewport, so "
+            "element rects cannot be placed on the "
+            f"{frame['width']}x{frame['height']}px frame."
+        )
         fmt = _frame_format(frame)
+        if fmt is None:
+            return [
+                types.TextContent(
+                    type="text",
+                    text=f"{scale_note}\n{_unknown_format_text(frame, 'Plain frame')}",
+                )
+            ]
         return [
             types.TextContent(
                 type="text",
-                text=(
-                    "Annotation scale UNKNOWN: the snapshot reported no "
-                    "viewport, so element rects cannot be placed on the "
-                    f"{frame['width']}x{frame['height']}px frame. Returning the "
-                    "plain frame, unannotated."
-                ),
+                text=f"{scale_note} Returning the plain frame, unannotated.",
             ),
             types.ImageContent(
                 type="image",
                 data=frame["base64"],
-                mimeType=mime_type_for_format(fmt)
-                if fmt is not None
-                else "application/octet-stream",
+                mimeType=mime_type_for_format(fmt),
             ),
         ]
     annotated_b64 = annotate_screenshot(
@@ -6754,21 +6808,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             shot_format = _frame_format(frame)
+            if shot_format is None:
+                return _tool_error(
+                    _unknown_format_text(frame, f"Screenshot of '{target}'")
+                )
             return [
                 types.TextContent(
                     type="text",
                     text=(
                         f"Screenshot of '{target}': {frame['width']}x{frame['height']}px "
-                        f"{shot_format or 'format UNKNOWN'} "
+                        f"{shot_format} "
                         f"(runner cache key {frame.get('sha256') or 'unknown'})"
                     ),
                 ),
                 types.ImageContent(
                     type="image",
                     data=frame["base64"],
-                    mimeType=mime_type_for_format(shot_format)
-                    if shot_format is not None
-                    else "application/octet-stream",
+                    mimeType=mime_type_for_format(shot_format),
                 ),
             ]
 
@@ -7315,12 +7371,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 f"(threshold: {result.threshold_used * 100:.1f}%)\n"
                 f"Changed regions: {len(result.changed_regions)}"
             )
+            diff_b64, diff_note = _displayable(result.diff_image_b64, frame)
+            if diff_note is not None:
+                summary += f"\n{diff_note}"
 
             return [
                 types.TextContent(type="text", text=summary),
                 types.ImageContent(
                     type="image",
-                    data=result.diff_image_b64,
+                    data=diff_b64,
                     mimeType="image/png",
                 ),
             ]
@@ -7373,6 +7432,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 f"Change: {result.change_percentage}%\n"
                 f"Changed regions: {len(result.changed_regions)}"
             )
+            comparison_b64, comparison_note = _displayable(comparison_b64, frame)
+            after_diff_b64, after_diff_note = _displayable(result.diff_image_b64, frame)
+            for image_name, image_note in (
+                ("comparison", comparison_note),
+                ("diff", after_diff_note),
+            ):
+                if image_note is not None:
+                    summary += f"\n[{image_name}] {image_note}"
 
             baseline_store.clear_before()
 
@@ -7385,7 +7452,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 ),
                 types.ImageContent(
                     type="image",
-                    data=result.diff_image_b64,
+                    data=after_diff_b64,
                     mimeType="image/png",
                 ),
             ]
@@ -7425,11 +7492,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"First capture (full image): {delta['image_width']}x{delta['image_height']}px, "
                     f"{delta['total_tiles']} tiles"
                 )
+                # The encoder keeps the full frame; only the returned image is
+                # bounded when the frame was over the inline cap.
+                first_b64, first_note = _displayable(screenshot_b64, frame)
+                if first_note is not None:
+                    summary += f"\n{first_note}"
                 return [
                     types.TextContent(type="text", text=summary),
                     types.ImageContent(
                         type="image",
-                        data=screenshot_b64,
+                        data=first_b64,
                         mimeType="image/png",
                     ),
                 ]
