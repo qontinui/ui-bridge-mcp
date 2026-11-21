@@ -876,7 +876,7 @@ def _frame_format(frame: dict[str, Any]) -> str | None:
     return sniff_image_format(head)
 
 
-def _annotated_result(
+async def _annotated_result(
     frame: dict[str, Any],
     snap_data: dict[str, Any],
     snap_elements: list[dict[str, Any]],
@@ -887,6 +887,11 @@ def _annotated_result(
 
     A frame of UNKNOWN format is an error, as it is for ``sdk_screenshot``:
     it can be neither annotated nor returned as an image.
+
+    The compositing stays on the event loop: ``annotate_screenshot`` writes
+    the shared ref manager, which is not thread-safe. The bounding re-encode
+    after it touches no shared state, so it runs in a worker thread like
+    every other ``_displayable`` bound.
     """
     fmt = _frame_format(frame)
     if fmt is None:
@@ -920,7 +925,8 @@ def _annotated_result(
         design_data=design_data,
     )
     # A scale up to 2.0 can double the frame; the 1568px bound holds here too.
-    annotated_b64, annotated_note = _displayable(
+    annotated_b64, annotated_note = await asyncio.to_thread(
+        _displayable,
         annotated_b64,
         "annotation was drawn at full resolution",
         fmt=opts.format,
@@ -7340,7 +7346,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, None)
             if not isinstance(frame, dict):
                 return frame
-            return _annotated_result(frame, snap_data, snap_elements, opts, design_data)
+            return await _annotated_result(
+                frame, snap_data, snap_elements, opts, design_data
+            )
 
         elif name == "sdk_annotated_screenshot":
             target = _capture_target(arguments, name)
@@ -7366,7 +7374,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, target)
             if not isinstance(frame, dict):
                 return frame
-            return _annotated_result(frame, snap_data, snap_elements, opts, design_data)
+            return await _annotated_result(
+                frame, snap_data, snap_elements, opts, design_data
+            )
 
         # Element-level screenshots
         elif name in ("ui_element_screenshot", "sdk_element_screenshot"):

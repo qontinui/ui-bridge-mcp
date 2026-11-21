@@ -1679,3 +1679,87 @@ def test_delta_reset_and_encode_both_take_the_encoder_lock(
     assert not is_error, _text(items)
     assert len(entered) == 2, entered  # the reset, then the encode
     assert threading.main_thread().name not in entered
+
+
+@pytest.mark.parametrize(
+    "tool,snapshot_route,arguments",
+    [
+        ("ui_annotated_screenshot", "/ui-bridge/control/snapshot", {}),
+        ("sdk_annotated_screenshot", "/ui-bridge/sdk/snapshot", {"target": "web"}),
+    ],
+)
+def test_annotated_bound_runs_off_the_loop_and_compositing_stays_on_it(
+    tool: str,
+    snapshot_route: str,
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounding re-encode is threaded; the ref-manager write is not."""
+    import threading
+
+    _install(monkeypatch, Runner({snapshot_route: _SNAPSHOT, CAPTURE: _frame()}))
+    seen = _record_threads(monkeypatch, server_mod, ["_displayable"])
+    composited = _record_threads(monkeypatch, server_mod, ["annotate_screenshot"])
+    items, is_error = _call(tool, arguments)
+    assert not is_error, _text(items)
+    assert _images(items)
+    _assert_all_off_loop(seen)
+    # annotate_screenshot assigns refs in the shared, non-thread-safe manager.
+    assert composited["annotate_screenshot"] == [threading.main_thread().name]
+
+
+def test_ui_diff_native_capture_fallback_is_bounded_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ui_diff's window-capture fallback decodes and bounds off the loop."""
+    _install(
+        monkeypatch,
+        Runner(
+            {
+                "/ui-bridge/control/snapshot": {
+                    "source": "native_capture",
+                    "screenshot": _png(),
+                    "elements": [],
+                }
+            }
+        ),
+    )
+    seen = _record_threads(monkeypatch, server_mod, ["_bounded_image"])
+    items, _ = _call("ui_diff", {})
+    assert "No element tree:" in _text(items)
+    assert _images(items)
+    _assert_all_off_loop(seen)
+
+
+@pytest.mark.parametrize(
+    "tool,snapshot_route,arguments",
+    [
+        ("ui_element_screenshot", "/ui-bridge/control/snapshot", {}),
+        ("sdk_element_screenshot", "/ui-bridge/sdk/snapshot", {"target": "web"}),
+    ],
+)
+def test_element_crop_runs_off_the_event_loop(
+    tool: str,
+    snapshot_route: str,
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The crop and its bounding both run in worker threads."""
+    _install(monkeypatch, Runner({snapshot_route: _SNAPSHOT, CAPTURE: _frame()}))
+    seen = _record_threads(monkeypatch, server_mod, ["crop_to_element", "_displayable"])
+    items, is_error = _call(tool, {**arguments, "element_id": "btn", "padding": 0})
+    assert not is_error, _text(items)
+    assert _images(items)
+    _assert_all_off_loop(seen)
+
+
+def test_diagnosis_evidence_image_is_bounded_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stuck-screen evidence screenshot is decoded and bounded off the loop."""
+    _install(monkeypatch, _stuck_runner(_png()))
+    seen = _record_threads(monkeypatch, server_mod, ["_bounded_image"])
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert not is_error, _text(items)
+    assert _images(items)
+    _assert_all_off_loop(seen)
