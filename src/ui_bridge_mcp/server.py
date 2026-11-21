@@ -687,7 +687,9 @@ async def _capture_frame(
 _OVERSIZE_DISPLAY_LONG_EDGE = 1568
 
 
-def _displayable(b64_png: str, kept: str, fmt: str = "png") -> tuple[str, str | None]:
+def _displayable(
+    b64_png: str, kept: str, fmt: str = "png", quality: int = 85
+) -> tuple[str, str | None]:
     """An image for the caller, bounded by its OWN size, whatever its source.
 
     Any image whose long edge is over ``_OVERSIZE_DISPLAY_LONG_EDGE`` is
@@ -697,6 +699,10 @@ def _displayable(b64_png: str, kept: str, fmt: str = "png") -> tuple[str, str | 
     own size decides, not the current frame's source: a diff or composite
     built from a stored over-cap baseline or before frame is as large as that
     frame even when the current capture came back inline.
+
+    ``quality`` is the JPEG/WebP re-encode quality: the caller's own when it
+    asked for one (the annotated tools' ``quality``), else 85 — what
+    ``crop_to_element`` and the runner's ``claude`` contract use.
     """
     from PIL import Image
 
@@ -714,13 +720,43 @@ def _displayable(b64_png: str, kept: str, fmt: str = "png") -> tuple[str, str | 
     if pil_format == "PNG":
         small.save(buf, format=pil_format)
     else:
-        small.save(buf, format=pil_format, quality=85)
+        small.save(buf, format=pil_format, quality=quality)
     note = (
         f"NOTE: this image is DOWNSCALED to {small.width}x{small.height} from "
         f"{width}x{height} for return (long edge over "
         f"{_OVERSIZE_DISPLAY_LONG_EDGE}px); {kept}."
     )
     return base64.b64encode(buf.getvalue()).decode(), note
+
+
+def _bounded_image(b64: str, kept: str) -> tuple[types.ImageContent | None, str | None]:
+    """A producer's own base64 image, bounded, with its sniffed MIME type.
+
+    Its format is read from its magic bytes, not assumed: an UNKNOWN format,
+    or bytes that do not decode, return no image and a note saying why. A
+    decodable image over the 1568px bound is downscaled (``_displayable``).
+    """
+    try:
+        head = base64.b64decode(b64[:64])
+    except ValueError:
+        head = b""
+    fmt = sniff_image_format(head)
+    if fmt is None:
+        return None, (
+            "The image's format is UNKNOWN (its bytes are not PNG, JPEG or "
+            "WebP), so it is not returned."
+        )
+    try:
+        data, note = _displayable(b64, kept, fmt=fmt)
+    except Exception as e:  # PIL raises several types for undecodable bytes
+        return None, (
+            f"The {fmt} image could not be decoded ({type(e).__name__}), so its "
+            "size is UNKNOWN and it is not returned."
+        )
+    return (
+        types.ImageContent(type="image", data=data, mimeType=mime_type_for_format(fmt)),
+        note,
+    )
 
 
 def _unknown_format_text(frame: dict[str, Any], what: str) -> str:
@@ -828,7 +864,10 @@ def _annotated_result(
     )
     # A scale up to 2.0 can double the frame; the 1568px bound holds here too.
     annotated_b64, annotated_note = _displayable(
-        annotated_b64, "annotation was drawn at full resolution", fmt=opts.format
+        annotated_b64,
+        "annotation was drawn at full resolution",
+        fmt=opts.format,
+        quality=opts.quality,
     )
     result: list[types.TextContent | types.ImageContent] = [
         types.ImageContent(
@@ -874,11 +913,15 @@ def _native_capture_result(data: dict[str, Any]) -> ToolResult | None:
     if data.get("reason"):
         text += f"\n  Reason: {data['reason']}"
     screenshot = data.get("screenshot")
-    images = (
-        [types.ImageContent(type="image", data=screenshot, mimeType="image/png")]
-        if isinstance(screenshot, str) and screenshot
-        else []
-    )
+    images: list[types.ImageContent] = []
+    if isinstance(screenshot, str) and screenshot:
+        image, note = _bounded_image(
+            screenshot, "the runner captured its window at full resolution"
+        )
+        if note is not None:
+            text += f"\n  {note}"
+        if image is not None:
+            images.append(image)
     return _tool_error(text, images)
 
 
@@ -4030,7 +4073,7 @@ Supports smart cropping:
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Scale factor (0.25-2.0). Default: 1.0.",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0. Above 1 it adds detail only with crop=viewport or modal: a full frame is returned bounded to a 1568px long edge.",
                 },
                 "format": {
                     "type": "string",
@@ -4099,7 +4142,7 @@ Supports smart cropping:
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Scale factor (0.25-2.0). Default: 1.0.",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0. Above 1 it adds detail only with crop=viewport or modal: a full frame is returned bounded to a 1568px long edge.",
                 },
                 "format": {
                     "type": "string",
@@ -4139,7 +4182,7 @@ Useful for inspecting individual components without full-page noise.""",
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Scale factor. Default: 1.0.",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0.",
                 },
                 "format": {
                     "type": "string",
@@ -4173,7 +4216,7 @@ Useful for inspecting individual components without full-page noise.""",
                 },
                 "scale": {
                     "type": "number",
-                    "description": "Scale factor. Default: 1.0.",
+                    "description": "Scale factor (0.25-2.0). Default: 1.0.",
                 },
                 "format": {
                     "type": "string",
@@ -8306,16 +8349,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 types.TextContent(type="text", text="\n".join(lines))
             ]
 
-            # Include screenshot as visual evidence
+            # Include screenshot as visual evidence: bounded, its MIME type
+            # sniffed from its bytes rather than assumed to be PNG.
             screenshot_b64 = data.get("screenshot", "")
-            if screenshot_b64:
-                diagnosis_result.append(
-                    types.ImageContent(
-                        type="image",
-                        data=screenshot_b64,
-                        mimeType="image/png",
-                    )
+            if isinstance(screenshot_b64, str) and screenshot_b64:
+                evidence_image, evidence_note = _bounded_image(
+                    screenshot_b64, "the diagnosis ran on the full-resolution capture"
                 )
+                if evidence_note is not None:
+                    diagnosis_result.append(
+                        types.TextContent(
+                            type="text", text=f"Screenshot: {evidence_note}"
+                        )
+                    )
+                if evidence_image is not None:
+                    diagnosis_result.append(evidence_image)
 
             return diagnosis_result
 

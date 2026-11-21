@@ -1181,3 +1181,104 @@ def test_hint_is_carried_on_a_2xx_failure(
     resp = asyncio.run(go())
     assert not resp.success
     assert resp.hint == {"url": "x"}
+
+
+def test_annotated_reencode_uses_the_requested_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """quality=100 reaches the bound's JPEG re-encode, not a fixed 85."""
+    saves: list[dict[str, Any]] = []
+    original_save = Image.Image.save
+
+    def recording_save(
+        self: Image.Image, fp: Any, format: Any = None, **kw: Any
+    ) -> None:
+        saves.append({"format": format, **kw})
+        original_save(self, fp, format=format, **kw)
+
+    monkeypatch.setattr(Image.Image, "save", recording_save)
+    snapshot = {**_SNAPSHOT, "viewport": {"viewportWidth": 1568, "viewportHeight": 784}}
+    runner = Runner(
+        {
+            "/ui-bridge/control/snapshot": snapshot,
+            CAPTURE: _frame(_png(1568, 784), 1568, 784),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "ui_annotated_screenshot", {"scale": 2.0, "format": "jpeg", "quality": 100}
+    )
+    assert not is_error, _text(items)
+    assert "DOWNSCALED" in _text(items)
+    jpeg_saves = [s for s in saves if str(s["format"]).upper() == "JPEG"]
+    # The annotation's own encode and the bound's re-encode both ran.
+    assert len(jpeg_saves) >= 2
+    assert [s.get("quality") for s in jpeg_saves] == [100] * len(jpeg_saves)
+
+
+def test_native_capture_fallback_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runner's own window capture obeys the 1568px bound, with a note."""
+    runner = Runner(
+        {
+            "/ui-bridge/control/snapshot": {
+                "source": "native_capture",
+                "reason": "UI Bridge frontend not ready",
+                "screenshot": _png(3200, 1600),
+                "elements": [],
+            }
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call("ui_snapshot", {})
+    assert is_error
+    assert "No element tree:" in _text(items)
+    assert "DOWNSCALED to 1568x784 from 3200x1600" in _text(items)
+    shown = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data)))
+    assert shown.size == (1568, 784)
+
+
+def _stuck_runner(screenshot: str) -> Runner:
+    return Runner(
+        {
+            "/ui-bridge/sdk/status": {"connected": False},
+            "/ui-bridge/control/diagnose-stuck": {
+                "verdict": "frozen",
+                "confidence": 0.9,
+                "summary": "No change",
+                "evidence": {},
+                "suggestions": [],
+                "observationWindowMs": 3000,
+                "captureSource": "native",
+                "screenshot": screenshot,
+            },
+        }
+    )
+
+
+def test_diagnose_stuck_screen_screenshot_is_bounded_and_sniffed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buf = io.BytesIO()
+    Image.new("RGB", (3200, 1600), "white").save(buf, format="JPEG")
+    runner = _stuck_runner(base64.b64encode(buf.getvalue()).decode())
+    _install(monkeypatch, runner)
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert not is_error, _text(items)
+    assert "Verdict: FROZEN" in _text(items)
+    assert "DOWNSCALED to 1568x784 from 3200x1600" in _text(items)
+    image = _images(items)[0]
+    # Sniffed from the bytes, not hardcoded image/png.
+    assert image.mimeType == "image/jpeg"
+    shown = Image.open(io.BytesIO(base64.b64decode(image.data)))
+    assert (shown.format, shown.size) == ("JPEG", (1568, 784))
+
+
+def test_diagnose_stuck_screen_unknown_format_is_text_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _stuck_runner(_NOT_AN_IMAGE)
+    _install(monkeypatch, runner)
+    items, is_error = _call("diagnose_stuck_screen", {})
+    assert not is_error, _text(items)
+    assert "Screenshot: The image's format is UNKNOWN" in _text(items)
+    assert _images(items) == []

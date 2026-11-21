@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 from typing import Any
 
 import httpx
@@ -159,7 +160,17 @@ def test_nested_success_is_still_an_answer(monkeypatch: pytest.MonkeyPatch) -> N
 # ui_snapshot / ui_diff: the runner's window-capture fallback has no elements
 # =============================================================================
 
-PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+
+def _real_png() -> str:
+    """A decodable PNG: the fallback's image is bounded, so it is decoded."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (10, 10), "white").save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+PNG = _real_png()
 NATIVE_CAPTURE = ok(
     {
         "source": "native_capture",
