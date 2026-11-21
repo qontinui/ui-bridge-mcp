@@ -729,13 +729,38 @@ def test_style_audit_report_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> Non
         "totalRules": 2,
         "passedCount": 3,
         "failedCount": 1,
-        "summary": {"errors": [], "warnings": []},
+        # The SDK's shape: summary carries COUNTS; the failing rows are in
+        # results[] (specs/design-request.ts StyleGuideDesignAuditReport).
+        "summary": {"errors": 0, "warnings": 1, "info": 0},
+        "maxResults": 50,
+        "listableResults": 1,
+        "resultsTruncated": False,
+        "results": [
+            {
+                "elementId": "save-btn",
+                "ruleId": "button-size",
+                "passed": False,
+                "severity": "warning",
+                "constraintResults": [
+                    {
+                        "passed": False,
+                        "actualValue": "11px",
+                        "expectedValue": "14px",
+                        "message": "font too small",
+                    }
+                ],
+            }
+        ],
     }
     answering(monkeypatch, {"/ui-bridge/sdk/design/audit": ok(report)})
     result = call("sdk_design_audit", {})
     assert result.isError is False
     assert text(result) == (
-        "Style Audit: brand\nElements: 4 | Rules: 2\nPassed: 3 | Failed: 1"
+        "Style Audit: brand\nElements: 4 | Rules: 2\nPassed: 3 | Failed: 1\n"
+        "Failed by severity: errors=0 warnings=1 info=0\n"
+        "Failing rows (1 listed):\n"
+        "  [save-btn] button-size (warning): font too small "
+        "(actual 11px, expected 14px)"
     )
 
 

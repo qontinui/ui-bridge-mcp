@@ -12,6 +12,15 @@ Plan 2026-10-13-image-generation-and-visual-judgment, Phase 6 (ui-bridge-mcp):
 - ``/design/evaluate`` no longer carries an A-F ``grade`` (decision D7: values,
   not verdicts), so neither renderer prints one. A stale SDK that still sends
   ``grade`` must not get it rendered either: the MCP surface hands out values.
+
+Plan 2026-11-19-the-ui-bridge-design-surface-is-blocked-behind-a-stalled-pr-
+unpublished-packages-and-a-score, Phase 4: the aggregates go the same way. An
+SDK that still sends ``overallScore`` / ``uxScore`` must not get them rendered,
+and the renderers no longer average metric scores per category themselves. Each
+enabled metric's own ``score``, ``weight``, findings and ``rawData`` keys are
+the values a caller judges. The design audit reads ``summary`` as COUNTS and
+lists failing rows from ``results[]``; the responsive renderer reads
+``{snapshots: [...]}``.
 """
 
 from __future__ import annotations
@@ -49,7 +58,7 @@ RETIRED_CLIENT_METHODS = (
 )
 
 # A /design/evaluate report as an SDK that predates the change would send it:
-# values plus the grades. The grades must not reach the rendered text.
+# values plus the grades AND the aggregates. Neither may reach the rendered text.
 _REPORT: dict[str, Any] = {
     "overallScore": 87,
     "grade": "B",
@@ -67,10 +76,61 @@ _REPORT: dict[str, Any] = {
             "enabled": True,
             "weight": 0.1,
             "findings": [],
+            "rawData": {"overflowingElements": 0},
+        },
+        # Two metrics in one category: a per-category average would be 70.
+        {
+            "metricId": "colorHarmony",
+            "score": 60,
+            "label": "Color harmony",
+            "category": "color",
+            "enabled": True,
+            "weight": 0.2,
+            "findings": [
+                {"severity": "warning", "message": "Too many hues", "elementIds": []}
+            ],
+            "rawData": {"hueCount": 9, "paletteSize": 14},
+        },
+        {
+            "metricId": "wcagContrastCompliance",
+            "score": 80,
+            "label": "WCAG contrast",
+            "category": "color",
+            "enabled": True,
+            "weight": 0.3,
+            "findings": [],
+        },
+        {
+            "metricId": "whitespaceRatio",
+            "score": 13,
+            "label": "Whitespace ratio",
+            "category": "density",
+            "enabled": False,
+            "weight": 0.0,
+            "findings": [],
+        },
+    ],
+    "topIssues": [
+        {
+            "severity": "warning",
+            "message": "Too many hues",
+            "recommendation": "Use a smaller palette",
         }
     ],
-    "topIssues": [],
 }
+
+# Strings only an aggregate could produce.
+_AGGREGATE_MARKERS = (
+    "Overall Score",
+    "UX Score",
+    "87/100",
+    "91/100",
+    "Category Scores",
+    "Categories:",
+    "color=70",
+    "Color: 70/100",
+    "70/100",
+)
 
 
 def _client(monkeypatch: pytest.MonkeyPatch) -> UIBridgeClient:
@@ -150,17 +210,32 @@ def test_client_has_no_media_methods_or_routes() -> None:
     assert "/ai/media" not in inspect.getsource(UIBridgeClient)
 
 
-def test_design_evaluate_renders_values_and_no_grade(
+def _assert_per_metric_values(text: str) -> None:
+    """Each enabled metric's own values are rendered; a disabled one is not."""
+    assert "Content overflow [ux]: score=91 weight=0.1 findings=0" in text
+    assert "Color harmony [color]: score=60 weight=0.2 findings=1" in text
+    assert "WCAG contrast [color]: score=80 weight=0.3 findings=0" in text
+    assert "rawData keys: hueCount, paletteSize" in text
+    assert "rawData keys: overflowingElements" in text
+    assert "Whitespace ratio" not in text
+    assert "[WARNING] Too many hues" in text
+    assert "Use a smaller palette" in text
+
+
+def test_design_evaluate_renders_per_metric_values_and_no_aggregate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(server_mod, "client", _client(monkeypatch))
     text = _call_tool("sdk_design_evaluate", {})
-    assert "Overall Score: 87/100" in text
-    assert "UX Score: 91/100" in text
+    _assert_per_metric_values(text)
+    assert "Overall Score" not in text
+    assert "Quality: " not in text
+    for marker in _AGGREGATE_MARKERS:
+        assert marker not in text, marker
     assert "Grade" not in text
 
 
-def test_design_review_quality_section_renders_values_and_no_grade(
+def test_design_review_quality_section_renders_per_metric_values_and_no_aggregate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(server_mod, "client", _client(monkeypatch))
@@ -168,5 +243,10 @@ def test_design_review_quality_section_renders_values_and_no_grade(
         "sdk_design_review",
         {"include_state_variations": False, "include_quality_evaluation": True},
     )
-    assert "Quality: 87/100 (UX 91/100)" in text
+    _assert_per_metric_values(text)
+    assert "Overall Score" not in text
+    assert "Quality: " not in text
+    assert "/100 (UX" not in text
+    for marker in _AGGREGATE_MARKERS:
+        assert marker not in text, marker
     assert "Grade" not in text

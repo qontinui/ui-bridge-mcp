@@ -421,6 +421,184 @@ def _style_audit_unknown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _count_or_unknown(value: Any) -> str:
+    """A count the producer sent, or ``unknown`` — never a defaulted zero."""
+    return str(value) if _number(value) else "unknown"
+
+
+def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
+    """The severity counts and failing rows of a style-guide ``/design/audit``.
+
+    ``summary.errors`` / ``summary.warnings`` / ``summary.info`` are COUNTS
+    (SDK ``specs/design-request.ts`` ``StyleGuideDesignAuditReport``); the
+    failing rows live in ``results[]`` only, bounded by the SDK's ``maxResults``
+    (``resultsTruncated``, ``listableResults``). A missing ``summary`` or count
+    renders ``unknown``, never zero; a missing ``results`` list is UNKNOWN, not
+    a clean audit.
+    """
+    summary = report.get("summary")
+    if isinstance(summary, dict):
+        counts = (
+            f"errors={_count_or_unknown(summary.get('errors'))} "
+            f"warnings={_count_or_unknown(summary.get('warnings'))} "
+            f"info={_count_or_unknown(summary.get('info'))}"
+        )
+    else:
+        counts = "unknown (the report carried no summary)"
+    lines = [f"Failed by severity: {counts}"]
+
+    results = report.get("results")
+    if not isinstance(results, list):
+        lines.append("Failing rows: UNKNOWN (the report carried no results list)")
+        return lines
+    failing = [
+        row
+        for row in results
+        if isinstance(row, dict) and row.get("passed") is not True
+    ]
+    listable = report.get("listableResults")
+    truncated = report.get("resultsTruncated")
+    header = f"Failing rows ({len(failing)} listed"
+    if truncated is True:
+        header += (
+            f" of {_count_or_unknown(listable)} listable; the SDK cut the list at "
+            f"maxResults={_count_or_unknown(report.get('maxResults'))}"
+        )
+    elif truncated is not False:
+        header += "; whether the SDK truncated the list is unknown"
+    header += "):"
+    lines.append(header)
+    for row in failing[:limit]:
+        eid = row.get("elementId", "?")
+        rule_id = row.get("ruleId", "?")
+        severity = row.get("severity", "?")
+        constraints = row.get("constraintResults")
+        failed_constraints = [
+            cr
+            for cr in (constraints if isinstance(constraints, list) else [])
+            if isinstance(cr, dict) and cr.get("passed") is not True
+        ]
+        if not failed_constraints:
+            lines.append(f"  [{eid}] {rule_id} ({severity})")
+        for cr in failed_constraints:
+            lines.append(
+                f"  [{eid}] {rule_id} ({severity}): {cr.get('message') or '?'}"
+                f" (actual {cr.get('actualValue', '?')}, expected "
+                f"{cr.get('expectedValue', '?')})"
+            )
+    if len(failing) > limit:
+        lines.append(f"  ... and {len(failing) - limit} more rows not shown here")
+    return lines
+
+
+def _responsive_payload(data: Any) -> dict[str, Any] | None:
+    """The SDK's ``ResponsiveSnapshotsResponse``, or ``None`` for any other shape.
+
+    The SDK answers ``{snapshots: [...], method, mediaQueriesReevaluated, ...}``
+    (``specs/design-request.ts``). An unrecognised shape is an error, never one
+    empty viewport.
+    """
+    payload = _as_dict(data)
+    if isinstance(payload.get("snapshots"), list):
+        return payload
+    inner = _as_dict(payload.get("data"))
+    if isinstance(inner.get("snapshots"), list):
+        return inner
+    return None
+
+
+def _responsive_unrecognised(data: Any) -> str:
+    """Why a responsive answer could not be read, naming what arrived."""
+    if isinstance(data, dict):
+        shape = f"an object with keys {sorted(data.keys())}"
+    else:
+        shape = type(data).__name__
+    return (
+        "the responsive answer is not a {snapshots: [...]} payload "
+        f"(got {shape}); its viewports are UNKNOWN"
+    )
+
+
+def _responsive_header(payload: dict[str, Any]) -> list[str]:
+    """How the snapshots were taken: the method and its honesty fields."""
+    snapshots = payload["snapshots"]
+    mqr = payload.get("mediaQueriesReevaluated")
+    lines = [
+        f"Responsive snapshots ({len(snapshots)} of "
+        f"{_count_or_unknown(payload.get('requestedViewports'))} requested viewports):",
+        f"  method={payload.get('method', 'unknown')} "
+        f"mediaQueriesReevaluated={mqr if isinstance(mqr, bool) else 'unknown'} "
+        f"windowInnerWidth={_count_or_unknown(payload.get('windowInnerWidth'))}",
+    ]
+    if mqr is False:
+        lines.append(
+            "  NOTE: @media queries were NOT re-evaluated; each width is a "
+            "root-width constraint, not a real narrow viewport."
+        )
+    for field in ("timedOut", "framesSkipped"):
+        value = payload.get(field)
+        lines.append(f"  {field}={value if isinstance(value, bool) else 'unknown'}")
+    return lines
+
+
+def _quality_metric_lines(report: dict[str, Any], issue_limit: int) -> list[str]:
+    """Each enabled metric's own values, then ``topIssues``.
+
+    No aggregate: no overall or UX score and no per-category average, whether
+    or not the producer sends one. A score is judged by the caller.
+    """
+    lines: list[str] = []
+    metrics = report.get("metrics")
+    if not isinstance(metrics, list):
+        lines.append("Metrics: UNKNOWN (the report carried no metrics list)")
+    else:
+        enabled = [m for m in metrics if isinstance(m, dict) and m.get("enabled")]
+        lines.append(f"Metrics ({len(enabled)} enabled of {len(metrics)}):")
+        for m in enabled:
+            label = m.get("label") or m.get("metricId", "?")
+            score = m.get("score")
+            weight = m.get("weight")
+            findings = m.get("findings")
+            raw = m.get("rawData")
+            finding_count = (
+                str(len(findings)) if isinstance(findings, list) else "unknown"
+            )
+            lines.append(
+                f"  {label} [{m.get('category', '?')}]: "
+                f"score={score if _number(score) else 'unknown'} "
+                f"weight={weight if _number(weight) else 'unknown'} "
+                f"findings={finding_count}"
+            )
+            if isinstance(raw, dict) and raw:
+                lines.append(f"    rawData keys: {', '.join(sorted(raw.keys()))}")
+            for finding in (findings if isinstance(findings, list) else [])[:3]:
+                f = _as_dict(finding)
+                lines.append(
+                    f"    [{str(f.get('severity', 'info')).upper()}] "
+                    f"{f.get('message', '?')}"
+                )
+            if isinstance(findings, list) and len(findings) > 3:
+                lines.append(f"    ... and {len(findings) - 3} more findings")
+
+    top_issues = report.get("topIssues")
+    if not isinstance(top_issues, list):
+        lines.append("Top issues: UNKNOWN (the report carried no topIssues list)")
+    elif top_issues:
+        lines.append(f"Top issues ({len(top_issues)}):")
+        for raw_issue in top_issues[:issue_limit]:
+            issue = _as_dict(raw_issue)
+            lines.append(
+                f"  [{str(issue.get('severity', 'info')).upper()}] "
+                f"{issue.get('message', '?')}"
+            )
+            rec = issue.get("recommendation")
+            if rec:
+                lines.append(f"    → {rec}")
+    else:
+        lines.append("Top issues: none")
+    return lines
+
+
 def _percent(value: Any) -> str:
     """A 0-1 score as a percentage; UNKNOWN when the producer sent none."""
     return f"{value:.0%}" if _number(value) else "UNKNOWN"
@@ -3955,6 +4133,8 @@ Useful for verifying hover effects, focus rings, pressed feedback, etc.""",
         description="""Capture design snapshots at multiple viewport widths.
 
 On web: constrains the document width to simulate responsive breakpoints.
+@media queries are NOT re-evaluated (the window keeps its real width); the
+output reports the method, mediaQueriesReevaluated, timedOut and framesSkipped.
 On native (React Native): returns a single snapshot at the current device
 screen dimensions (RN cannot constrain screen width at runtime).
 
@@ -3982,7 +4162,9 @@ Or provide custom viewports as a label→width mapping.""",
         description="""Run a style audit against a loaded or provided style guide.
 
 Validates element computed styles against design tokens and rules defined
-in a StyleGuideConfig. Returns pass/fail results grouped by severity.
+in a StyleGuideConfig. Returns pass/fail counts, failure counts per severity,
+and the failing rows (element, rule, failed constraints), bounded by the SDK's
+maxResults; a truncated list says so.
 
 Load a guide first with sdk_design_load_guide, or provide one inline.""",
         inputSchema={
@@ -4030,7 +4212,7 @@ snapshots return only the current device dimensions, and pseudo-elements are emp
 
 Captures a full design snapshot, optionally captures state variations for
 interactive elements, runs a style audit if a guide is loaded, and evaluates
-overall UI quality with scores and actionable recommendations.
+per-metric UI quality scores (no aggregate) with actionable recommendations.
 
 This is the primary tool for design review — use it instead of calling
 individual design tools separately.""",
@@ -4111,10 +4293,11 @@ its assertion.""",
     ),
     types.Tool(
         name="sdk_design_evaluate",
-        description="""Run holistic UI quality evaluation. Returns the 0-100 overall and UX scores,
-per-metric scores across ux/density/spacing/color/typography/consistency,
-and actionable recommendations. These are values, not a verdict: judge the
-scores against the standard you are applying.
+        description="""Run holistic UI quality evaluation. Returns each enabled metric's 0-100 score,
+weight, findings and rawData keys across ux/density/spacing/color/typography/
+consistency, plus the top issues with actionable recommendations. There is no
+aggregate (no overall, UX or per-category score). These are values, not a
+verdict: judge the scores against the standard you are applying.
 
 Contexts adjust what's measured and how strictly:
 - general: Balanced evaluation for most web apps
@@ -7271,26 +7454,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             response = await ui_client.sdk_design_responsive(viewports, element_ids)
             if not response.success:
                 return _error_result(response)
-            relay_error = _relay_payload_error(response.data, "elements")
+            relay_error = _relay_payload_error(response.data, "snapshots")
             if relay_error is not None:
                 return _tool_error(f"Error: {relay_error}")
-            snapshots: list[dict[str, object]] = (
-                response.data if isinstance(response.data, list) else []
-            )
-            if isinstance(response.data, dict):
-                snapshots = (
-                    response.data.get("data", [])
-                    if "data" in response.data
-                    else [response.data]
-                )
-            result_lines = [f"Responsive snapshots ({len(snapshots)} viewports):"]
-            for snap in snapshots:
+            payload = _responsive_payload(response.data)
+            if payload is None:
+                return _tool_error(f"Error: {_responsive_unrecognised(response.data)}")
+            result_lines = _responsive_header(payload)
+            for raw_snap in payload["snapshots"]:
+                snap = _as_dict(raw_snap)
                 vw = snap.get("viewportWidth", "?")
                 label = snap.get("viewportLabel", "")
-                raw_elems = snap.get("elements", [])
-                vp_elements: list[dict[str, object]] = (
-                    raw_elems if isinstance(raw_elems, list) else []
-                )
+                raw_elems = snap.get("elements")
+                if not isinstance(raw_elems, list):
+                    result_lines.append(
+                        f"\n  === {label} ({vw}px) — elements UNKNOWN (no list) ==="
+                    )
+                    continue
+                vp_elements: list[Any] = raw_elems
                 result_lines.append(
                     f"\n  === {label} ({vw}px) — {len(vp_elements)} elements ==="
                 )
@@ -7326,32 +7507,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(_style_audit_unknown(report))
             result_lines = [
                 f"Style Audit: {report.get('guideName', '?')}",
-                f"Elements: {report.get('totalElements', 0)} | Rules: {report.get('totalRules', 0)}",
-                f"Passed: {report.get('passedCount', 0)} | Failed: {report.get('failedCount', 0)}",
+                f"Elements: {_count_or_unknown(report.get('totalElements'))} | "
+                f"Rules: {_count_or_unknown(report.get('totalRules'))}",
+                f"Passed: {report['passedCount']} | Failed: {report['failedCount']}",
+                *_style_audit_findings(report, limit=20),
             ]
-            summary = report.get("summary", {})
-            errors = summary.get("errors", [])
-            warnings = summary.get("warnings", [])
-            if errors:
-                result_lines.append(f"\nErrors ({len(errors)}):")
-                for r in errors[:20]:
-                    eid = r.get("elementId", "?")
-                    rule_id = r.get("ruleId", "?")
-                    for cr in r.get("constraintResults", []):
-                        if not cr.get("passed"):
-                            result_lines.append(
-                                f"  [{eid}] {rule_id}: {cr.get('message', '?')}"
-                            )
-            if warnings:
-                result_lines.append(f"\nWarnings ({len(warnings)}):")
-                for r in warnings[:20]:
-                    eid = r.get("elementId", "?")
-                    rule_id = r.get("ruleId", "?")
-                    for cr in r.get("constraintResults", []):
-                        if not cr.get("passed"):
-                            result_lines.append(
-                                f"  [{eid}] {rule_id}: {cr.get('message', '?')}"
-                            )
             return [types.TextContent(type="text", text="\n".join(result_lines))]
 
         elif name == "sdk_design_load_guide":
@@ -7451,29 +7611,32 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 resp_resp = await ui_client.sdk_design_responsive(
                     element_ids=element_ids
                 )
-                resp_error = (
-                    _relay_payload_error(resp_resp.data, "elements")
-                    if resp_resp.success
-                    else None
-                )
+                resp_error: str | None
+                if resp_resp.success:
+                    resp_error = _relay_payload_error(resp_resp.data, "snapshots")
+                    resp_payload = _responsive_payload(resp_resp.data)
+                else:
+                    # A responsive capture that did not run is reported, not
+                    # dropped from the review.
+                    resp_error = resp_resp.describe_error()
+                    resp_payload = None
                 if resp_error is not None:
                     result_lines.append(f"\nResponsive: UNKNOWN ({resp_error})")
-                elif resp_resp.success:
-                    resp_snaps: list[dict[str, object]] = (
-                        resp_resp.data if isinstance(resp_resp.data, list) else []
+                elif resp_payload is None:
+                    result_lines.append(
+                        f"\nResponsive: UNKNOWN ({_responsive_unrecognised(resp_resp.data)})"
                     )
-                    if isinstance(resp_resp.data, dict):
-                        resp_snaps = (
-                            resp_resp.data.get("data", [])
-                            if "data" in resp_resp.data
-                            else [resp_resp.data]
-                        )
-                    result_lines.append(f"\nResponsive ({len(resp_snaps)} viewports):")
-                    for snap in resp_snaps:
+                else:
+                    result_lines.append("")
+                    result_lines.extend(_responsive_header(resp_payload))
+                    for raw_snap in resp_payload["snapshots"]:
+                        snap = _as_dict(raw_snap)
                         label = snap.get("viewportLabel", "?")
                         vw = snap.get("viewportWidth", "?")
-                        elems = snap.get("elements", [])
-                        count = len(elems) if isinstance(elems, list) else 0
+                        elems = snap.get("elements")
+                        count = (
+                            str(len(elems)) if isinstance(elems, list) else "unknown"
+                        )
                         result_lines.append(f"  {label} ({vw}px): {count} elements")
 
             # 4. Style audit (if guide loaded)
@@ -7490,22 +7653,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"the style guide{found})"
                 )
             elif audit_resp.success:
-                report = audit_resp.data or {}
-                failed = report.get("failedCount", 0)
-                passed = report.get("passedCount", 0)
-                result_lines.append(f"\nStyle audit: {passed} passed, {failed} failed")
-                summary = report.get("summary", {})
-                for sev in ("errors", "warnings"):
-                    items = summary.get(sev, [])
-                    if items:
-                        result_lines.append(f"  {sev.title()} ({len(items)}):")
-                        for r in items[:10]:
-                            eid = r.get("elementId", "?")
-                            for cr in r.get("constraintResults", []):
-                                if not cr.get("passed"):
-                                    result_lines.append(
-                                        f"    [{eid}] {cr.get('message', '?')}"
-                                    )
+                report = _as_dict(audit_resp.data)
+                result_lines.append(
+                    f"\nStyle audit: {report['passedCount']} passed, "
+                    f"{report['failedCount']} failed"
+                )
+                result_lines.extend(
+                    f"  {line}" for line in _style_audit_findings(report, limit=10)
+                )
             else:
                 # Every audit failure is reported, including "no style guide":
                 # an audit that did not run is not a clean audit.
@@ -7519,40 +7674,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                         element_ids=element_ids,
                     )
                     if eval_resp.success:
-                        report = eval_resp.data or {}
-                        score = report.get("overallScore", "?")
-                        ux_score = report.get("uxScore", "?")
+                        report = _as_dict(eval_resp.data)
                         result_lines.append(
-                            f"\nQuality: {score}/100 (UX {ux_score}/100)"
+                            f"\nQuality evaluation ({report.get('contextName', '?')}):"
                         )
-
-                        # Category averages
-                        metrics = report.get("metrics", [])
-                        categories: dict[str, list[int]] = {}
-                        for m in metrics:
-                            if m.get("enabled"):
-                                cat = m.get("category", "?")
-                                if cat not in categories:
-                                    categories[cat] = []
-                                categories[cat].append(m.get("score", 0))
-                        if categories:
-                            cat_parts = []
-                            for cat, scores in categories.items():
-                                avg = sum(scores) / len(scores) if scores else 0
-                                cat_parts.append(f"{cat}={avg:.0f}")
-                            result_lines.append(f"  Categories: {', '.join(cat_parts)}")
-
-                        # Top 5 issues
-                        top_issues = report.get("topIssues", [])
-                        if top_issues:
-                            result_lines.append("  Top issues:")
-                            for issue in top_issues[:5]:
-                                severity = issue.get("severity", "info").upper()
-                                message = issue.get("message", "?")
-                                result_lines.append(f"    [{severity}] {message}")
-                                rec = issue.get("recommendation")
-                                if rec:
-                                    result_lines.append(f"      → {rec}")
+                        result_lines.extend(
+                            f"  {line}"
+                            for line in _quality_metric_lines(report, issue_limit=5)
+                        )
                     else:
                         result_lines.append(
                             f"\nQuality evaluation: {eval_resp.describe_error()}"
@@ -7602,54 +7731,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"Quality evaluation error: {response.describe_error()}"
                 )
 
-            report = response.data or {}
+            report = _as_dict(response.data)
             lines = [
                 f"=== UI Quality Evaluation ({report.get('contextName', '?')}) ===",
-                f"Overall Score: {report.get('overallScore', '?')}/100  UX Score: {report.get('uxScore', '?')}/100",
-                f"Elements: {report.get('totalElements', '?')}  Duration: {report.get('durationMs', '?')}ms",
+                f"Elements: {_count_or_unknown(report.get('totalElements'))}  "
+                f"Duration: {_count_or_unknown(report.get('durationMs'))}ms",
+                "",
+                *_quality_metric_lines(report, issue_limit=10),
             ]
-
-            # Category averages
-            metrics = report.get("metrics", [])
-            eval_categories: dict[str, list[int]] = {}
-            for m in metrics:
-                if m.get("enabled"):
-                    cat = m.get("category", "?")
-                    if cat not in eval_categories:
-                        eval_categories[cat] = []
-                    eval_categories[cat].append(m.get("score", 0))
-
-            if eval_categories:
-                lines.append("\nCategory Scores:")
-                for cat, scores in eval_categories.items():
-                    avg = sum(scores) / len(scores) if scores else 0
-                    lines.append(f"  {cat.title()}: {avg:.0f}/100")
-
-            # Per-metric breakdown
-            lines.append("\nMetric Details:")
-            for m in metrics:
-                if not m.get("enabled"):
-                    continue
-                score = m.get("score", 0)
-                label = m.get("label", m.get("metricId", "?"))
-                weight = m.get("weight", 0)
-                indicator = "✓" if score >= 80 else "⚠" if score >= 50 else "✗"
-                lines.append(
-                    f"  {indicator} {label}: {score}/100 (weight: {weight:.2f})"
-                )
-
-            # Top issues
-            top_issues = report.get("topIssues", [])
-            if top_issues:
-                lines.append(f"\nTop Issues ({len(top_issues)}):")
-                for issue in top_issues[:10]:
-                    severity = issue.get("severity", "info").upper()
-                    message = issue.get("message", "?")
-                    lines.append(f"  [{severity}] {message}")
-                    rec = issue.get("recommendation")
-                    if rec:
-                        lines.append(f"    → {rec}")
-
             return [types.TextContent(type="text", text="\n".join(lines))]
 
         elif name == "sdk_design_diff":
