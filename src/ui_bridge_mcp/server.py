@@ -458,8 +458,9 @@ def _audit_selection(report: dict[str, Any]) -> str:
     unreadable = report.get("unreadableElementCount")
     if _number(unreadable) and unreadable > 0:
         line += (
-            f"; {unreadable} registered elements had no readable node "
-            "(not in the selection)"
+            f"; {unreadable} registered elements had no HTMLElement node (not "
+            f"counted in the {_count_or_unknown(report.get('totalElements'))} "
+            "selected)"
         )
     return line
 
@@ -680,23 +681,23 @@ async def _capture_frame(
     return _as_dict(resp.data)
 
 
-# The longest edge an image derived from an over-the-inline-cap frame is
-# returned at: the long edge the runner's own ``claude`` contract bounds a
-# capture to. The comparison itself always runs at full resolution.
+# The longest edge a full-frame-sized image (a frame, a side-by-side
+# composite, a diff) is returned at: the long edge the runner's own ``claude``
+# contract bounds a capture to.
 _OVERSIZE_DISPLAY_LONG_EDGE = 1568
 
 
-def _displayable(b64_png: str, frame: dict[str, Any]) -> tuple[str, str | None]:
-    """An image for the caller, bounded when its frame was over the inline cap.
+def _displayable(b64_png: str, kept: str) -> tuple[str, str | None]:
+    """An image for the caller, bounded by its OWN size, whatever its source.
 
-    A frame read from the runner's cache (``fetched_from``) was too large to
-    return inline, and an image the size of it (the frame itself, a
-    side-by-side composite, a full-frame diff) is too. Such an image is
-    downscaled to ``_OVERSIZE_DISPLAY_LONG_EDGE`` and the returned note says
-    so; any other image is returned unchanged with no note.
+    Any image whose long edge is over ``_OVERSIZE_DISPLAY_LONG_EDGE`` is
+    downscaled to it, and the returned note says so; ``kept`` tells the reader
+    what was still done at full resolution (it is caller-specific: a diff ran
+    its comparison at full size, a delta's first frame ran none). The image's
+    own size decides, not the current frame's source: a diff or composite
+    built from a stored over-cap baseline or before frame is as large as that
+    frame even when the current capture came back inline.
     """
-    if "fetched_from" not in frame:
-        return b64_png, None
     from PIL import Image
 
     with Image.open(io.BytesIO(base64.b64decode(b64_png))) as img:
@@ -708,9 +709,9 @@ def _displayable(b64_png: str, frame: dict[str, Any]) -> tuple[str, str | None]:
     buf = io.BytesIO()
     small.save(buf, format="PNG")
     note = (
-        f"NOTE: the capture was over the runner's inline cap; this image is "
-        f"DOWNSCALED to {small.width}x{small.height} from {width}x{height} for "
-        "return (the comparison ran at full resolution)."
+        f"NOTE: this image is DOWNSCALED to {small.width}x{small.height} from "
+        f"{width}x{height} for return (long edge over "
+        f"{_OVERSIZE_DISPLAY_LONG_EDGE}px); {kept}."
     )
     return base64.b64encode(buf.getvalue()).decode(), note
 
@@ -781,8 +782,15 @@ def _annotated_result(
     snap_elements: list[dict[str, Any]],
     opts: AnnotationOptions,
     design_data: list[dict[str, Any]] | None,
-) -> list[types.TextContent | types.ImageContent]:
-    """The annotated frame, or the plain one when the scale is UNKNOWN."""
+) -> ToolResult:
+    """The annotated frame, or the plain one when the scale is UNKNOWN.
+
+    A frame of UNKNOWN format is an error, as it is for ``sdk_screenshot``:
+    it can be neither annotated nor returned as an image.
+    """
+    fmt = _frame_format(frame)
+    if fmt is None:
+        return _tool_error(_unknown_format_text(frame, "Annotated screenshot"))
     css = _css_viewport(snap_data)
     if css is None:
         scale_note = (
@@ -790,14 +798,6 @@ def _annotated_result(
             "element rects cannot be placed on the "
             f"{frame['width']}x{frame['height']}px frame."
         )
-        fmt = _frame_format(frame)
-        if fmt is None:
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"{scale_note}\n{_unknown_format_text(frame, 'Plain frame')}",
-                )
-            ]
         return [
             types.TextContent(
                 type="text",
@@ -7371,7 +7371,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 f"(threshold: {result.threshold_used * 100:.1f}%)\n"
                 f"Changed regions: {len(result.changed_regions)}"
             )
-            diff_b64, diff_note = _displayable(result.diff_image_b64, frame)
+            diff_b64, diff_note = _displayable(
+                result.diff_image_b64, "the comparison ran at full resolution"
+            )
             if diff_note is not None:
                 summary += f"\n{diff_note}"
 
@@ -7432,8 +7434,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 f"Change: {result.change_percentage}%\n"
                 f"Changed regions: {len(result.changed_regions)}"
             )
-            comparison_b64, comparison_note = _displayable(comparison_b64, frame)
-            after_diff_b64, after_diff_note = _displayable(result.diff_image_b64, frame)
+            comparison_b64, comparison_note = _displayable(
+                comparison_b64, "the comparison ran at full resolution"
+            )
+            after_diff_b64, after_diff_note = _displayable(
+                result.diff_image_b64, "the comparison ran at full resolution"
+            )
             for image_name, image_note in (
                 ("comparison", comparison_note),
                 ("diff", after_diff_note),
@@ -7493,8 +7499,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"{delta['total_tiles']} tiles"
                 )
                 # The encoder keeps the full frame; only the returned image is
-                # bounded when the frame was over the inline cap.
-                first_b64, first_note = _displayable(screenshot_b64, frame)
+                # bounded, by its own size.
+                first_b64, first_note = _displayable(
+                    screenshot_b64,
+                    "no comparison ran on this first frame; the delta encoder "
+                    "keeps it at full resolution for the next call",
+                )
                 if first_note is not None:
                     summary += f"\n{first_note}"
                 return [

@@ -67,9 +67,12 @@ CODE_INLINE_TOO_LARGE = "INLINE_TOO_LARGE"
 VISION_CACHE_PREFIX = "/ui-bridge/vision/cache/"
 _VISION_CACHE_PATH = re.compile(r"/ui-bridge/vision/cache/[0-9a-fA-F]{64}")
 # The most a cached capture read may be. The runner caps INLINE replies at
-# 5 MiB; an over-cap png_strict frame of a 4K / HiDPI window is tens of MiB.
+# 5 MiB. A raw 4K RGBA buffer is ~33 MB before PNG compression; no encoded
+# size was measured, so the bound is a ceiling, not a typical size.
 # Beyond this the read fails loudly rather than buffering an unbounded body.
 MAX_CACHED_CAPTURE_BYTES = 64 * 1024 * 1024
+# The most of a non-200 cache-read error body that is read to report it.
+MAX_CACHE_ERROR_BODY_BYTES = 64 * 1024
 
 # The closed Observation ``UnknownCode`` set, in the canonical wire-contract
 # order: the twin of the ui-bridge SDK's
@@ -551,7 +554,7 @@ class UIBridgeClient:
                     error=render_body_error(inner, response.text),
                     code=extract_code(inner) or code or CODE_PRODUCER_FAILED,
                     status=response.status_code,
-                    hint=inner.get("hint", data.get("hint")),
+                    hint=inner.get("hint") or data.get("hint"),
                 )
             if success:
                 return UIBridgeResponse(
@@ -845,19 +848,36 @@ class UIBridgeClient:
         try:
             async with client.stream("GET", full, timeout=DEFAULT_TIMEOUT) as response:
                 if response.status_code != 200:
-                    await response.aread()
-                    failure = self._http_status_failure(response)
-                    failure.error = (
-                        f"capture over the inline cap; reading it from {full} "
-                        f"failed: {failure.error}"
+                    head = b""
+                    async for chunk in response.aiter_bytes():
+                        head += chunk
+                        if len(head) >= MAX_CACHE_ERROR_BODY_BYTES:
+                            head = head[:MAX_CACHE_ERROR_BODY_BYTES]
+                            break
+                    text = head.decode("utf-8", "replace")
+                    try:
+                        error_body: Any = json.loads(text)
+                    except ValueError:
+                        error_body = None
+                    return UIBridgeResponse(
+                        success=False,
+                        error=(
+                            f"capture over the inline cap; reading it from {full} "
+                            f"failed: API error {response.status_code}: "
+                            f"{render_body_error(error_body, text)}"
+                        ),
+                        code=extract_code(error_body) or CODE_PRODUCER_FAILED,
+                        status=response.status_code,
+                        hint=error_body.get("hint")
+                        if isinstance(error_body, dict)
+                        else None,
                     )
-                    return failure
                 declared = response.headers.get("content-length")
                 if declared is not None and declared.isdigit():
                     if int(declared) > MAX_CACHED_CAPTURE_BYTES:
                         return UIBridgeResponse(
                             success=False,
-                            error=f"{too_big} (content-length {declared})",
+                            error=f"{too_big} (declared content-length {declared})",
                             code=CODE_PRODUCER_FAILED,
                             status=response.status_code,
                         )
@@ -868,7 +888,7 @@ class UIBridgeClient:
                     if total > MAX_CACHED_CAPTURE_BYTES:
                         return UIBridgeResponse(
                             success=False,
-                            error=too_big,
+                            error=f"{too_big} (counted while streaming)",
                             code=CODE_PRODUCER_FAILED,
                             status=response.status_code,
                         )

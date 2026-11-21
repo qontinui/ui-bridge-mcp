@@ -440,17 +440,29 @@ def test_screenshot_of_unknown_format_returns_no_image(
     assert _images(items) == []
 
 
-def test_unannotated_frame_of_unknown_format_returns_text_only(
+@pytest.mark.parametrize("with_viewport", [True, False])
+@pytest.mark.parametrize(
+    "tool,snapshot_route,arguments",
+    [
+        ("ui_annotated_screenshot", "/ui-bridge/control/snapshot", {}),
+        ("sdk_annotated_screenshot", "/ui-bridge/sdk/snapshot", {"target": "web"}),
+    ],
+)
+def test_annotated_frame_of_unknown_format_is_an_error(
+    tool: str,
+    snapshot_route: str,
+    arguments: dict[str, Any],
+    with_viewport: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot = {"elements": _SNAPSHOT["elements"]}
+    """As for sdk_screenshot: no image of UNKNOWN format, and isError."""
+    snapshot = _SNAPSHOT if with_viewport else {"elements": _SNAPSHOT["elements"]}
     frame = {**_frame(_NOT_AN_IMAGE), "format": None}
-    runner = Runner({"/ui-bridge/control/snapshot": snapshot, CAPTURE: frame})
+    runner = Runner({snapshot_route: snapshot, CAPTURE: frame})
     _install(monkeypatch, runner)
-    items, is_error = _call("ui_annotated_screenshot", {})
-    assert not is_error, _text(items)
-    assert "Annotation scale UNKNOWN" in _text(items)
-    assert "image format is UNKNOWN" in _text(items)
+    items, is_error = _call(tool, arguments)
+    assert is_error
+    assert "Annotated screenshot: the frame's image format is UNKNOWN" in _text(items)
     assert _images(items) == []
 
 
@@ -481,6 +493,9 @@ def test_delta_first_frame_over_the_cap_is_returned_downscaled(
     assert not is_error, _text(items)
     assert "First capture (full image): 3200x1600px" in _text(items)
     assert "DOWNSCALED to 1568x784 from 3200x1600" in _text(items)
+    # The note is the delta's own: no comparison ran on a first frame.
+    assert "no comparison ran on this first frame" in _text(items)
+    assert "the comparison ran at full resolution" not in _text(items)
     shown = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data)))
     assert shown.size == (1568, 784)
 
@@ -496,18 +511,21 @@ def test_after_composite_over_the_cap_is_returned_downscaled(
     assert not is_error, _text(items)
     assert "Change: 0.0%" in _text(items)
     assert "[comparison] NOTE:" in _text(items)
-    assert "[diff] NOTE: the capture was over the runner's inline cap" in _text(items)
+    assert "[diff] NOTE: this image is DOWNSCALED to 1568x784 from 2000x1000" in _text(
+        items
+    )
+    assert "the comparison ran at full resolution" in _text(items)
     for image in _images(items):
         size = Image.open(io.BytesIO(base64.b64decode(image.data))).size
         assert max(size) <= 1568
 
 
-def test_frame_under_the_cap_is_not_downscaled(
+def test_image_within_the_bound_is_not_downscaled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only a frame read from the cache is bounded; an inline one is untouched."""
-    b64 = _png(2000, 1000)
-    runner = Runner({CAPTURE: _frame(b64, 2000, 1000)})
+    """An image whose long edge is within 1568px is returned untouched."""
+    b64 = _png(1500, 800)
+    runner = Runner({CAPTURE: _frame(b64, 1500, 800)})
     _install(monkeypatch, runner)
     items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
     assert not is_error, _text(items)
@@ -515,8 +533,67 @@ def test_frame_under_the_cap_is_not_downscaled(
     assert _images(items)[0].data == b64
 
 
-def test_cached_capture_read_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cache body over MAX_CACHED_CAPTURE_BYTES fails loudly, unread."""
+def test_inline_frame_over_the_bound_is_downscaled_by_its_own_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The returned image's own size decides, not whether it came inline."""
+    runner = Runner({CAPTURE: _frame(_png(2000, 1000), 2000, 1000)})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
+    assert not is_error, _text(items)
+    assert "DOWNSCALED to 1568x784 from 2000x1000" in _text(items)
+
+
+def test_diff_from_an_over_cap_baseline_and_an_inline_frame_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The diff is as large as the stored baseline, though the frame is inline."""
+    frames = iter(
+        [
+            # The baseline: over the inline cap, read from the cache.
+            _too_large(),
+            # The current frame: small enough to come back inline.
+            {"success": True, "data": _frame(_png(400, 200), 400, 200)},
+        ]
+    )
+
+    def capture(body: Any) -> httpx.Response:
+        answer = next(frames)
+        return (
+            answer
+            if isinstance(answer, httpx.Response)
+            else httpx.Response(200, json=answer)
+        )
+
+    runner = Runner(
+        {
+            CAPTURE: capture,
+            _CACHE_URL: httpx.Response(
+                200,
+                content=_big_png(3200, 1600),
+                headers={"content-type": "image/png"},
+            ),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert not is_error, _text(items)
+    items, is_error = _call(
+        "sdk_screenshot_diff", {"baseline_key": "home", "target": "web"}, runner
+    )
+    assert not is_error, _text(items)
+    assert "NOTE: this image is DOWNSCALED" in _text(items)
+    assert "the comparison ran at full resolution" in _text(items)
+    size = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data))).size
+    assert max(size) <= 1568
+
+
+def test_cached_capture_read_is_capped_by_declared_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body whose content-length is over the cap is refused before reading."""
     import ui_bridge_mcp.client as client_mod
 
     monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
@@ -527,6 +604,69 @@ def test_cached_capture_read_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert is_error
     assert "more than MAX_CACHED_CAPTURE_BYTES=1024 bytes" in _text(items)
+    assert "(declared content-length " in _text(items)
+    assert "(counted while streaming)" not in _text(items)
+
+
+class _Chunks(httpx.AsyncByteStream):
+    """A chunked body with no content-length."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+
+    async def __aiter__(self) -> Any:
+        for chunk in self.chunks:
+            yield chunk
+
+
+def test_cached_capture_read_is_capped_while_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no content-length, the streaming count stops the read."""
+    import ui_bridge_mcp.client as client_mod
+
+    monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
+    runner = Runner(
+        {
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(
+                200,
+                stream=_Chunks([b"\x89PNG" + b"\0" * 600, b"\0" * 600, b"\0" * 600]),
+                headers={"content-type": "image/png"},
+            ),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert "more than MAX_CACHED_CAPTURE_BYTES=1024 bytes" in _text(items)
+    assert "(counted while streaming)" in _text(items)
+    assert "(declared content-length " not in _text(items)
+
+
+def test_cache_read_error_body_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-200 cache answer is reported from at most 64 KiB of its body."""
+    import ui_bridge_mcp.client as client_mod
+
+    monkeypatch.setattr(client_mod, "MAX_CACHE_ERROR_BODY_BYTES", 16)
+    runner = Runner(
+        {
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(
+                404,
+                stream=_Chunks([b"no cache entry for", b" " + b"z" * 5000]),
+            ),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert _text(items).endswith("API error 404: no cache entry f")
+    assert "zzzz" not in _text(items)
 
 
 @pytest.mark.parametrize(
@@ -714,6 +854,29 @@ def test_delta_first_capture_returns_the_full_frame(
     items, is_error = _call("sdk_screenshot_delta", {"target": "web"}, runner)
     assert not is_error, _text(items)
     assert "No visual changes detected." in _text(items)
+
+
+def test_hint_falls_back_to_the_outer_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inner failure with no hint takes the envelope's own."""
+    body = {
+        "success": True,
+        "hint": {"url": "outer"},
+        "data": {"success": False, "error": "no"},
+    }
+    runner = Runner({CAPTURE: httpx.Response(200, json=body)})
+    c = _install(monkeypatch, runner)
+
+    async def go() -> Any:
+        try:
+            return await c.vision_capture()
+        finally:
+            await c.close()
+
+    resp = asyncio.run(go())
+    assert not resp.success
+    assert resp.hint == {"url": "outer"}
 
 
 @pytest.mark.parametrize(

@@ -850,6 +850,18 @@ FAILURE_PATHS: list[FailurePath] = [
         )
     ],
     FailurePath(
+        "_annotated_result: _unknown_format_text(frame, 'Annotated screenshot')",
+        "ui_annotated_screenshot",
+        {},
+        {
+            "/ui-bridge/control/snapshot": ok({"elements": []}),
+            "/ui-bridge/vision/capture": ok(
+                {"base64": "aGk=", "width": 10, "height": 10, "format": None}
+            ),
+        },
+        "Annotated screenshot: the frame's image format is UNKNOWN",
+    ),
+    FailurePath(
         "sdk_screenshot: _unknown_format_text(frame, f\"Screenshot of '{target}'\")",
         "sdk_screenshot",
         {"target": "web"},
