@@ -436,22 +436,34 @@ def _audit_issue_lines(issues: list[Any], limit: int) -> list[str]:
     return lines
 
 
-def _sdk_truncation_note(report: dict[str, Any]) -> str:
+def _sdk_truncation_note(report: dict[str, Any], sent: int) -> str:
     """What follows "N listed" in a findings header: the SDK's own list bound.
 
     Both audit modes bound their listed findings by ``maxResults``
     (``resultsTruncated``, ``listableResults``; SDK ``specs/design-request.ts``
-    ``AuditResultBounds``). A missing flag is unknown, never "not truncated".
+    ``AuditResultBounds``). ``sent`` is how many readable rows the report
+    actually carried. A missing flag is unknown, never "not truncated"; a
+    ``listableResults`` that differs from ``sent`` is shown, never hidden, and
+    when the list claims not to be truncated that difference is called out as
+    the SDK's counts disagreeing.
     """
     truncated = report.get("resultsTruncated")
+    listable = report.get("listableResults")
+    differs = _number(listable) and listable != sent
     if truncated is True:
         return (
-            f" of {_count_or_unknown(report.get('listableResults'))} listable; "
+            f" of {_count_or_unknown(listable)} listable; "
             "the SDK cut the list at "
             f"maxResults={_count_or_unknown(report.get('maxResults'))}"
         )
     if truncated is not False:
-        return "; whether the SDK truncated the list is unknown"
+        of = f" of {listable} listable" if differs else ""
+        return f"{of}; whether the SDK truncated the list is unknown"
+    if differs:
+        return (
+            f" of {listable} listable; the SDK's counts disagree: it sent {sent} "
+            "row(s) and says the list was not truncated"
+        )
     return ""
 
 
@@ -622,7 +634,7 @@ def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
         lines.append("Issues: UNKNOWN (the report carried no issues list)")
     else:
         rows = [raw for raw in issues if isinstance(raw, dict)]
-        header = f"Issues ({len(rows)} listed{_sdk_truncation_note(report)}"
+        header = f"Issues ({len(rows)} listed{_sdk_truncation_note(report, len(rows))}"
         header += "):" if issues else ")"
         lines.append(header)
         lines.extend(_audit_issue_lines(issues, limit=limit))
@@ -673,7 +685,8 @@ def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
 
     ``summary.errors`` / ``summary.warnings`` / ``summary.info`` are COUNTS
     (SDK ``specs/design-request.ts`` ``StyleGuideDesignAuditReport``); the
-    failing rows live in ``results[]`` only, bounded by the SDK's ``maxResults``
+    failing rows live in ``results[]`` only (an entry that is not an object
+    is counted as malformed, never dropped), bounded by the SDK's ``maxResults``
     (``resultsTruncated``, ``listableResults``). A missing ``summary`` or count
     renders ``unknown``, never zero; a missing ``results`` list is UNKNOWN, not
     a clean audit.
@@ -693,12 +706,12 @@ def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
     if not isinstance(results, list):
         lines.append("Failing rows: UNKNOWN (the report carried no results list)")
         return lines
-    failing = [
-        row
-        for row in results
-        if isinstance(row, dict) and row.get("passed") is not True
-    ]
-    lines.append(f"Failing rows ({len(failing)} listed{_sdk_truncation_note(report)}):")
+    rows = [row for row in results if isinstance(row, dict)]
+    failing = [row for row in rows if row.get("passed") is not True]
+    lines.append(
+        f"Failing rows ({len(failing)} listed"
+        f"{_sdk_truncation_note(report, len(rows))}):"
+    )
     for row in failing[:limit]:
         eid = row.get("elementId", "?")
         rule_id = row.get("ruleId", "?")
@@ -719,6 +732,9 @@ def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
             )
     if len(failing) > limit:
         lines.append(f"  ... and {len(failing) - limit} more rows not shown here")
+    malformed = len(results) - len(rows)
+    if malformed:
+        lines.append(f"  {malformed} malformed row(s) ignored (not an object)")
     return lines
 
 
@@ -8170,9 +8186,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     *_style_audit_findings(report, limit=20),
                 ]
             )
-            if not isinstance(report.get("results"), list):
-                # Its failing rows are UNKNOWN: flagged like the heuristic
-                # report with no issues list, with the counts kept.
+            results = report.get("results")
+            if not isinstance(results, list) or (
+                results and not any(isinstance(row, dict) for row in results)
+            ):
+                # Its failing rows are UNKNOWN (no list, or no readable row):
+                # flagged like the heuristic report with no issues list, with
+                # the counts kept.
                 return _tool_error(style_text)
             return [types.TextContent(type="text", text=style_text)]
 

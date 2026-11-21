@@ -430,6 +430,7 @@ def test_heuristic_audit_without_coverage_says_not_reported(
         if k not in ("heuristicCoverage", "resultsTruncated")
     }
     report["issues"] = []
+    report["listableResults"] = 0
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
     )
@@ -966,7 +967,8 @@ def test_heuristic_issues_with_no_object_row_is_unknown(
     )
     text, is_error = _call("sdk_design_audit", {})
     assert is_error
-    assert "Issues (0 listed):" in text
+    # The SDK said 2 were listable; none of the 2 it sent is readable.
+    assert "Issues (0 listed of 2 listable; the SDK's counts disagree" in text
     assert "  2 malformed issue row(s) ignored (not an object)" in text
     assert "Reason: No style guide was provided" in text
 
@@ -1013,6 +1015,102 @@ def test_design_audit_description_names_the_heuristic_mode() -> None:
             or "contrast, select-dark-mode, font-size, touch-target" in description
         ), name
         assert "no pass/fail verdict" in description.replace("NO", "no"), name
+
+
+def test_style_guide_results_non_object_rows_are_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {**_AUDIT, "results": [*_AUDIT["results"], "junk", 7]}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Failing rows (2 listed of 3 listable;" in text
+    assert "  2 malformed row(s) ignored (not an object)" in text
+
+
+def test_style_guide_results_with_no_object_row_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {**_AUDIT, "results": ["junk"]}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert text.startswith("Style Audit: brand\n")
+    assert "Failing rows (0 listed of 3 listable;" in text
+    assert "  1 malformed row(s) ignored (not an object)" in text
+
+
+def test_style_guide_empty_results_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        **_AUDIT,
+        "passedCount": 4,
+        "failedCount": 0,
+        "summary": {"errors": 0, "warnings": 0, "info": 0},
+        "results": [],
+        "listableResults": 0,
+        "resultsTruncated": False,
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Failing rows (0 listed):" in text
+
+
+def test_listable_count_that_disagrees_with_an_untruncated_list_is_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {**_HEURISTIC_AUDIT, "listableResults": 5, "resultsTruncated": False}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert (
+        "Issues (2 listed of 5 listable; the SDK's counts disagree: it sent 2 "
+        "row(s) and says the list was not truncated):"
+    ) in text
+
+    report = {**_AUDIT, "listableResults": 4, "resultsTruncated": False}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert (
+        "Failing rows (2 listed of 4 listable; the SDK's counts disagree: it sent "
+        "2 row(s) and says the list was not truncated):"
+    ) in text
+
+
+def test_listable_count_is_shown_when_truncation_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {k: v for k, v in _HEURISTIC_AUDIT.items() if k != "resultsTruncated"}
+    report["listableResults"] = 9
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert (
+        "Issues (2 listed of 9 listable; whether the SDK truncated the list is "
+        "unknown):"
+    ) in text
+
+
+def test_matching_listable_count_adds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: _HEURISTIC_AUDIT})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "Issues (2 listed):" in text
 
 
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
