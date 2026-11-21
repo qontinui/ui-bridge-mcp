@@ -67,9 +67,11 @@ CODE_INLINE_TOO_LARGE = "INLINE_TOO_LARGE"
 VISION_CACHE_PREFIX = "/ui-bridge/vision/cache/"
 _VISION_CACHE_PATH = re.compile(r"/ui-bridge/vision/cache/[0-9a-fA-F]{64}")
 # The most a cached capture read may be. The runner caps INLINE replies at
-# 5 MiB. A raw 4K RGBA buffer is ~33 MB before PNG compression; no encoded
-# size was measured, so the bound is a ceiling, not a typical size.
-# Beyond this the read fails loudly rather than buffering an unbounded body.
+# 5 MiB, and each INLINE_TOO_LARGE answer reports the capture's encoded size
+# in ``hint.bytes``; the author of this bound measured none. A raw 4K RGBA
+# buffer is ~33 MB before PNG compression, so the bound is a ceiling, not a
+# typical size. Beyond it the read is refused (by ``hint.bytes`` before any
+# request, else by content-length or the streamed count), never buffered.
 MAX_CACHED_CAPTURE_BYTES = 64 * 1024 * 1024
 # The most of a non-200 cache-read error body that is read to report it.
 MAX_CACHE_ERROR_BODY_BYTES = 64 * 1024
@@ -811,7 +813,26 @@ class UIBridgeClient:
             if response.code != CODE_INLINE_TOO_LARGE:
                 return response
             url = _inline_too_large_url(response)
+            hint = response.hint if isinstance(response.hint, dict) else {}
+            size = hint.get("bytes")
             if follow_oversize and url is not None:
+                if (
+                    isinstance(size, int)
+                    and not isinstance(size, bool)
+                    and size > MAX_CACHED_CAPTURE_BYTES
+                ):
+                    return UIBridgeResponse(
+                        success=False,
+                        error=(
+                            f"capture is {size} bytes (the runner's hint.bytes), "
+                            "over this client's MAX_CACHED_CAPTURE_BYTES="
+                            f"{MAX_CACHED_CAPTURE_BYTES}; it was not read from "
+                            f"GET {self.base_url}{url}"
+                        ),
+                        code=CODE_INLINE_TOO_LARGE,
+                        status=response.status,
+                        hint=response.hint,
+                    )
                 return await self._read_cached_capture(url)
             where = (
                 f"Fetch it with GET {self.base_url}{url}."
@@ -849,12 +870,19 @@ class UIBridgeClient:
             async with client.stream("GET", full, timeout=DEFAULT_TIMEOUT) as response:
                 if response.status_code != 200:
                     head = b""
+                    cut = False
                     async for chunk in response.aiter_bytes():
                         head += chunk
-                        if len(head) >= MAX_CACHE_ERROR_BODY_BYTES:
+                        if len(head) > MAX_CACHE_ERROR_BODY_BYTES:
                             head = head[:MAX_CACHE_ERROR_BODY_BYTES]
+                            cut = True
                             break
                     text = head.decode("utf-8", "replace")
+                    cut_note = (
+                        f" (truncated at {MAX_CACHE_ERROR_BODY_BYTES} bytes)"
+                        if cut
+                        else ""
+                    )
                     try:
                         error_body: Any = json.loads(text)
                     except ValueError:
@@ -864,7 +892,7 @@ class UIBridgeClient:
                         error=(
                             f"capture over the inline cap; reading it from {full} "
                             f"failed: API error {response.status_code}: "
-                            f"{render_body_error(error_body, text)}"
+                            f"{render_body_error(error_body, text)}{cut_note}"
                         ),
                         code=extract_code(error_body) or CODE_PRODUCER_FAILED,
                         status=response.status_code,

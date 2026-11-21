@@ -4,8 +4,8 @@ Plan 2026-11-19-the-ui-bridge-design-surface-is-blocked-behind-a-stalled-pr-
 unpublished-packages-and-a-score, Phase 6.
 
 ``/ui-bridge/sdk/screenshot`` and ``/ui-bridge/control/annotated-screenshot``
-were deleted from the runner on 2026-05-13, so every screenshot tool answered
-``Not found``. They now capture through the runner's one capture route with
+were deleted from the runner on 2026-05-14 (runner commit 940fd0f40), so
+every screenshot tool answered ``Not found``. They now capture through the runner's one capture route with
 ``inline: true`` (runner ``vision_routes.rs`` ``CaptureRequest``); annotation,
 diff, crop and delta stay client-side in ``screenshot.py``.
 """
@@ -306,14 +306,15 @@ CACHE = "/ui-bridge/vision/cache/"
 _CACHE_URL = CACHE + "a" * 64
 
 
-def _too_large() -> httpx.Response:
+def _too_large(size: int = 9000000) -> httpx.Response:
+    """The runner's 413; ``size`` is the encoded size it reports in hint.bytes."""
     return httpx.Response(
         413,
         json={
             "success": False,
-            "error": "capture is 9000000 bytes, over the 5242880-byte inline cap",
+            "error": f"capture is {size} bytes, over the 5242880-byte inline cap",
             "code": "INLINE_TOO_LARGE",
-            "hint": {"url": _CACHE_URL, "bytes": 9000000, "maxBytes": 5242880},
+            "hint": {"url": _CACHE_URL, "bytes": size, "maxBytes": 5242880},
         },
     )
 
@@ -472,11 +473,11 @@ def _big_png(width: int, height: int) -> bytes:
     return buf.getvalue()
 
 
-def _oversize_runner(routes: dict[str, Any], png: bytes) -> Runner:
+def _oversize_runner(routes: dict[str, Any], png: bytes, size: int = 9000000) -> Runner:
     return Runner(
         {
             **routes,
-            CAPTURE: _too_large(),
+            CAPTURE: _too_large(size),
             _CACHE_URL: httpx.Response(
                 200, content=png, headers={"content-type": "image/png"}
             ),
@@ -597,7 +598,8 @@ def test_cached_capture_read_is_capped_by_declared_length(
     import ui_bridge_mcp.client as client_mod
 
     monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
-    runner = _oversize_runner({}, _big_png(400, 400) + b"\0" * 4096)
+    # hint.bytes under-reports (512), so only the transport check can fire.
+    runner = _oversize_runner({}, _big_png(400, 400) + b"\0" * 4096, size=512)
     _install(monkeypatch, runner)
     items, is_error = _call(
         "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
@@ -626,9 +628,10 @@ def test_cached_capture_read_is_capped_while_streaming(
     import ui_bridge_mcp.client as client_mod
 
     monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
+    # hint.bytes under-reports (512), so only the streaming count can fire.
     runner = Runner(
         {
-            CAPTURE: _too_large(),
+            CAPTURE: _too_large(512),
             _CACHE_URL: httpx.Response(
                 200,
                 stream=_Chunks([b"\x89PNG" + b"\0" * 600, b"\0" * 600, b"\0" * 600]),
@@ -665,8 +668,110 @@ def test_cache_read_error_body_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
         "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
     )
     assert is_error
-    assert _text(items).endswith("API error 404: no cache entry f")
+    assert _text(items).endswith(
+        "API error 404: no cache entry f (truncated at 16 bytes)"
+    )
     assert "zzzz" not in _text(items)
+
+
+def test_cache_read_error_body_within_the_bound_is_not_marked_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = Runner(
+        {
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(404, stream=_Chunks([b"no cache entry"])),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert _text(items).endswith("API error 404: no cache entry")
+    assert "truncated" not in _text(items)
+
+
+def test_hint_bytes_over_the_cap_is_refused_before_any_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner's own hint.bytes refuses the read; the cache is never asked."""
+    import ui_bridge_mcp.client as client_mod
+
+    monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
+    runner = _oversize_runner({}, _big_png(40, 20))
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert (
+        "capture is 9000000 bytes (the runner's hint.bytes), over this client's "
+        "MAX_CACHED_CAPTURE_BYTES=1024; it was not read"
+    ) in _text(items)
+    assert [p for p, _ in runner.requests if p.startswith(CACHE)] == []
+
+
+@pytest.mark.parametrize(
+    "tool,snapshot_route,arguments",
+    [
+        ("ui_element_screenshot", "/ui-bridge/control/snapshot", {}),
+        ("sdk_element_screenshot", "/ui-bridge/sdk/snapshot", {"target": "web"}),
+    ],
+)
+@pytest.mark.parametrize(
+    "element_size,scale,expected",
+    [
+        # A large element at scale 1.
+        ((3000, 1000), 1.0, (1568, 523)),
+        # A modest element pushed over the bound by scale > 1.
+        ((1000, 500), 2.0, (1568, 784)),
+    ],
+)
+def test_element_crop_over_the_bound_is_downscaled(
+    tool: str,
+    snapshot_route: str,
+    arguments: dict[str, Any],
+    element_size: tuple[int, int],
+    scale: float,
+    expected: tuple[int, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    width, height = element_size
+    snapshot = {
+        "elements": [
+            {
+                "id": "big",
+                "state": {"rect": {"x": 0, "y": 0, "width": width, "height": height}},
+            }
+        ],
+        "viewport": {"viewportWidth": 3200, "viewportHeight": 1600},
+    }
+    runner = Runner(
+        {snapshot_route: snapshot, CAPTURE: _frame(_png(3200, 1600), 3200, 1600)}
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        tool, {**arguments, "element_id": "big", "padding": 0, "scale": scale}
+    )
+    assert not is_error, _text(items)
+    shown = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data)))
+    assert shown.size == expected
+    assert "the crop was taken from the full-resolution frame" in _text(items)
+    assert "DOWNSCALED" in _text(items)
+
+
+def test_element_crop_within_the_bound_carries_no_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = Runner({"/ui-bridge/control/snapshot": _SNAPSHOT, CAPTURE: _frame()})
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "ui_element_screenshot", {"element_id": "btn", "padding": 0}
+    )
+    assert not is_error, _text(items)
+    assert _text(items) == ""
+    assert len(_images(items)) == 1
 
 
 @pytest.mark.parametrize(
@@ -863,7 +968,9 @@ def test_hint_falls_back_to_the_outer_envelope(
     body = {
         "success": True,
         "hint": {"url": "outer"},
-        "data": {"success": False, "error": "no"},
+        # An explicit null: the old `inner.get("hint", data.get("hint"))`
+        # returned it instead of falling back.
+        "data": {"success": False, "error": "no", "hint": None},
     }
     runner = Runner({CAPTURE: httpx.Response(200, json=body)})
     c = _install(monkeypatch, runner)

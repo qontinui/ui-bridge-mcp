@@ -687,7 +687,7 @@ async def _capture_frame(
 _OVERSIZE_DISPLAY_LONG_EDGE = 1568
 
 
-def _displayable(b64_png: str, kept: str) -> tuple[str, str | None]:
+def _displayable(b64_png: str, kept: str, fmt: str = "png") -> tuple[str, str | None]:
     """An image for the caller, bounded by its OWN size, whatever its source.
 
     Any image whose long edge is over ``_OVERSIZE_DISPLAY_LONG_EDGE`` is
@@ -706,8 +706,12 @@ def _displayable(b64_png: str, kept: str) -> tuple[str, str | None]:
             return b64_png, None
         small = img.copy()
     small.thumbnail((_OVERSIZE_DISPLAY_LONG_EDGE, _OVERSIZE_DISPLAY_LONG_EDGE))
+    # Re-encoded in the image's own format (``fmt``), so its MIME type holds.
+    pil_format = {"jpeg": "JPEG", "webp": "WEBP"}.get(fmt, "PNG")
+    if pil_format == "JPEG" and small.mode not in ("RGB", "L"):
+        small = small.convert("RGB")
     buf = io.BytesIO()
-    small.save(buf, format="PNG")
+    small.save(buf, format=pil_format)
     note = (
         f"NOTE: this image is DOWNSCALED to {small.width}x{small.height} from "
         f"{width}x{height} for return (long edge over "
@@ -7314,13 +7318,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             )
             if not cropped:
                 return _tool_error(f"Element '{element_id}' has no bounding rect.")
-            return [
+            # A large element, or a scale above 1, can make the crop itself
+            # exceed the bound every returned image keeps.
+            cropped, crop_note = _displayable(
+                cropped,
+                "the crop was taken from the full-resolution frame",
+                fmt=fmt,
+            )
+            crop_result: list[types.TextContent | types.ImageContent] = []
+            if crop_note is not None:
+                crop_result.append(types.TextContent(type="text", text=crop_note))
+            crop_result.append(
                 types.ImageContent(
                     type="image",
                     data=cropped,
                     mimeType=mime_type_for_format(fmt),
                 )
-            ]
+            )
+            return crop_result
 
         # Screenshot baseline management
         elif name == "sdk_screenshot_baseline_save":
