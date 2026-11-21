@@ -674,7 +674,40 @@ def test_http_422_refusal_body_keeps_refusal_and_next_action(
     assert 'context: {"element_id":"btn-sav"}' in lines
 
 
-def test_refusal_code_is_the_code_when_no_other_field_carries_one() -> None:
+def test_error_detail_code_wins_over_refusal_code() -> None:
+    body = {
+        "error": "x",
+        "error_detail": {"code": "ELEMENT_NOT_FOUND"},
+        "refusal": {"code": "element_not_found", "next_action": {"kind": "resnapshot"}},
+    }
+    assert extract_code(body) == "ELEMENT_NOT_FOUND"
+
+
+@pytest.mark.parametrize(
+    ("refusal", "rendered"),
+    [
+        ({}, []),
+        ({"detail": "d"}, ['refusal: {"detail":"d"}']),
+        (
+            {
+                "code": "c",
+                "next_action": {"kind": "none_terminal"},
+                "glossary_terms": [None, "", "term"],
+            },
+            ["refusal: c", "next: none_terminal", "glossary: term"],
+        ),
+    ],
+)
+def test_degenerate_refusals_render_no_noise(
+    refusal: dict[str, Any], rendered: list[str]
+) -> None:
+    body = {"error": "x", "refusal": refusal, "error_detail": {"recovery": ""}}
+    assert render_body_error(body, "").splitlines() == ["x", *rendered]
+
+
+def test_refusal_code_is_the_code_when_no_other_field_carries_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     body = {
         "error": "x",
         "refusal": {
@@ -685,10 +718,15 @@ def test_refusal_code_is_the_code_when_no_other_field_carries_one() -> None:
             "source": "runner",
         },
     }
-    assert extract_code(body) == "upstream_timeout"
-    lines = render_body_error(body, "").splitlines()
-    assert lines == [
-        "x",
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"success": False, **body})
+
+    resp = _run(_mocked(monkeypatch, handler))
+    assert resp.code == "upstream_timeout"
+    assert resp.error is not None
+    assert resp.error.splitlines() == [
+        "API error 503: x",
         "refusal: upstream_timeout",
         "next: retry_later retry_after_s=2",
     ]
@@ -703,9 +741,15 @@ def test_refusal_code_is_the_code_when_no_other_field_carries_one() -> None:
         # NextAction (qontinui-runner#3131 and later).
         ({"kind": "resnapshot"}, "resnapshot"),
         ({"kind": "retry_later", "retry_after_s": 1}, "retry_later retry_after_s=1"),
+        # A retry_later target is what to re-check first, never what to retry.
         (
-            {"kind": "retry_later", "target": "GET /x", "retry_after_s": 3},
-            "retry_later target=GET /x retry_after_s=3",
+            {"kind": "retry_later", "target": "the saved file", "retry_after_s": 3},
+            "retry_later retry_after_s=3 check_first=the saved file",
+        ),
+        # Fields this client does not name are kept, not dropped.
+        (
+            {"kind": "unrecognised", "unrecognised_kind": "reboot"},
+            "unrecognised unrecognised_kind=reboot",
         ),
         (
             {"kind": "set_setting", "target": "paths.plans_dir"},

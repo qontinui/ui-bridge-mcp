@@ -353,24 +353,33 @@ def render_next_action(value: Any) -> str | None:
     ``RecoveryHint`` with the shared refusal vocabulary's ``NextAction``
     (qontinui-runner#3131). Both shapes are read:
 
-    - ``NextAction`` — ``{"kind": "retry_later", "target"?: str,
-      "retry_after_s"?: int}``, rendered ``retry_later target=<t>
-      retry_after_s=<n>`` with the absent parts left out;
+    - ``NextAction`` — ``{"kind", "target"?, "retry_after_s"?}``, rendered as
+      the kind followed by ``key=value`` parts. On ``retry_later`` the target
+      is what to re-check BEFORE retrying, because the earlier attempt (a
+      write) may already have taken effect, so it renders as
+      ``check_first=<t>`` rather than as something to retry. Every other key
+      (a relay's ``unrecognised_kind``, a field added later) is kept as
+      ``key=value`` rather than dropped;
     - the older ``RecoveryHint`` serde spelling — a bare string
       (``"RESNAPSHOT"``) or a one-key object (``{"RETRY_AFTER_MS": 1000}``) —
       rendered verbatim, unmapped, so the reader sees what the runner said.
 
-    Returns ``None`` for an absent value. Any other shape is compacted as JSON
-    rather than dropped.
+    Returns ``None`` for an absent or empty value. Any other shape is
+    compacted as JSON rather than dropped.
     """
-    if value is None:
+    if value is None or value == "" or value == {}:
         return None
     if isinstance(value, dict) and isinstance(value.get("kind"), str):
-        parts = [value["kind"]]
-        if value.get("target") is not None:
-            parts.append(f"target={_compact(value['target'])}")
+        kind = value["kind"]
+        parts = [kind]
         if value.get("retry_after_s") is not None:
             parts.append(f"retry_after_s={_compact(value['retry_after_s'])}")
+        if value.get("target") is not None:
+            label = "check_first" if kind == "retry_later" else "target"
+            parts.append(f"{label}={_compact(value['target'])}")
+        for key, extra in value.items():
+            if key not in ("kind", "target", "retry_after_s") and extra is not None:
+                parts.append(f"{key}={_compact(extra)}")
         return _compact(" ".join(parts))
     if isinstance(value, dict) and len(value) == 1:
         ((name, arg),) = value.items()
@@ -386,14 +395,16 @@ def render_refusal(refusal: Any) -> list[str]:
     is the body's own ``error`` (rendered first by the caller), so this adds
     the machine half: the code and its discriminator, what to do next, the raw
     detail, and the glossary terms. A body without one (every runner predating
-    qontinui-runner#3131) contributes nothing.
+    qontinui-runner#3131), or with an empty one, contributes nothing; one with
+    no ``code`` is compacted whole rather than given an invented headline.
     """
-    if not isinstance(refusal, dict):
+    if not isinstance(refusal, dict) or not refusal:
         return []
-    head = _str_field(refusal, "code") or "(no code)"
+    code = _str_field(refusal, "code")
+    if code is None:
+        return [f"refusal: {_compact(refusal)}"]
     discriminator = _str_field(refusal, "discriminator")
-    if discriminator is not None:
-        head = f"{head} ({discriminator})"
+    head = f"{code} ({discriminator})" if discriminator is not None else code
     lines = [f"refusal: {_compact(head)}"]
     next_action = render_next_action(refusal.get("next_action"))
     if next_action is not None:
@@ -401,8 +412,10 @@ def render_refusal(refusal: Any) -> list[str]:
     if refusal.get("detail") is not None:
         lines.append(f"refusal detail: {_compact(refusal['detail'])}")
     terms = refusal.get("glossary_terms")
-    if isinstance(terms, list) and terms:
-        lines.append(f"glossary: {_compact(', '.join(map(str, terms)))}")
+    if isinstance(terms, list):
+        names = [t for t in terms if isinstance(t, str) and t]
+        if names:
+            lines.append(f"glossary: {_compact(', '.join(names))}")
     return lines
 
 
