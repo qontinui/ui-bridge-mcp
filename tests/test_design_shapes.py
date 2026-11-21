@@ -957,6 +957,64 @@ def test_heuristic_coverage_unrecognised_name_is_named_not_counted(
     )
 
 
+def test_heuristic_issues_with_no_object_row_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {**_HEURISTIC_AUDIT, "issues": ["Low contrast", 7]}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert "Issues (0 listed):" in text
+    assert "  2 malformed issue row(s) ignored (not an object)" in text
+    assert "Reason: No style guide was provided" in text
+
+
+def test_heuristic_issues_listed_count_excludes_malformed_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {**_HEURISTIC_AUDIT, "issues": [*_HEURISTIC_AUDIT["issues"], "junk"]}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "Issues (2 listed):" in text
+    assert "  1 malformed issue row(s) ignored (not an object)" in text
+
+
+def test_inline_guide_answered_with_heuristics_is_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guide the SDK did not apply: its heuristics are no answer to the audit."""
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: _HEURISTIC_AUDIT})
+    )
+    text, is_error = _call(
+        "sdk_design_audit", {"guide": {"name": "brand", "rules": []}}
+    )
+    assert is_error
+    assert text.startswith(
+        "Style audit did not run: a guide was provided but the SDK ran "
+        "heuristics; the guide audit did not run.\n"
+        "Heuristic design audit (no style guide"
+    )
+    # The heuristic findings are kept, not dropped.
+    assert "  [error] close-btn: Touch target 30x30" in text
+
+
+def test_design_audit_description_names_the_heuristic_mode() -> None:
+    tools = {tool.name: tool for tool in server_mod.TOOLS}
+    for name in ("sdk_design_audit", "sdk_design_review"):
+        description = tools[name].description or ""
+        assert (
+            "contrast,\nselect-dark-mode, font-size, touch-target" in description
+            or "contrast, select-dark-mode, font-size, touch-target" in description
+        ), name
+        assert "no pass/fail verdict" in description.replace("NO", "no"), name
+
+
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {RESPONSIVE_ROUTE: _RESPONSIVE})

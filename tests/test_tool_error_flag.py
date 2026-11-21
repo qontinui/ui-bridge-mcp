@@ -936,6 +936,18 @@ FAILURE_PATHS: list[FailurePath] = [
         "Heuristic design audit",
     ),
     FailurePath(
+        "sdk_design_audit: Style audit did not run: a guide was provided but the "
+        "SDK ran heuristics; the guide audit did not run.\n{}",
+        "sdk_design_audit",
+        {"guide": {"name": "brand", "rules": []}},
+        {
+            "/ui-bridge/sdk/design/audit": ok(
+                {"mode": "heuristic", "reason": "guide ignored", "issues": []}
+            )
+        },
+        "Style audit did not run",
+    ),
+    FailurePath(
         "sdk_design_audit: style_text",
         "sdk_design_audit",
         {},

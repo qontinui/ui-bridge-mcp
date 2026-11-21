@@ -605,7 +605,8 @@ def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
     ``HeuristicDesignAuditReport``; the coverage field is being added by the
     ui-bridge half of plan
     2026-11-21-native-design-audit-answers-like-web-design-audit-of, Phase 2).
-    A missing ``issues`` list is UNKNOWN, not a clean page. The header names
+    A missing ``issues`` list is UNKNOWN, not a clean page, and "N listed"
+    counts only the issue rows that are objects. The header names
     the heuristics this server knows of; which of them the SDK actually
     measured is the coverage section's to say.
     """
@@ -620,7 +621,8 @@ def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
     if not isinstance(issues, list):
         lines.append("Issues: UNKNOWN (the report carried no issues list)")
     else:
-        header = f"Issues ({len(issues)} listed{_sdk_truncation_note(report)}"
+        rows = [raw for raw in issues if isinstance(raw, dict)]
+        header = f"Issues ({len(rows)} listed{_sdk_truncation_note(report)}"
         header += "):" if issues else ")"
         lines.append(header)
         lines.extend(_audit_issue_lines(issues, limit=limit))
@@ -4767,14 +4769,20 @@ Or provide custom viewports as a label→width mapping.""",
     ),
     types.Tool(
         name="sdk_design_audit",
-        description="""Run a style audit against a loaded or provided style guide.
+        description="""Run a design audit: against a style guide when one is loaded or provided, else the SDK's built-in heuristics.
 
-Validates element computed styles against design tokens and rules defined
-in a StyleGuideConfig. Returns pass/fail counts, failure counts per severity,
-and the failing rows (element, rule, failed constraints), bounded by the SDK's
+With a guide (loaded with sdk_design_load_guide, or passed inline as
+`guide`), validates element computed styles against the guide's tokens and
+rules. Returns pass/fail counts, failure counts per severity, and the
+failing rows (element, rule, failed constraints), bounded by the SDK's
 maxResults; a truncated list says so.
 
-Load a guide first with sdk_design_load_guide, or provide one inline.""",
+With no guide loaded or provided, the SDK runs its built-in heuristics
+(contrast, select-dark-mode, font-size, touch-target) instead. The tool then
+returns the reason, the issues found and the heuristic coverage (which
+heuristics could not be fully measured), with NO pass/fail verdict against
+any guide. An answer whose findings cannot be read is returned as an error,
+never as a clean audit.""",
         inputSchema={
             "type": "object",
             "properties": {
@@ -4819,7 +4827,10 @@ use pressed/focused/disabled instead of hover/focus/active/disabled, responsive
 snapshots return only the current device dimensions, and pseudo-elements are empty.
 
 Captures a full design snapshot, optionally captures state variations for
-interactive elements, runs a style audit if a guide is loaded, and evaluates
+interactive elements, runs the design audit (against the loaded style guide;
+with no guide loaded, the SDK's built-in heuristics -- contrast,
+select-dark-mode, font-size, touch-target -- reported as issues plus heuristic
+coverage, with no pass/fail verdict), and evaluates
 per-metric UI quality scores (no aggregate) with actionable recommendations.
 
 This is the primary tool for design review — use it instead of calling
@@ -8132,9 +8143,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             report = _as_dict(response.data)
             if report.get("mode") == "heuristic":
                 heuristic_text = "\n".join(_heuristic_audit_lines(report, limit=20))
-                if not isinstance(report.get("issues"), list):
-                    # Its findings are UNKNOWN: flagged like every other
-                    # unreadable audit, with the reason and selection kept.
+                if guide is not None:
+                    # The caller's guide was not applied: the heuristic
+                    # findings are no answer to the audit that was asked for.
+                    return _tool_error(
+                        "Style audit did not run: a guide was provided but the SDK "
+                        f"ran heuristics; the guide audit did not run.\n{heuristic_text}"
+                    )
+                issues = report.get("issues")
+                if not isinstance(issues, list) or (
+                    issues and not any(isinstance(raw, dict) for raw in issues)
+                ):
+                    # Its findings are UNKNOWN (no list, or no readable row):
+                    # flagged like every other unreadable audit, with the
+                    # reason and selection kept.
                     return _tool_error(heuristic_text)
                 return [types.TextContent(type="text", text=heuristic_text)]
             if not _is_style_audit(report):
