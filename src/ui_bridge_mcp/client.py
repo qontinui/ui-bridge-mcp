@@ -1992,18 +1992,44 @@ class UIBridgeClient:
         self,
         guide: dict[str, Any] | None = None,
         element_ids: list[str] | None = None,
+        limit: int | None = None,
+        max_results: int | None = None,
+        include_passed: bool | None = None,
+        root_font_size_px: float | None = None,
     ) -> UIBridgeResponse:
-        """Run a style audit against a loaded or provided style guide.
+        """Run a design audit: against a style guide, else the SDK heuristics.
+
+        Each argument maps onto the SDK's ``DesignAuditRequest``
+        (``specs/design-request.ts``); one left ``None`` is not sent, so the
+        SDK applies its own default, and neither is an empty ``element_ids``
+        (the SDK then audits every element, as the sibling design routes do).
+        The SDK validates the values.
 
         Args:
             guide: Inline style guide config. Uses loaded guide if not provided.
+                An empty guide is still sent, so the SDK judges it rather than
+                silently falling back to the loaded guide or the heuristics.
             element_ids: Optional list of element IDs to audit.
+            limit: Most elements to audit (``limit``).
+            max_results: Most findings to list (``maxResults``).
+            include_passed: List passing rule results too (``includePassed``,
+                style-guide mode).
+            root_font_size_px: Root font size ``rem`` resolves against
+                (``rootFontSizePx``, style-guide mode).
         """
         body: dict[str, Any] = {}
-        if guide:
+        if guide is not None:
             body["guide"] = guide
         if element_ids:
             body["elementIds"] = element_ids
+        if limit is not None:
+            body["limit"] = limit
+        if max_results is not None:
+            body["maxResults"] = max_results
+        if include_passed is not None:
+            body["includePassed"] = include_passed
+        if root_font_size_px is not None:
+            body["rootFontSizePx"] = root_font_size_px
         return await self._request("POST", "/ui-bridge/sdk/design/audit", body or None)
 
     async def sdk_design_load_guide(self, guide: dict[str, Any]) -> UIBridgeResponse:

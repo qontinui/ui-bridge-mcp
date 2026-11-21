@@ -16,6 +16,7 @@ unpublished-packages-and-a-score, Phase 4.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -1315,3 +1316,163 @@ def test_design_review_responsive_block_reads_snapshots(
     assert "mobile (375px): 1 elements" in text
     assert "desktop (1280px): 2 elements" in text
     assert "timedOut=True" in text
+
+
+def _capturing_client(
+    monkeypatch: pytest.MonkeyPatch, bodies: list[Any]
+) -> UIBridgeClient:
+    """A client answering the audit route with ``_AUDIT``, recording each body."""
+    monkeypatch.delenv("QONTINUI_RUNNER_PORT", raising=False)
+    monkeypatch.delenv("QONTINUI_RUNNER_HOST", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == AUDIT_ROUTE:
+            bodies.append(json.loads(request.content) if request.content else None)
+            return httpx.Response(200, json={"success": True, "data": _AUDIT})
+        return httpx.Response(404, json={"success": False, "error": "Not found"})
+
+    c = UIBridgeClient(host="127.0.0.1", port=1)
+    c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return c
+
+
+def test_design_audit_forwards_request_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bounds the renderer reports cutting the answer can be raised.
+
+    The tool says when the SDK's ``maxResults`` cut the list or its element
+    ``limit`` cut the selection; each must reach the SDK under its
+    ``DesignAuditRequest`` name (``specs/design-request.ts``).
+    """
+    bodies: list[Any] = []
+    monkeypatch.setattr(server_mod, "client", _capturing_client(monkeypatch, bodies))
+    text, is_error = _call(
+        "sdk_design_audit",
+        {
+            "element_ids": ["btn-primary"],
+            "limit": 500,
+            "max_results": 50,
+            "include_passed": False,
+            "root_font_size_px": 18,
+        },
+    )
+    assert not is_error, text
+    assert bodies == [
+        {
+            "elementIds": ["btn-primary"],
+            "limit": 500,
+            "maxResults": 50,
+            "includePassed": False,
+            "rootFontSizePx": 18,
+        }
+    ]
+
+
+def test_design_audit_omits_unset_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An omitted bound is not sent, so the SDK's own default applies."""
+    bodies: list[Any] = []
+    monkeypatch.setattr(server_mod, "client", _capturing_client(monkeypatch, bodies))
+    _, is_error = _call("sdk_design_audit", {})
+    assert not is_error
+    assert bodies == [None]
+
+
+def test_design_audit_sends_an_empty_guide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty ``guide`` is sent, not dropped.
+
+    Dropped, the SDK would audit the loaded guide (or run heuristics) while the
+    tool believed the caller's guide was applied.
+    """
+    bodies: list[Any] = []
+    monkeypatch.setattr(server_mod, "client", _capturing_client(monkeypatch, bodies))
+    _call("sdk_design_audit", {"guide": {}})
+    assert bodies == [{"guide": {}}]
+
+
+def test_design_audit_show_rows_lists_more_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``show_rows`` raises this tool's own listing cut, so a raised
+    ``max_results`` can surface the extra rows instead of only counting them."""
+    issues = [
+        {"severity": "warning", "element": f"el-{i}", "issue": "small text"}
+        for i in range(25)
+    ]
+    report = {
+        "mode": "heuristic",
+        "reason": "no style guide loaded",
+        "issues": issues,
+        "maxResults": 1000,
+        "listableResults": 25,
+        "resultsTruncated": False,
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    default_text, _ = _call("sdk_design_audit", {})
+    assert "el-19:" in default_text and "el-20:" not in default_text
+    assert "and 5 more (this tool lists at most 20)" in default_text
+
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {"show_rows": 25})
+    assert not is_error, text
+    assert "el-24:" in text
+    assert "more (this tool lists" not in text
+
+
+def _style_report_with_failures(count: int) -> dict[str, Any]:
+    rows = [
+        {
+            "elementId": f"row-{i}",
+            "ruleId": "button-color",
+            "passed": False,
+            "severity": "error",
+            "constraintResults": [],
+        }
+        for i in range(count)
+    ]
+    return {
+        **_AUDIT,
+        "failedCount": count,
+        "summary": {"errors": count, "warnings": 0, "info": 0},
+        "maxResults": 1000,
+        "listableResults": count,
+        "resultsTruncated": False,
+        "results": rows,
+    }
+
+
+def test_design_audit_show_rows_applies_to_style_guide_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The style-guide renderer honours ``show_rows`` too."""
+    report = _style_report_with_failures(25)
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    default_text, _ = _call("sdk_design_audit", {})
+    assert "row-19" in default_text and "row-20" not in default_text
+    assert "and 5 more rows not shown here" in default_text
+
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {"show_rows": 25.0})
+    assert not is_error, text
+    assert "row-24" in text
+    assert "not shown here" not in text
+
+
+@pytest.mark.parametrize("bad", [0, "50", 2.5, True])
+def test_design_audit_bad_show_rows_is_said(
+    monkeypatch: pytest.MonkeyPatch, bad: Any
+) -> None:
+    """A ``show_rows`` this tool cannot honour is named, never silently 20."""
+    report = _style_report_with_failures(25)
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {"show_rows": bad})
+    assert f"show_rows={bad!r} is not an integer >= 1" in text
+    assert "row-20" not in text

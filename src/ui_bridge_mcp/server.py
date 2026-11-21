@@ -4806,7 +4806,10 @@ With a guide (loaded with sdk_design_load_guide, or passed inline as
 `guide`), validates element computed styles against the guide's tokens and
 rules. Returns pass/fail counts, failure counts per severity, and the
 failing rows (element, rule, failed constraints), bounded by the SDK's
-maxResults; a truncated list says so.
+maxResults; a truncated list says so. `max_results` and `limit` raise the
+SDK's finding and element bounds; `include_passed` lists passing rule results
+too; `root_font_size_px` sets the root font size rem resolves against.
+The tool prints at most `show_rows` rows (default 20) and counts the rest.
 
 With no guide loaded or provided, the SDK runs its built-in heuristics
 (contrast, select-dark-mode, font-size, touch-target) instead. The tool then
@@ -4825,6 +4828,48 @@ never as a clean audit.""",
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Only audit these elements. Defaults to all.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Most elements to audit (SDK default applies when "
+                        "omitted). Raise it when the answer says the element "
+                        "limit cut the selection."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Most findings the SDK lists (SDK default applies when "
+                        "omitted). Raise it when the answer says the SDK cut "
+                        "the list at maxResults; raise show_rows to see the "
+                        "extra rows."
+                    ),
+                },
+                "show_rows": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Most failing rows / issues this tool prints (default "
+                        "20); the rest are counted, not listed."
+                    ),
+                },
+                "include_passed": {
+                    "type": "boolean",
+                    "description": (
+                        "Style-guide mode: the SDK lists passing rule results "
+                        "too (they count toward max_results). Default false."
+                    ),
+                },
+                "root_font_size_px": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": (
+                        "Style-guide mode: root font size rem resolves against. "
+                        "Default: measured from the page."
+                    ),
                 },
             },
             "required": [],
@@ -8168,12 +8213,39 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         elif name == "sdk_design_audit":
             guide = arguments.get("guide")
             element_ids = arguments.get("element_ids")
-            response = await ui_client.sdk_design_audit(guide, element_ids)
+            response = await ui_client.sdk_design_audit(
+                guide,
+                element_ids,
+                limit=arguments.get("limit"),
+                max_results=arguments.get("max_results"),
+                include_passed=arguments.get("include_passed"),
+                root_font_size_px=arguments.get("root_font_size_px"),
+            )
+            requested_rows = arguments.get("show_rows")
+            show_rows = 20
+            rows_note: list[str] = []
+            if isinstance(requested_rows, float) and requested_rows.is_integer():
+                requested_rows = int(requested_rows)
+            if (
+                isinstance(requested_rows, int)
+                and not isinstance(requested_rows, bool)
+                and requested_rows >= 1
+            ):
+                show_rows = requested_rows
+            elif requested_rows is not None:
+                # Said, never silently replaced: the caller asked for a number
+                # of rows this tool cannot honour.
+                rows_note = [
+                    f"show_rows={requested_rows!r} is not an integer >= 1; "
+                    "listing at most the default 20 rows"
+                ]
             if not response.success:
                 return _error_result(response)
             report = _as_dict(response.data)
             if report.get("mode") == "heuristic":
-                heuristic_text = "\n".join(_heuristic_audit_lines(report, limit=20))
+                heuristic_text = "\n".join(
+                    [*_heuristic_audit_lines(report, limit=show_rows), *rows_note]
+                )
                 if guide is not None:
                     # The caller's guide was not applied: the heuristic
                     # findings are no answer to the audit that was asked for.
@@ -8198,7 +8270,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     _audit_selection(report),
                     f"Rules: {_count_or_unknown(report.get('totalRules'))}",
                     f"Passed: {report['passedCount']} | Failed: {report['failedCount']}",
-                    *_style_audit_findings(report, limit=20),
+                    *_style_audit_findings(report, limit=show_rows),
+                    *rows_note,
                 ]
             )
             results = report.get("results")
