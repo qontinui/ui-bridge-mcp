@@ -925,6 +925,17 @@ FAILURE_PATHS: list[FailurePath] = [
         setup=_fresh("baseline_store", BaselineStore),
     ),
     FailurePath(
+        "sdk_design_audit: heuristic_text",
+        "sdk_design_audit",
+        {},
+        {
+            "/ui-bridge/sdk/design/audit": ok(
+                {"mode": "heuristic", "reason": "no guide", "checkedElements": 3}
+            )
+        },
+        "Heuristic design audit",
+    ),
+    FailurePath(
         "sdk_design_audit: _style_audit_unknown(report)",
         "sdk_design_audit",
         {},

@@ -388,8 +388,10 @@ def _is_style_audit(data: Any) -> bool:
     """``data`` is a style-guide audit: style-guide (or no) mode, and both counts.
 
     A ``mode: 'style-guide'`` report always carries ``passedCount`` and
-    ``failedCount``; a report with no ``mode`` (an SDK predating it) is read as
-    one when it carries them. An answer without them (a heuristic report, or an
+    ``failedCount``. A report with no ``mode`` that carries both counts is
+    ALSO read as one, deliberately: SDKs predating the self-describing ``mode``
+    answered a style-guide audit with the counts and no ``mode``, and that
+    answer is still a real verdict against the guide. An answer without them (a heuristic report, or an
     unrecognised shape) read with defaults rendered as a clean "Passed: 0 |
     Failed: 0" audit (coord finding c577a740), and a ``mode`` this server does
     not know is not a style-guide verdict even when it carries counts.
@@ -422,6 +424,23 @@ def _audit_issue_lines(issues: list[Any], limit: int) -> list[str]:
     return lines
 
 
+def _audit_unknown_shape(report: dict[str, Any]) -> str:
+    """What makes an audit answer neither a style-guide nor a heuristic audit.
+
+    Shared by ``sdk_design_audit`` and ``sdk_design_review`` so both explain
+    the same response the same way.
+    """
+    mode = report.get("mode")
+    if mode is None:
+        return "it carries no mode and no passedCount/failedCount"
+    if mode == "style-guide":
+        return (
+            "its mode is 'style-guide' but passedCount/failedCount are missing "
+            "or not numbers"
+        )
+    return f"its mode {mode!r} is not one this server reads"
+
+
 def _style_audit_unknown(report: dict[str, Any]) -> str:
     """Why an audit answer is UNKNOWN, keeping any findings it carried.
 
@@ -436,16 +455,7 @@ def _style_audit_unknown(report: dict[str, Any]) -> str:
     ``issues`` list it carries is still listed: those are findings about the
     page, just not a verdict against the loaded guide.
     """
-    mode = report.get("mode")
-    if mode is None:
-        shape = "it carries no mode and no passedCount/failedCount"
-    elif mode == "style-guide":
-        shape = (
-            "its mode is 'style-guide' but passedCount/failedCount are missing "
-            "or not numbers"
-        )
-    else:
-        shape = f"its mode {mode!r} is not one this server reads"
+    shape = _audit_unknown_shape(report)
     lines = [
         "Style audit UNKNOWN: the response is neither a style-guide audit nor a "
         f"heuristic audit ({shape}); it says nothing about passing the loaded "
@@ -476,7 +486,10 @@ def _heuristic_coverage_lines(report: dict[str, Any]) -> list[str]:
     added to the SDK's heuristic report by the ui-bridge half of plan
     2026-11-21-native-design-audit-answers-like-web-design-audit-of (Phase 2).
     A row is fully measured only when its status is ``measured`` AND its
-    ``notMeasured`` is the number 0; every other row is listed. A report
+    ``notMeasured`` is the number 0; every other row is listed. A row whose
+    ``heuristic`` is not a string is listed under its raw value and never
+    counts as measuring anything; an entry that is not an object is counted as
+    malformed and ignored, never silently dropped. A report
     without the field (an SDK predating it), with a malformed one, or without a
     row for a heuristic says nothing about that heuristic: it is reported as
     not reported or unknown, never as measured.
@@ -495,26 +508,41 @@ def _heuristic_coverage_lines(report: dict[str, Any]) -> list[str]:
             "measured is unknown, so an empty issue list does not show a clean page."
         ]
     rows = [row for row in coverage if isinstance(row, dict)]
+    malformed = len(coverage) - len(rows)
     lines = []
+    reported: set[str] = set()
     for row in rows:
+        heuristic = row.get("heuristic")
+        if isinstance(heuristic, str):
+            reported.add(heuristic)
+            name = heuristic
+        else:
+            # Never a measured heuristic: listed under its raw value.
+            name = f"? (heuristic={heuristic!r})"
         status = row.get("status")
         not_measured = row.get("notMeasured")
-        if status == "measured" and _number(not_measured) and not_measured == 0:
+        if (
+            isinstance(heuristic, str)
+            and status == "measured"
+            and _number(not_measured)
+            and not_measured == 0
+        ):
             continue
         line = (
-            f"  {row.get('heuristic', '?')}: {status if status is not None else 'unknown'} "
+            f"  {name}: {status if status is not None else 'unknown'} "
             f"(checked {_count_or_unknown(row.get('checked'))}, not measured "
-            f"{_count_or_unknown(row.get('notMeasured'))})"
+            f"{_count_or_unknown(not_measured)})"
         )
         if row.get("note"):
             line += f" - {row['note']}"
         lines.append(line)
-    reported = {row.get("heuristic") for row in rows}
     absent = [name for name in _AUDIT_HEURISTICS if name not in reported]
     if absent:
         lines.append(f"  no coverage row for: {', '.join(absent)} (coverage unknown)")
+    if malformed:
+        lines.append(f"  {malformed} malformed coverage row(s) ignored (not an object)")
     if not lines:
-        return [f"Heuristic coverage: all {len(rows)} heuristics measured"]
+        return [f"Heuristic coverage: all {len(reported)} heuristics measured"]
     return ["Heuristic coverage (heuristics not fully measured):", *lines]
 
 
@@ -529,13 +557,13 @@ def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
     ui-bridge half of plan
     2026-11-21-native-design-audit-answers-like-web-design-audit-of, Phase 2).
     A missing ``issues`` list is UNKNOWN, not a clean page. The header names
-    the heuristics the SDK runs; which of them were actually measured is the
-    coverage section's to say.
+    the heuristics this server knows of; which of them the SDK actually
+    measured is the coverage section's to say.
     """
     reason = report.get("reason")
     lines = [
-        "Heuristic design audit (no style guide; the SDK runs its built-in "
-        f"heuristics: {', '.join(_AUDIT_HEURISTICS)})",
+        "Heuristic design audit (no style guide; the built-in heuristics this "
+        f"server knows: {', '.join(_AUDIT_HEURISTICS)})",
         f"Reason: {reason if isinstance(reason, str) and reason else 'not reported'}",
         _audit_selection(report),
     ]
@@ -8074,12 +8102,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _error_result(response)
             report = _as_dict(response.data)
             if report.get("mode") == "heuristic":
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="\n".join(_heuristic_audit_lines(report, limit=20)),
-                    )
-                ]
+                heuristic_text = "\n".join(_heuristic_audit_lines(report, limit=20))
+                if not isinstance(report.get("issues"), list):
+                    # Its findings are UNKNOWN: flagged like every other
+                    # unreadable audit, with the reason and selection kept.
+                    return _tool_error(heuristic_text)
+                return [types.TextContent(type="text", text=heuristic_text)]
             if not _is_style_audit(report):
                 return _tool_error(_style_audit_unknown(report))
             result_lines = [
@@ -8234,7 +8262,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 )
                 result_lines.append(
                     "\nStyle audit: UNKNOWN (the response is neither a style-guide "
-                    f"audit nor a heuristic audit{found})"
+                    f"audit nor a heuristic audit: {_audit_unknown_shape(audit_report)}"
+                    f"{found})"
                 )
             elif audit_resp.success:
                 report = _as_dict(audit_resp.data)
