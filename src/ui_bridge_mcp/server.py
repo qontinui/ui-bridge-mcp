@@ -402,37 +402,75 @@ def _is_style_audit(data: Any) -> bool:
     return _number(report.get("passedCount")) and _number(report.get("failedCount"))
 
 
+def _field_or_unknown(row: dict[str, Any], key: str) -> str:
+    """``row[key]`` as text; an absent or null field is ``?``, never ``None``."""
+    value = row.get(key)
+    return "?" if value is None else str(value)
+
+
 def _audit_issue_lines(issues: list[Any], limit: int) -> list[str]:
     """``HeuristicDesignAuditIssue`` rows, ``[severity] element: issue (fix)``.
 
     At most ``limit`` rows, then a count of the rest this tool did not list.
+    An entry that is not an object is counted as malformed, never rendered as
+    an all-unknown row.
     """
+    rows = [raw for raw in issues if isinstance(raw, dict)]
     lines = []
-    for raw in issues[:limit]:
-        issue = _as_dict(raw)
+    for issue in rows[:limit]:
         line = (
-            f"  [{issue.get('severity', '?')}] {issue.get('element', '?')}: "
-            f"{issue.get('issue', '?')}"
+            f"  [{_field_or_unknown(issue, 'severity')}] "
+            f"{_field_or_unknown(issue, 'element')}: "
+            f"{_field_or_unknown(issue, 'issue')}"
         )
         if issue.get("fix"):
             line += f" (fix: {issue['fix']})"
         lines.append(line)
-    if len(issues) > limit:
+    if len(rows) > limit:
         lines.append(
-            f"  ... and {len(issues) - limit} more (this tool lists at most {limit})"
+            f"  ... and {len(rows) - limit} more (this tool lists at most {limit})"
         )
+    malformed = len(issues) - len(rows)
+    if malformed:
+        lines.append(f"  {malformed} malformed issue row(s) ignored (not an object)")
     return lines
 
 
-def _audit_unknown_shape(report: dict[str, Any]) -> str:
+def _sdk_truncation_note(report: dict[str, Any]) -> str:
+    """What follows "N listed" in a findings header: the SDK's own list bound.
+
+    Both audit modes bound their listed findings by ``maxResults``
+    (``resultsTruncated``, ``listableResults``; SDK ``specs/design-request.ts``
+    ``AuditResultBounds``). A missing flag is unknown, never "not truncated".
+    """
+    truncated = report.get("resultsTruncated")
+    if truncated is True:
+        return (
+            f" of {_count_or_unknown(report.get('listableResults'))} listable; "
+            "the SDK cut the list at "
+            f"maxResults={_count_or_unknown(report.get('maxResults'))}"
+        )
+    if truncated is not False:
+        return "; whether the SDK truncated the list is unknown"
+    return ""
+
+
+def _audit_unknown_shape(data: Any) -> str:
     """What makes an audit answer neither a style-guide nor a heuristic audit.
 
     Shared by ``sdk_design_audit`` and ``sdk_design_review`` so both explain
     the same response the same way.
     """
+    if not isinstance(data, dict):
+        return f"it is not a JSON object ({type(data).__name__})"
+    report: dict[str, Any] = data
     mode = report.get("mode")
     if mode is None:
-        return "it carries no mode and no passedCount/failedCount"
+        if "passedCount" not in report and "failedCount" not in report:
+            return "it carries no mode and no counts"
+        return (
+            "it carries no mode and passedCount/failedCount are missing or not numbers"
+        )
     if mode == "style-guide":
         return (
             "its mode is 'style-guide' but passedCount/failedCount are missing "
@@ -441,7 +479,7 @@ def _audit_unknown_shape(report: dict[str, Any]) -> str:
     return f"its mode {mode!r} is not one this server reads"
 
 
-def _style_audit_unknown(report: dict[str, Any]) -> str:
+def _style_audit_unknown(data: Any) -> str:
     """Why an audit answer is UNKNOWN, keeping any findings it carried.
 
     Every SDK ``/design/audit`` answer is self-describing by ``mode``
@@ -455,7 +493,8 @@ def _style_audit_unknown(report: dict[str, Any]) -> str:
     ``issues`` list it carries is still listed: those are findings about the
     page, just not a verdict against the loaded guide.
     """
-    shape = _audit_unknown_shape(report)
+    shape = _audit_unknown_shape(data)
+    report = _as_dict(data)
     lines = [
         "Style audit UNKNOWN: the response is neither a style-guide audit nor a "
         f"heuristic audit ({shape}); it says nothing about passing the loaded "
@@ -541,9 +580,19 @@ def _heuristic_coverage_lines(report: dict[str, Any]) -> list[str]:
         lines.append(f"  no coverage row for: {', '.join(absent)} (coverage unknown)")
     if malformed:
         lines.append(f"  {malformed} malformed coverage row(s) ignored (not an object)")
+    unrecognised = sorted(reported - set(_AUDIT_HEURISTICS))
+    extra = (
+        [
+            f"  unrecognised heuristic(s): {', '.join(unrecognised)} (not one of "
+            "the heuristics this server knows; not counted)"
+        ]
+        if unrecognised
+        else []
+    )
     if not lines:
-        return [f"Heuristic coverage: all {len(reported)} heuristics measured"]
-    return ["Heuristic coverage (heuristics not fully measured):", *lines]
+        known = len(reported & set(_AUDIT_HEURISTICS))
+        return [f"Heuristic coverage: all {known} heuristics measured", *extra]
+    return ["Heuristic coverage (heuristics not fully measured):", *lines, *extra]
 
 
 def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
@@ -571,16 +620,7 @@ def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
     if not isinstance(issues, list):
         lines.append("Issues: UNKNOWN (the report carried no issues list)")
     else:
-        truncated = report.get("resultsTruncated")
-        header = f"Issues ({len(issues)} listed"
-        if truncated is True:
-            header += (
-                f" of {_count_or_unknown(report.get('listableResults'))} listable; "
-                "the SDK cut the list at "
-                f"maxResults={_count_or_unknown(report.get('maxResults'))}"
-            )
-        elif truncated is not False:
-            header += "; whether the SDK truncated the list is unknown"
+        header = f"Issues ({len(issues)} listed{_sdk_truncation_note(report)}"
         header += "):" if issues else ")"
         lines.append(header)
         lines.extend(_audit_issue_lines(issues, limit=limit))
@@ -656,18 +696,7 @@ def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
         for row in results
         if isinstance(row, dict) and row.get("passed") is not True
     ]
-    listable = report.get("listableResults")
-    truncated = report.get("resultsTruncated")
-    header = f"Failing rows ({len(failing)} listed"
-    if truncated is True:
-        header += (
-            f" of {_count_or_unknown(listable)} listable; the SDK cut the list at "
-            f"maxResults={_count_or_unknown(report.get('maxResults'))}"
-        )
-    elif truncated is not False:
-        header += "; whether the SDK truncated the list is unknown"
-    header += "):"
-    lines.append(header)
+    lines.append(f"Failing rows ({len(failing)} listed{_sdk_truncation_note(report)}):")
     for row in failing[:limit]:
         eid = row.get("elementId", "?")
         rule_id = row.get("ruleId", "?")
@@ -8109,15 +8138,21 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     return _tool_error(heuristic_text)
                 return [types.TextContent(type="text", text=heuristic_text)]
             if not _is_style_audit(report):
-                return _tool_error(_style_audit_unknown(report))
-            result_lines = [
-                f"Style Audit: {report.get('guideName', '?')}",
-                _audit_selection(report),
-                f"Rules: {_count_or_unknown(report.get('totalRules'))}",
-                f"Passed: {report['passedCount']} | Failed: {report['failedCount']}",
-                *_style_audit_findings(report, limit=20),
-            ]
-            return [types.TextContent(type="text", text="\n".join(result_lines))]
+                return _tool_error(_style_audit_unknown(response.data))
+            style_text = "\n".join(
+                [
+                    f"Style Audit: {report.get('guideName', '?')}",
+                    _audit_selection(report),
+                    f"Rules: {_count_or_unknown(report.get('totalRules'))}",
+                    f"Passed: {report['passedCount']} | Failed: {report['failedCount']}",
+                    *_style_audit_findings(report, limit=20),
+                ]
+            )
+            if not isinstance(report.get("results"), list):
+                # Its failing rows are UNKNOWN: flagged like the heuristic
+                # report with no issues list, with the counts kept.
+                return _tool_error(style_text)
+            return [types.TextContent(type="text", text=style_text)]
 
         elif name == "sdk_design_load_guide":
             guide = arguments["guide"]
@@ -8262,7 +8297,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 )
                 result_lines.append(
                     "\nStyle audit: UNKNOWN (the response is neither a style-guide "
-                    f"audit nor a heuristic audit: {_audit_unknown_shape(audit_report)}"
+                    f"audit nor a heuristic audit: {_audit_unknown_shape(audit_resp.data)}"
                     f"{found})"
                 )
             elif audit_resp.success:

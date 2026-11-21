@@ -936,7 +936,23 @@ FAILURE_PATHS: list[FailurePath] = [
         "Heuristic design audit",
     ),
     FailurePath(
-        "sdk_design_audit: _style_audit_unknown(report)",
+        "sdk_design_audit: style_text",
+        "sdk_design_audit",
+        {},
+        {
+            "/ui-bridge/sdk/design/audit": ok(
+                {
+                    "mode": "style-guide",
+                    "guideName": "brand",
+                    "passedCount": 1,
+                    "failedCount": 0,
+                }
+            )
+        },
+        "Style Audit: brand",
+    ),
+    FailurePath(
+        "sdk_design_audit: _style_audit_unknown(response.data)",
         "sdk_design_audit",
         {},
         {

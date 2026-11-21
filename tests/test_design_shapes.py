@@ -248,7 +248,11 @@ def test_design_audit_missing_results_is_unknown(
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
     )
-    text, _ = _call("sdk_design_audit", {})
+    text, is_error = _call("sdk_design_audit", {})
+    # Flagged like every other unreadable audit; the counts are kept.
+    assert is_error
+    assert text.startswith("Style Audit: brand\n")
+    assert "Passed: 1 | Failed: 3" in text
     assert "Failing rows: UNKNOWN" in text
 
 
@@ -491,7 +495,7 @@ def test_audit_with_no_mode_and_no_counts_is_unknown(
     assert is_error
     assert text.startswith(
         "Style audit UNKNOWN: the response is neither a style-guide audit nor a "
-        "heuristic audit (it carries no mode and no passedCount/failedCount)"
+        "heuristic audit (it carries no mode and no counts)"
     )
     assert "The response listed 1 issue(s):\n  [info] a: b" in text
 
@@ -612,7 +616,7 @@ def test_heuristic_coverage_malformed_is_unknown_not_an_old_sdk(
     assert not is_error, text
     assert "Heuristic coverage: UNKNOWN (heuristicCoverage was malformed: " in text
     assert "predates" not in text
-    assert "measured" not in text.split("Heuristic coverage:")[1].split("(")[0]
+    assert "all 4 heuristics measured" not in text
 
 
 def test_style_guide_mode_missing_counts_says_so(
@@ -737,7 +741,7 @@ def test_design_review_audit_with_no_mode_and_no_counts_is_unknown(
     text, _ = _call("sdk_design_review", _REVIEW_ARGS)
     assert (
         "Style audit: UNKNOWN (the response is neither a style-guide audit nor a "
-        "heuristic audit: it carries no mode and no passedCount/failedCount; it "
+        "heuristic audit: it carries no mode and no counts; it "
         "listed 1 issue(s))"
     ) in text
     assert "Heuristic design audit" not in text
@@ -755,7 +759,7 @@ def test_design_review_audit_with_no_mode_and_no_counts_is_unknown(
             {**_AUDIT, "mode": "lighthouse"},
             "its mode 'lighthouse' is not one this server reads",
         ),
-        ({"checkedElements": 3}, "it carries no mode and no passedCount/failedCount"),
+        ({"checkedElements": 3}, "it carries no mode and no counts"),
     ],
 )
 def test_audit_and_review_explain_an_unknown_answer_the_same_way(
@@ -864,6 +868,93 @@ def test_heuristic_coverage_non_object_rows_are_counted_not_dropped(
     text, _ = _call(tool, {} if tool == "sdk_design_audit" else _REVIEW_ARGS)
     assert "2 malformed coverage row(s) ignored (not an object)" in text
     assert "heuristics measured" not in text
+
+
+@pytest.mark.parametrize(
+    ("data", "shape"),
+    [
+        (
+            {"passedCount": 3},
+            "it carries no mode and passedCount/failedCount are missing or not numbers",
+        ),
+        (
+            {"passedCount": "3", "failedCount": "1"},
+            "it carries no mode and passedCount/failedCount are missing or not numbers",
+        ),
+        ({"checkedElements": 3}, "it carries no mode and no counts"),
+        ([1, 2], "it is not a JSON object (list)"),
+        ("audit", "it is not a JSON object (str)"),
+    ],
+)
+def test_unknown_shape_reason_matches_the_payload(
+    monkeypatch: pytest.MonkeyPatch, data: Any, shape: str
+) -> None:
+    monkeypatch.setattr(server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: data}))
+    audit_text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert f"heuristic audit ({shape});" in audit_text
+
+    monkeypatch.setattr(server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: data}))
+    review_text, _ = _call("sdk_design_review", _REVIEW_ARGS)
+    assert f"heuristic audit: {shape}" in review_text
+
+
+def test_heuristic_issue_rows_that_are_not_objects_are_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        **_HEURISTIC_AUDIT,
+        "issues": [*_HEURISTIC_AUDIT["issues"], "Low contrast", 7],
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert "  2 malformed issue row(s) ignored (not an object)" in text
+    assert "[?] ?: ?" not in text
+
+
+def test_heuristic_issue_null_fields_render_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        **_HEURISTIC_AUDIT,
+        "issues": [{"element": None, "issue": "Low contrast", "severity": None}],
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "  [?] ?: Low contrast" in text
+    assert "None" not in text
+
+
+def test_heuristic_coverage_unrecognised_name_is_named_not_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        **_HEURISTIC_AUDIT,
+        "heuristicCoverage": [
+            *_HEURISTIC_AUDIT["heuristicCoverage"],
+            {
+                "heuristic": "line-height",
+                "status": "measured",
+                "checked": 4,
+                "notMeasured": 0,
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "all 5 heuristics measured" not in text
+    assert text.endswith(
+        "Heuristic coverage: all 4 heuristics measured\n"
+        "  unrecognised heuristic(s): line-height (not one of the heuristics this "
+        "server knows; not counted)"
+    )
 
 
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
