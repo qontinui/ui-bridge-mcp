@@ -674,6 +674,30 @@ def test_cache_read_error_body_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
     assert "zzzz" not in _text(items)
 
 
+def test_cache_read_error_body_of_exactly_the_cap_is_not_truncated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body of exactly MAX_CACHE_ERROR_BODY_BYTES is whole, not cut."""
+    import ui_bridge_mcp.client as client_mod
+
+    monkeypatch.setattr(client_mod, "MAX_CACHE_ERROR_BODY_BYTES", 16)
+    body = b"0123456789abcdef"
+    assert len(body) == 16
+    runner = Runner(
+        {
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(404, stream=_Chunks([body])),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert is_error
+    assert _text(items).endswith("API error 404: 0123456789abcdef")
+    assert "truncated" not in _text(items)
+
+
 def test_cache_read_error_body_within_the_bound_is_not_marked_truncated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -710,6 +734,50 @@ def test_hint_bytes_over_the_cap_is_refused_before_any_read(
         "MAX_CACHED_CAPTURE_BYTES=1024; it was not read"
     ) in _text(items)
     assert [p for p, _ in runner.requests if p.startswith(CACHE)] == []
+
+
+def _too_large_hint(hint: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(
+        413,
+        json={
+            "success": False,
+            "error": "over the inline cap",
+            "code": "INLINE_TOO_LARGE",
+            "hint": hint,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        {"url": _CACHE_URL, "bytes": None, "maxBytes": 5242880},
+        {"url": _CACHE_URL, "maxBytes": 5242880},
+        {"url": _CACHE_URL, "bytes": "9000000", "maxBytes": 5242880},
+    ],
+    ids=["bytes-null", "bytes-missing", "bytes-string"],
+)
+def test_hint_bytes_not_an_integer_does_not_refuse_the_read(
+    hint: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an integer hint.bytes over the cap refuses; else the cache is read."""
+    import ui_bridge_mcp.client as client_mod
+
+    monkeypatch.setattr(client_mod, "MAX_CACHED_CAPTURE_BYTES", 1024)
+    runner = Runner(
+        {
+            CAPTURE: _too_large_hint(hint),
+            _CACHE_URL: httpx.Response(
+                200, content=_big_png(8, 4), headers={"content-type": "image/png"}
+            ),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "home", "target": "web"}
+    )
+    assert not is_error, _text(items)
+    assert [p for p, _ in runner.requests if p.startswith(CACHE)] == [_CACHE_URL]
 
 
 @pytest.mark.parametrize(
@@ -772,6 +840,102 @@ def test_element_crop_within_the_bound_carries_no_note(
     assert not is_error, _text(items)
     assert _text(items) == ""
     assert len(_images(items)) == 1
+
+
+def _big_element_runner(width: int, height: int) -> Runner:
+    snapshot = {
+        "elements": [
+            {
+                "id": "big",
+                "state": {"rect": {"x": 0, "y": 0, "width": width, "height": height}},
+            }
+        ],
+        "viewport": {"viewportWidth": 3200, "viewportHeight": 1600},
+    }
+    return Runner(
+        {
+            "/ui-bridge/control/snapshot": snapshot,
+            CAPTURE: _frame(_png(3200, 1600), 3200, 1600),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "fmt,pil_format,mime",
+    [("jpeg", "JPEG", "image/jpeg"), ("webp", "WEBP", "image/webp")],
+)
+@pytest.mark.parametrize("width,height", [(3000, 1000), (200, 100)])
+def test_element_crop_format_matches_its_mime(
+    fmt: str,
+    pil_format: str,
+    mime: str,
+    width: int,
+    height: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The returned bytes are the format the MIME type names, bounded or not."""
+    runner = _big_element_runner(width, height)
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "ui_element_screenshot", {"element_id": "big", "padding": 0, "format": fmt}
+    )
+    assert not is_error, _text(items)
+    image = _images(items)[0]
+    assert image.mimeType == mime
+    shown = Image.open(io.BytesIO(base64.b64decode(image.data)))
+    assert shown.format == pil_format
+    assert max(shown.size) <= 1568
+
+
+@pytest.mark.parametrize("scale,expected", [(5.0, (1568, 784)), (0.01, (250, 125))])
+def test_element_crop_scale_is_clamped(
+    scale: float, expected: tuple[int, int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scale is clamped to 0.25-2.0, as the annotated tools clamp it."""
+    runner = _big_element_runner(1000, 500)
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "ui_element_screenshot", {"element_id": "big", "padding": 0, "scale": scale}
+    )
+    assert not is_error, _text(items)
+    shown = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data)))
+    # 5.0 clamps to 2.0 (2000x1000, then bounded to 1568x784); 0.01 to 0.25.
+    assert shown.size == expected
+    if scale > 2.0:
+        # The crop the bound saw was the clamped 2000x1000, not 5000x2500:
+        # the bound alone would hide a missing clamp.
+        assert "from 2000x1000" in _text(items)
+
+
+@pytest.mark.parametrize(
+    "tool,snapshot_route,arguments",
+    [
+        ("ui_annotated_screenshot", "/ui-bridge/control/snapshot", {}),
+        ("sdk_annotated_screenshot", "/ui-bridge/sdk/snapshot", {"target": "web"}),
+    ],
+)
+def test_annotated_output_at_scale_2_is_bounded(
+    tool: str,
+    snapshot_route: str,
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """scale=2 on a 1568px frame would return 3136px; the bound holds."""
+    snapshot = {**_SNAPSHOT, "viewport": {"viewportWidth": 1568, "viewportHeight": 784}}
+    runner = Runner(
+        {snapshot_route: snapshot, CAPTURE: _frame(_png(1568, 784), 1568, 784)}
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(tool, {**arguments, "scale": 2.0})
+    assert not is_error, _text(items)
+    # The note comes first.
+    assert items[0].type == "text"
+    assert items[0].text.startswith(
+        "NOTE: this image is DOWNSCALED to 1568x784 from 3136x1568"
+    )
+    assert "annotation was drawn at full resolution" in items[0].text
+    shown = Image.open(io.BytesIO(base64.b64decode(_images(items)[0].data)))
+    assert shown.size == (1568, 784)
 
 
 @pytest.mark.parametrize(
@@ -961,17 +1125,21 @@ def test_delta_first_capture_returns_the_full_frame(
     assert "No visual changes detected." in _text(items)
 
 
-def test_hint_falls_back_to_the_outer_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An inner failure with no hint takes the envelope's own."""
-    body = {
-        "success": True,
-        "hint": {"url": "outer"},
+@pytest.mark.parametrize(
+    "inner",
+    [
+        # No hint key at all.
+        {"success": False, "error": "no"},
         # An explicit null: the old `inner.get("hint", data.get("hint"))`
         # returned it instead of falling back.
-        "data": {"success": False, "error": "no", "hint": None},
-    }
+        {"success": False, "error": "no", "hint": None},
+    ],
+)
+def test_hint_falls_back_to_the_outer_envelope(
+    inner: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An inner failure whose hint is missing or null takes the envelope's."""
+    body = {"success": True, "hint": {"url": "outer"}, "data": inner}
     runner = Runner({CAPTURE: httpx.Response(200, json=body)})
     c = _install(monkeypatch, runner)
 

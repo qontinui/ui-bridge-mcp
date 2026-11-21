@@ -711,7 +711,10 @@ def _displayable(b64_png: str, kept: str, fmt: str = "png") -> tuple[str, str | 
     if pil_format == "JPEG" and small.mode not in ("RGB", "L"):
         small = small.convert("RGB")
     buf = io.BytesIO()
-    small.save(buf, format=pil_format)
+    if pil_format == "PNG":
+        small.save(buf, format=pil_format)
+    else:
+        small.save(buf, format=pil_format, quality=85)
     note = (
         f"NOTE: this image is DOWNSCALED to {small.width}x{small.height} from "
         f"{width}x{height} for return (long edge over "
@@ -823,6 +826,10 @@ def _annotated_result(
         snapshot=snap_data,
         design_data=design_data,
     )
+    # A scale up to 2.0 can double the frame; the 1568px bound holds here too.
+    annotated_b64, annotated_note = _displayable(
+        annotated_b64, "annotation was drawn at full resolution", fmt=opts.format
+    )
     result: list[types.TextContent | types.ImageContent] = [
         types.ImageContent(
             type="image",
@@ -840,6 +847,8 @@ def _annotated_result(
                 "(pink) are drawn on the image.",
             ),
         )
+    if annotated_note is not None:
+        result.insert(0, types.TextContent(type="text", text=annotated_note))
     return result
 
 
@@ -7262,7 +7271,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         elif name in ("ui_element_screenshot", "sdk_element_screenshot"):
             element_id = ref_manager.resolve(arguments["element_id"])
             padding = arguments.get("padding", 16)
-            scale = arguments.get("scale", 1.0)
+            # Clamped as the annotated tools clamp it.
+            scale = max(0.25, min(2.0, float(arguments.get("scale", 1.0))))
             fmt = arguments.get("format", "png")
 
             is_ui = name == "ui_element_screenshot"
