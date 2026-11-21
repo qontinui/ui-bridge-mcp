@@ -47,6 +47,25 @@ def _real_png_b64() -> str:
 _REAL_PNG = _real_png_b64()
 
 
+def _store_with_frames() -> BaselineStore:
+    """A store holding a real baseline ('home') and a real 'before' frame."""
+    import base64
+
+    store = BaselineStore()
+    store.save_baseline("home", base64.b64decode(_REAL_PNG))
+    store.save_before(base64.b64decode(_REAL_PNG))
+    return store
+
+
+# A capture answer whose bytes are no image at all.
+_NOT_IMAGE_CAPTURE = {
+    "/ui-bridge/vision/capture": {
+        "success": True,
+        "data": {"base64": "aGk=", "width": 10, "height": 10, "format": "png"},
+    }
+}
+
+
 def _closed_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -1017,6 +1036,38 @@ FAILURE_PATHS: list[FailurePath] = [
         },
         "Delta frame not used: The image's format is UNKNOWN",
         setup=_fresh("delta_encoder", DeltaEncoder),
+    ),
+    FailurePath(
+        "sdk_screenshot_baseline_save: Baseline '{}' not saved: {}",
+        "sdk_screenshot_baseline_save",
+        {"baseline_key": "home", "target": "web"},
+        _NOT_IMAGE_CAPTURE,
+        "Baseline 'home' not saved: The image's format is UNKNOWN",
+        setup=_fresh("baseline_store", BaselineStore),
+    ),
+    FailurePath(
+        "sdk_screenshot_diff: Diff not run: the current frame: {}",
+        "sdk_screenshot_diff",
+        {"baseline_key": "home", "target": "web"},
+        _NOT_IMAGE_CAPTURE,
+        "Diff not run: the current frame: The image's format is UNKNOWN",
+        setup=_fresh("baseline_store", _store_with_frames),
+    ),
+    FailurePath(
+        "sdk_screenshot_before: 'Before' screenshot not saved: {}",
+        "sdk_screenshot_before",
+        {"target": "web"},
+        _NOT_IMAGE_CAPTURE,
+        "'Before' screenshot not saved: The image's format is UNKNOWN",
+        setup=_fresh("baseline_store", BaselineStore),
+    ),
+    FailurePath(
+        "sdk_screenshot_after: Comparison not run: the 'after' frame: {}",
+        "sdk_screenshot_after",
+        {"target": "web"},
+        _NOT_IMAGE_CAPTURE,
+        "Comparison not run: the 'after' frame: The image's format is UNKNOWN",
+        setup=_fresh("baseline_store", _store_with_frames),
     ),
     FailurePath(
         "call_tool: Unknown tool: {}",

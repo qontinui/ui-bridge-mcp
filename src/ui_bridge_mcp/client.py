@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -929,11 +930,17 @@ class UIBridgeClient:
             )
         data = b"".join(chunks)
         fmt = sniff_image_format(data)
-        try:
+
+        def decode_size() -> tuple[int, int]:
             with Image.open(io.BytesIO(data)) as img:
                 # Decode fully: the header alone gives a size for truncated bytes.
                 img.load()
-                width, height = img.size
+                size: tuple[int, int] = img.size
+                return size
+
+        try:
+            # A full decode of a large capture is CPU-bound; keep it off the loop.
+            width, height = await asyncio.to_thread(decode_size)
         except Exception as e:  # any decode failure leaves the frame UNKNOWN
             return UIBridgeResponse(
                 success=False,

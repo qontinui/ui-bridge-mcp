@@ -732,6 +732,36 @@ def _displayable(
     return base64.b64encode(buf.getvalue()).decode(), note
 
 
+def _image_problem(b64: str) -> tuple[str | None, str | None]:
+    """``(format, None)`` for a whole PNG/JPEG/WebP image, else ``(None, why)``.
+
+    Decode-only: the format is sniffed from the magic bytes and the image is
+    fully decoded (``load()``), so non-image or truncated bytes are caught
+    before anything stores, compares or returns them. Nothing is resized.
+    """
+    from PIL import Image
+
+    try:
+        raw = base64.b64decode(b64)
+    except ValueError:
+        raw = b""
+    fmt = sniff_image_format(raw[:16])
+    if fmt is None:
+        return None, (
+            "The image's format is UNKNOWN (its bytes are not PNG, JPEG or "
+            "WebP), so it is not used."
+        )
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            img.load()
+    except Exception as e:  # PIL raises several types for undecodable bytes
+        return None, (
+            f"The {fmt} image could not be decoded ({type(e).__name__}), so it "
+            "is not used."
+        )
+    return fmt, None
+
+
 def _bounded_image(b64: str, kept: str) -> tuple[types.ImageContent | None, str | None]:
     """A producer's own base64 image, bounded, with its sniffed MIME type.
 
@@ -739,23 +769,10 @@ def _bounded_image(b64: str, kept: str) -> tuple[types.ImageContent | None, str 
     or bytes that do not decode, return no image and a note saying why. A
     decodable image over the 1568px bound is downscaled (``_displayable``).
     """
-    try:
-        head = base64.b64decode(b64[:64])
-    except ValueError:
-        head = b""
-    fmt = sniff_image_format(head)
+    fmt, problem = _image_problem(b64)
     if fmt is None:
-        return None, (
-            "The image's format is UNKNOWN (its bytes are not PNG, JPEG or "
-            "WebP), so it is not returned."
-        )
-    try:
-        data, note = _displayable(b64, kept, fmt=fmt)
-    except Exception as e:  # PIL raises several types for undecodable bytes
-        return None, (
-            f"The {fmt} image could not be decoded ({type(e).__name__}), so its "
-            "size is UNKNOWN and it is not returned."
-        )
+        return None, problem
+    data, note = _displayable(b64, kept, fmt=fmt)
     return (
         types.ImageContent(type="image", data=data, mimeType=mime_type_for_format(fmt)),
         note,
@@ -7400,6 +7417,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
             if not isinstance(frame, dict):
                 return frame
+            _, baseline_problem = _image_problem(frame["base64"])
+            if baseline_problem is not None:
+                return _tool_error(f"Baseline '{key}' not saved: {baseline_problem}")
             baseline_store.save_baseline(key, base64.b64decode(frame["base64"]))
             return [types.TextContent(type="text", text=f"Baseline saved: '{key}'")]
 
@@ -7429,6 +7449,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             screenshot_b64 = frame["base64"]
+            _, diff_problem = _image_problem(screenshot_b64)
+            if diff_problem is not None:
+                return _tool_error(f"Diff not run: the current frame: {diff_problem}")
 
             baseline_b64 = base64.b64encode(baseline_bytes).decode()
             result = diff_screenshots(baseline_b64, screenshot_b64, threshold=threshold)
@@ -7464,6 +7487,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             screenshot_b64 = frame["base64"]
+            _, before_problem = _image_problem(screenshot_b64)
+            if before_problem is not None:
+                return _tool_error(f"'Before' screenshot not saved: {before_problem}")
             baseline_store.save_before(base64.b64decode(screenshot_b64))
             return [
                 types.TextContent(
@@ -7488,6 +7514,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             screenshot_b64 = frame["base64"]
+            _, after_problem = _image_problem(screenshot_b64)
+            if after_problem is not None:
+                return _tool_error(
+                    f"Comparison not run: the 'after' frame: {after_problem}"
+                )
 
             before_b64 = base64.b64encode(before_bytes).decode()
 
@@ -7560,17 +7591,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return frame
             screenshot_b64 = frame["base64"]
 
-            # Sniffed and fully decoded BEFORE the encoder sees it: bytes that
-            # are no image (or a truncated one) are refused with the reason,
-            # not handed to the encoder to fail on. The returned copy is
-            # bounded by its own size and labelled by its own bytes.
-            first_image, first_note = _bounded_image(
-                screenshot_b64,
-                "no comparison ran on this first frame; the delta encoder "
-                "keeps it at full resolution for the next call",
-            )
-            if first_image is None:
-                return _tool_error(f"Delta frame not used: {first_note}")
+            # Sniffed and fully decoded (decode-only) BEFORE the encoder sees
+            # it: bytes that are no image, or a truncated one, are refused with
+            # the reason, not handed to the encoder to fail on.
+            frame_format, frame_problem = _image_problem(screenshot_b64)
+            if frame_format is None:
+                return _tool_error(f"Delta frame not used: {frame_problem}")
 
             delta = delta_encoder.encode_delta(screenshot_b64)
 
@@ -7579,9 +7605,24 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"First capture (full image): {delta['image_width']}x{delta['image_height']}px, "
                     f"{delta['total_tiles']} tiles"
                 )
-                if first_note is not None:
-                    summary += f"\n{first_note}"
-                return [types.TextContent(type="text", text=summary), first_image]
+                # Only the first frame is returned, so only it is bounded: by
+                # its own size, labelled by its own bytes.
+                shown_b64, shown_note = _displayable(
+                    screenshot_b64,
+                    "no comparison ran on this first frame; the delta encoder "
+                    "keeps it at full resolution for the next call",
+                    fmt=frame_format,
+                )
+                if shown_note is not None:
+                    summary += f"\n{shown_note}"
+                return [
+                    types.TextContent(type="text", text=summary),
+                    types.ImageContent(
+                        type="image",
+                        data=shown_b64,
+                        mimeType=mime_type_for_format(frame_format),
+                    ),
+                ]
             else:
                 ratio_pct = round(delta["change_ratio"] * 100, 1)
                 summary = (

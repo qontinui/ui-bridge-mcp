@@ -1425,3 +1425,84 @@ def test_diagnose_status_without_boolean_connected_is_unknown(
         "carried no boolean `connected`)"
     ) in _text(items)
     assert "no SDK app is connected" not in _text(items)
+
+
+def _truncated_png_b64() -> str:
+    """A 60-byte PNG: its header names a size, its pixels are cut off."""
+    return base64.b64encode(base64.b64decode(_png(40, 20))[:60]).decode()
+
+
+@pytest.mark.parametrize(
+    "frame_b64",
+    [_NOT_AN_IMAGE, _truncated_png_b64()],
+    ids=["not-an-image", "truncated-png"],
+)
+@pytest.mark.parametrize(
+    "tool,arguments,expect,stored",
+    [
+        (
+            "sdk_screenshot_baseline_save",
+            {"baseline_key": "home"},
+            "Baseline 'home' not saved:",
+            lambda store: store.get_baseline("home"),
+        ),
+        (
+            "sdk_screenshot_before",
+            {},
+            "'Before' screenshot not saved:",
+            lambda store: store.get_before(),
+        ),
+    ],
+)
+def test_bad_frame_is_never_stored(
+    tool: str,
+    arguments: dict[str, Any],
+    expect: str,
+    stored: Any,
+    frame_b64: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-image or truncated bytes answer an error; nothing is stored."""
+    runner = Runner({CAPTURE: {**_frame(frame_b64), "format": "png"}})
+    _install(monkeypatch, runner)
+    items, is_error = _call(tool, {**arguments, "target": "web"})
+    assert is_error
+    assert expect in _text(items)
+    assert "saved: '" not in _text(items) and "captured." not in _text(items)
+    assert stored(server_mod.baseline_store) is None
+
+
+@pytest.mark.parametrize(
+    "frame_b64",
+    [_NOT_AN_IMAGE, _truncated_png_b64()],
+    ids=["not-an-image", "truncated-png"],
+)
+@pytest.mark.parametrize(
+    "tool,arguments,expect",
+    [
+        (
+            "sdk_screenshot_diff",
+            {"baseline_key": "home"},
+            "Diff not run: the current frame:",
+        ),
+        ("sdk_screenshot_after", {}, "Comparison not run: the 'after' frame:"),
+    ],
+)
+def test_bad_current_frame_is_not_compared(
+    tool: str,
+    arguments: dict[str, Any],
+    expect: str,
+    frame_b64: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = Runner({CAPTURE: {**_frame(frame_b64), "format": "png"}})
+    _install(monkeypatch, runner)
+    good = base64.b64decode(_png())
+    server_mod.baseline_store.save_baseline("home", good)
+    server_mod.baseline_store.save_before(good)
+    items, is_error = _call(tool, {**arguments, "target": "web"})
+    assert is_error
+    assert expect in _text(items)
+    assert _images(items) == []
+    # The stored 'before' frame survives a refused comparison.
+    assert server_mod.baseline_store.get_before() == good
