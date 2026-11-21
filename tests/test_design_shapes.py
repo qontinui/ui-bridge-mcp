@@ -967,8 +967,9 @@ def test_heuristic_issues_with_no_object_row_is_unknown(
     )
     text, is_error = _call("sdk_design_audit", {})
     assert is_error
-    # The SDK said 2 were listable; none of the 2 it sent is readable.
-    assert "Issues (0 listed of 2 listable; the SDK's counts disagree" in text
+    # The SDK listed 2 and sent 2: the counts agree; neither is readable.
+    assert "Issues (0 listed):" in text
+    assert "disagree" not in text
     assert "  2 malformed issue row(s) ignored (not an object)" in text
     assert "Reason: No style guide was provided" in text
 
@@ -976,7 +977,12 @@ def test_heuristic_issues_with_no_object_row_is_unknown(
 def test_heuristic_issues_listed_count_excludes_malformed_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    report = {**_HEURISTIC_AUDIT, "issues": [*_HEURISTIC_AUDIT["issues"], "junk"]}
+    report = {
+        **_HEURISTIC_AUDIT,
+        "issues": [*_HEURISTIC_AUDIT["issues"], "junk"],
+        # The SDK counts every row it sent, the malformed one included.
+        "listableResults": 3,
+    }
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
     )
@@ -1141,7 +1147,7 @@ def test_include_passed_truncated_header_counts_rows_not_failures(
     text, is_error = _call("sdk_design_audit", {})
     assert not is_error, text
     assert (
-        "Failing rows (2 shown; 3 rows sent incl. passes of 47 listable incl. "
+        "Failing rows (2 failing; 3 rows sent incl. passes of 47 listable incl. "
         "passes; the SDK cut the list at maxResults=3):"
     ) in text
     assert "2 listed of 47 listable" not in text
@@ -1156,7 +1162,7 @@ def test_include_passed_disagreeing_counts_are_stated_in_rows(
     )
     text, _ = _call("sdk_design_audit", {})
     assert (
-        "Failing rows (2 shown; 3 rows sent incl. passes of 5 listable incl. "
+        "Failing rows (2 failing; 3 rows sent incl. passes of 5 listable incl. "
         "passes; the SDK's counts disagree: it sent 3 row(s) and says the list "
         "was not truncated):"
     ) in text
@@ -1170,7 +1176,68 @@ def test_include_passed_matching_counts_add_nothing(
         server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
     )
     text, _ = _call("sdk_design_audit", {})
-    assert "Failing rows (2 shown; 3 rows sent incl. passes):" in text
+    assert "Failing rows (2 failing; 3 rows sent incl. passes):" in text
+
+
+@pytest.mark.parametrize("mode", ["heuristic", "style-guide"])
+def test_a_malformed_row_is_not_a_count_disagreement(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """``listableResults`` counts every row sent, the malformed one included."""
+    if mode == "heuristic":
+        report = {
+            **_HEURISTIC_AUDIT,
+            "issues": [_HEURISTIC_AUDIT["issues"][0], "junk"],
+            "listableResults": 2,
+            "resultsTruncated": False,
+        }
+        expected = "Issues (1 listed):"
+    else:
+        report = {
+            **_AUDIT,
+            "results": [_AUDIT["results"][0], "junk"],
+            "listableResults": 2,
+            "resultsTruncated": False,
+        }
+        expected = "Failing rows (1 listed):"
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert expected in text
+    assert "disagree" not in text
+    assert "1 malformed" in text
+
+
+def test_include_passed_header_agrees_with_the_tool_side_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failing = [
+        {
+            "elementId": f"el-{i}",
+            "ruleId": "button-color",
+            "passed": False,
+            "severity": "error",
+            "constraintResults": [],
+        }
+        for i in range(25)
+    ]
+    report = _with_passes(
+        results=failing,
+        listableResults=25,
+        maxResults=50,
+        resultsTruncated=False,
+    )
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "Failing rows (25 failing; 25 rows sent incl. passes):" in text
+    assert "  [el-19] button-color (error)" in text
+    assert "el-20" not in text
+    assert "  ... and 5 more rows not shown here" in text
+    assert "shown;" not in text
 
 
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -441,8 +441,10 @@ def _sdk_truncation_note(report: dict[str, Any], sent: int, qualifier: str = "")
 
     Both audit modes bound their listed findings by ``maxResults``
     (``resultsTruncated``, ``listableResults``; SDK ``specs/design-request.ts``
-    ``AuditResultBounds``). ``sent`` is how many readable rows the report
-    actually carried. A missing flag is unknown, never "not truncated"; a
+    ``AuditResultBounds``). ``sent`` is how many rows the report actually
+    carried, malformed ones included (the SDK's ``listableResults`` counts
+    every row it lists, so comparing it with the readable rows alone would
+    report a disagreement that is only a malformed row). A missing flag is unknown, never "not truncated"; a
     ``listableResults`` that differs from ``sent`` is shown, never hidden, and
     when the list claims not to be truncated that difference is called out as
     the SDK's counts disagreeing. ``qualifier`` follows each "listable" (e.g.
@@ -636,7 +638,9 @@ def _heuristic_audit_lines(report: dict[str, Any], limit: int) -> list[str]:
         lines.append("Issues: UNKNOWN (the report carried no issues list)")
     else:
         rows = [raw for raw in issues if isinstance(raw, dict)]
-        header = f"Issues ({len(rows)} listed{_sdk_truncation_note(report, len(rows))}"
+        header = (
+            f"Issues ({len(rows)} listed{_sdk_truncation_note(report, len(issues))}"
+        )
         header += "):" if issues else ")"
         lines.append(header)
         lines.extend(_audit_issue_lines(issues, limit=limit))
@@ -714,13 +718,13 @@ def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
         # listableResults (and maxResults) count passes too: the bound is
         # stated in rows, never set against the failing count alone.
         lines.append(
-            f"Failing rows ({len(failing)} shown; {len(rows)} rows sent incl. "
-            f"passes{_sdk_truncation_note(report, len(rows), ' incl. passes')}):"
+            f"Failing rows ({len(failing)} failing; {len(results)} rows sent incl. "
+            f"passes{_sdk_truncation_note(report, len(results), ' incl. passes')}):"
         )
     else:
         lines.append(
             f"Failing rows ({len(failing)} listed"
-            f"{_sdk_truncation_note(report, len(rows))}):"
+            f"{_sdk_truncation_note(report, len(results))}):"
         )
     for row in failing[:limit]:
         eid = row.get("elementId", "?")
