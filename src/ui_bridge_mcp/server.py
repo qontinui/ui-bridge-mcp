@@ -13,6 +13,7 @@ import base64
 import io
 import json
 import logging
+import threading
 from collections.abc import Sequence
 from typing import Any, TypeGuard
 
@@ -762,6 +763,38 @@ def _image_problem(b64: str) -> tuple[str | None, str | None]:
     return fmt, None
 
 
+# The delta encoder keeps the previous frame's tiles; its encode runs in a
+# worker thread, so two concurrent calls are serialised here rather than left
+# to interleave their reads and writes of that state.
+_DELTA_ENCODE_LOCK = threading.Lock()
+
+
+def _encode_delta_locked(b64: str) -> dict[str, Any]:
+    """``delta_encoder.encode_delta`` under ``_DELTA_ENCODE_LOCK``."""
+    with _DELTA_ENCODE_LOCK:
+        return delta_encoder.encode_delta(b64)
+
+
+def _reset_delta_locked() -> None:
+    """``delta_encoder.reset`` under the same lock as the encode.
+
+    A reset taken outside it could land mid-encode, and that encode's final
+    write of the previous-frame tiles would then undo the reset.
+    """
+    with _DELTA_ENCODE_LOCK:
+        delta_encoder.reset()
+
+
+async def _image_problem_off_loop(b64: str) -> tuple[str | None, str | None]:
+    """``_image_problem`` in a worker thread.
+
+    The full decode of a large frame is CPU work measured in tens of
+    milliseconds or more; run on the event loop it stalls every other request
+    the server is handling. Every async caller uses this, not the bare helper.
+    """
+    return await asyncio.to_thread(_image_problem, b64)
+
+
 def _bounded_image(b64: str, kept: str) -> tuple[types.ImageContent | None, str | None]:
     """A producer's own base64 image, bounded, with its sniffed MIME type.
 
@@ -772,7 +805,14 @@ def _bounded_image(b64: str, kept: str) -> tuple[types.ImageContent | None, str 
     fmt, problem = _image_problem(b64)
     if fmt is None:
         return None, problem
-    data, note = _displayable(b64, kept, fmt=fmt)
+    try:
+        data, note = _displayable(b64, kept, fmt=fmt)
+    except Exception as e:  # PIL raises several types when a re-encode fails
+        logger.exception("bounding a %s image for return failed", fmt)
+        return None, (
+            f"The {fmt} image decoded but could not be bounded for return "
+            f"({type(e).__name__}), so it is not returned."
+        )
     return (
         types.ImageContent(type="image", data=data, mimeType=mime_type_for_format(fmt)),
         note,
@@ -5631,7 +5671,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _error_result(response)
 
             data = response.data or {}
-            fallback = _native_capture_result(data)
+            fallback = await asyncio.to_thread(_native_capture_result, data)
             if fallback is not None:
                 return fallback
             elements = data.get("elements", [])
@@ -7249,7 +7289,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not response.success:
                 return _error_result(response)
             data = response.data or {}
-            fallback = _native_capture_result(data)
+            fallback = await asyncio.to_thread(_native_capture_result, data)
             if fallback is not None:
                 return fallback
             elements = data.get("elements", [])
@@ -7378,7 +7418,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
 
-            cropped = crop_to_element(
+            cropped = await asyncio.to_thread(
+                crop_to_element,
                 frame["base64"],
                 target_el,
                 css[0],
@@ -7391,7 +7432,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(f"Element '{element_id}' has no bounding rect.")
             # A large element, or a scale above 1, can make the crop itself
             # exceed the bound every returned image keeps.
-            cropped, crop_note = _displayable(
+            shown_crop, crop_note = await asyncio.to_thread(
+                _displayable,
                 cropped,
                 "the crop was taken from the full-resolution frame",
                 fmt=fmt,
@@ -7402,7 +7444,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             crop_result.append(
                 types.ImageContent(
                     type="image",
-                    data=cropped,
+                    data=shown_crop,
                     mimeType=mime_type_for_format(fmt),
                 )
             )
@@ -7417,7 +7459,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
             if not isinstance(frame, dict):
                 return frame
-            _, baseline_problem = _image_problem(frame["base64"])
+            _, baseline_problem = await _image_problem_off_loop(frame["base64"])
             if baseline_problem is not None:
                 return _tool_error(f"Baseline '{key}' not saved: {baseline_problem}")
             baseline_store.save_baseline(key, base64.b64decode(frame["base64"]))
@@ -7449,12 +7491,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             screenshot_b64 = frame["base64"]
-            _, diff_problem = _image_problem(screenshot_b64)
+            _, diff_problem = await _image_problem_off_loop(screenshot_b64)
             if diff_problem is not None:
                 return _tool_error(f"Diff not run: the current frame: {diff_problem}")
 
             baseline_b64 = base64.b64encode(baseline_bytes).decode()
-            result = diff_screenshots(baseline_b64, screenshot_b64, threshold=threshold)
+            result = await asyncio.to_thread(
+                diff_screenshots, baseline_b64, screenshot_b64, threshold=threshold
+            )
 
             status: str | None = "PASSED" if result.passed else "FAILED"
             summary = (
@@ -7463,8 +7507,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 f"(threshold: {result.threshold_used * 100:.1f}%)\n"
                 f"Changed regions: {len(result.changed_regions)}"
             )
-            diff_b64, diff_note = _displayable(
-                result.diff_image_b64, "the comparison ran at full resolution"
+            diff_b64, diff_note = await asyncio.to_thread(
+                _displayable,
+                result.diff_image_b64,
+                "the comparison ran at full resolution",
             )
             if diff_note is not None:
                 summary += f"\n{diff_note}"
@@ -7487,7 +7533,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             screenshot_b64 = frame["base64"]
-            _, before_problem = _image_problem(screenshot_b64)
+            _, before_problem = await _image_problem_off_loop(screenshot_b64)
             if before_problem is not None:
                 return _tool_error(f"'Before' screenshot not saved: {before_problem}")
             baseline_store.save_before(base64.b64decode(screenshot_b64))
@@ -7514,7 +7560,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(frame, dict):
                 return frame
             screenshot_b64 = frame["base64"]
-            _, after_problem = _image_problem(screenshot_b64)
+            _, after_problem = await _image_problem_off_loop(screenshot_b64)
             if after_problem is not None:
                 return _tool_error(
                     f"Comparison not run: the 'after' frame: {after_problem}"
@@ -7523,22 +7569,26 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             before_b64 = base64.b64encode(before_bytes).decode()
 
             # Create side-by-side comparison
-            comparison_b64 = create_before_after(
-                before_b64, screenshot_b64, layout=layout
+            comparison_b64 = await asyncio.to_thread(
+                create_before_after, before_b64, screenshot_b64, layout=layout
             )
 
             # Also compute diff
-            result = diff_screenshots(before_b64, screenshot_b64)
+            result = await asyncio.to_thread(
+                diff_screenshots, before_b64, screenshot_b64
+            )
             summary = (
                 f"Before/After comparison ({layout}):\n"
                 f"Change: {result.change_percentage}%\n"
                 f"Changed regions: {len(result.changed_regions)}"
             )
-            comparison_b64, comparison_note = _displayable(
-                comparison_b64, "the comparison ran at full resolution"
+            comparison_b64, comparison_note = await asyncio.to_thread(
+                _displayable, comparison_b64, "the comparison ran at full resolution"
             )
-            after_diff_b64, after_diff_note = _displayable(
-                result.diff_image_b64, "the comparison ran at full resolution"
+            after_diff_b64, after_diff_note = await asyncio.to_thread(
+                _displayable,
+                result.diff_image_b64,
+                "the comparison ran at full resolution",
             )
             for image_name, image_note in (
                 ("comparison", comparison_note),
@@ -7584,7 +7634,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not isinstance(target, str):
                 return target
             if arguments.get("reset", False):
-                delta_encoder.reset()
+                await asyncio.to_thread(_reset_delta_locked)
 
             frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
             if not isinstance(frame, dict):
@@ -7594,11 +7644,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             # Sniffed and fully decoded (decode-only) BEFORE the encoder sees
             # it: bytes that are no image, or a truncated one, are refused with
             # the reason, not handed to the encoder to fail on.
-            frame_format, frame_problem = _image_problem(screenshot_b64)
+            frame_format, frame_problem = await _image_problem_off_loop(screenshot_b64)
             if frame_format is None:
                 return _tool_error(f"Delta frame not used: {frame_problem}")
 
-            delta = delta_encoder.encode_delta(screenshot_b64)
+            delta = await asyncio.to_thread(_encode_delta_locked, screenshot_b64)
 
             if delta["is_first"]:
                 summary = (
@@ -7607,7 +7657,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 )
                 # Only the first frame is returned, so only it is bounded: by
                 # its own size, labelled by its own bytes.
-                shown_b64, shown_note = _displayable(
+                shown_b64, shown_note = await asyncio.to_thread(
+                    _displayable,
                     screenshot_b64,
                     "no comparison ran on this first frame; the delta encoder "
                     "keeps it at full resolution for the next call",
@@ -8409,7 +8460,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             # sniffed from its bytes rather than assumed to be PNG.
             screenshot_b64 = data.get("screenshot", "")
             if isinstance(screenshot_b64, str) and screenshot_b64:
-                evidence_image, evidence_note = _bounded_image(
+                evidence_image, evidence_note = await asyncio.to_thread(
+                    _bounded_image,
                     screenshot_b64,
                     "only the copy returned here was downscaled, by the MCP",
                 )

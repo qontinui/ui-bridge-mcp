@@ -1506,3 +1506,176 @@ def test_bad_current_frame_is_not_compared(
     assert _images(items) == []
     # The stored 'before' frame survives a refused comparison.
     assert server_mod.baseline_store.get_before() == good
+
+
+# ---------------------------------------------------------------------------
+# Decode work stays off the event loop; a failed re-encode is reported
+# ---------------------------------------------------------------------------
+
+
+def _record_threads(
+    monkeypatch: pytest.MonkeyPatch, owner: Any, names: list[str]
+) -> dict[str, list[str]]:
+    """Wrap ``owner.<name>`` so each call records the thread it ran on."""
+    import threading
+
+    seen: dict[str, list[str]] = {n: [] for n in names}
+    for n in names:
+        real = getattr(owner, n)
+
+        def wrapper(*a: Any, _n: str = n, _real: Any = real, **k: Any) -> Any:
+            seen[_n].append(threading.current_thread().name)
+            return _real(*a, **k)
+
+        monkeypatch.setattr(owner, n, wrapper)
+    return seen
+
+
+def _assert_all_off_loop(seen: dict[str, list[str]]) -> None:
+    import threading
+
+    main = threading.main_thread().name
+    for name, threads in seen.items():
+        assert threads, f"{name} did not run"
+        assert main not in threads, f"{name} ran on the event loop thread"
+
+
+def test_frame_decode_check_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The full decode of a captured frame must not run on the loop thread."""
+    _install(monkeypatch, Runner({CAPTURE: _frame()}))
+    seen = _record_threads(monkeypatch, server_mod, ["_image_problem"])
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "k", "target": "web"}
+    )
+    assert not is_error, _text(items)
+    _assert_all_off_loop(seen)
+
+
+def test_diff_image_work_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Decode, comparison and bounding of a diff all run in worker threads."""
+    runner = Runner({CAPTURE: _frame()})
+    _install(monkeypatch, runner)
+    items, is_error = _call(
+        "sdk_screenshot_baseline_save", {"baseline_key": "k", "target": "web"}
+    )
+    assert not is_error, _text(items)
+    seen = _record_threads(
+        monkeypatch, server_mod, ["_image_problem", "diff_screenshots", "_displayable"]
+    )
+    items, is_error = _call(
+        "sdk_screenshot_diff", {"baseline_key": "k", "target": "web"}, runner
+    )
+    assert not is_error, _text(items)
+    _assert_all_off_loop(seen)
+
+
+def test_before_after_image_work_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The before decode, the composite, the diff and the bounding run off the loop."""
+    runner = Runner({CAPTURE: _frame()})
+    _install(monkeypatch, runner)
+    seen_before = _record_threads(monkeypatch, server_mod, ["_image_problem"])
+    items, is_error = _call("sdk_screenshot_before", {"target": "web"})
+    assert not is_error, _text(items)
+    _assert_all_off_loop(seen_before)
+    seen = _record_threads(
+        monkeypatch,
+        server_mod,
+        ["create_before_after", "diff_screenshots", "_displayable"],
+    )
+    items, is_error = _call("sdk_screenshot_after", {"target": "web"}, runner)
+    assert not is_error, _text(items)
+    _assert_all_off_loop(seen)
+
+
+def test_delta_encode_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delta encoder and the first frame's bounding run in worker threads."""
+    _install(monkeypatch, Runner({CAPTURE: _frame()}))
+    seen = _record_threads(monkeypatch, server_mod, ["_displayable"])
+    seen.update(
+        _record_threads(monkeypatch, server_mod.delta_encoder, ["encode_delta"])
+    )
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web"})
+    assert not is_error, _text(items)
+    _assert_all_off_loop(seen)
+
+
+def test_native_capture_fallback_is_bounded_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner's window capture in a snapshot answer is decoded off the loop."""
+    _install(
+        monkeypatch,
+        Runner(
+            {
+                "/ui-bridge/control/snapshot": {
+                    "source": "native_capture",
+                    "screenshot": _png(),
+                    "elements": [],
+                }
+            }
+        ),
+    )
+    seen = _record_threads(monkeypatch, server_mod, ["_bounded_image"])
+    items, _ = _call("ui_snapshot", {})
+    assert _images(items)
+    _assert_all_off_loop(seen)
+
+
+def test_a_failed_bounding_reencode_is_reported_through_the_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decodable image whose bounding fails is withheld with the reason."""
+
+    def boom(*_a: Any, **_k: Any) -> tuple[str, str | None]:
+        raise OSError("encoder not available")
+
+    _install(
+        monkeypatch,
+        Runner(
+            {
+                "/ui-bridge/control/snapshot": {
+                    "source": "native_capture",
+                    "screenshot": _png(),
+                    "elements": [],
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(server_mod, "_displayable", boom)
+    items, is_error = _call("ui_snapshot", {})
+    assert is_error
+    assert not _images(items)
+    assert "could not be bounded for return (OSError)" in _text(items)
+
+
+def test_delta_reset_and_encode_both_take_the_encoder_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reset is serialised with the encode, so an in-flight encode cannot undo it."""
+    import threading
+
+    _install(monkeypatch, Runner({CAPTURE: _frame()}))
+    entered: list[str] = []
+    real = threading.Lock()
+
+    class RecordingLock:
+        def __enter__(self) -> None:
+            real.acquire()
+            entered.append(threading.current_thread().name)
+
+        def __exit__(self, *_exc: object) -> None:
+            real.release()
+
+    monkeypatch.setattr(server_mod, "_DELTA_ENCODE_LOCK", RecordingLock())
+    items, is_error = _call("sdk_screenshot_delta", {"target": "web", "reset": True})
+    assert not is_error, _text(items)
+    assert len(entered) == 2, entered  # the reset, then the encode
+    assert threading.main_thread().name not in entered
