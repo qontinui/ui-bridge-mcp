@@ -520,7 +520,8 @@ def _style_audit_unknown(data: Any) -> str:
     if isinstance(issues, list) and issues:
         checked = report.get("checkedElements")
         over = f" over {checked} elements" if _number(checked) else ""
-        lines.append(f"The response listed {len(issues)} issue(s){over}:")
+        readable = sum(1 for raw in issues if isinstance(raw, dict))
+        lines.append(f"The response listed {readable} issue(s){over}:")
         lines.extend(_audit_issue_lines(issues, limit=20))
     return "\n".join(lines)
 
@@ -8346,11 +8347,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 result_lines.extend(f"  {line}" for line in heuristic[1:])
             elif audit_resp.success and not _is_style_audit(audit_report):
                 listed = audit_report.get("issues")
-                found = (
-                    f"; it listed {len(listed)} issue(s)"
-                    if isinstance(listed, list)
-                    else ""
-                )
+                found = ""
+                if isinstance(listed, list):
+                    readable_issues = sum(1 for raw in listed if isinstance(raw, dict))
+                    found = f"; it listed {readable_issues} issue(s)"
+                    if len(listed) > readable_issues:
+                        found += (
+                            f"; {len(listed) - readable_issues} malformed issue row(s) "
+                            "ignored (not an object)"
+                        )
                 result_lines.append(
                     "\nStyle audit: UNKNOWN (the response is neither a style-guide "
                     f"audit nor a heuristic audit: {_audit_unknown_shape(audit_resp.data)}"

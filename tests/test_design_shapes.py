@@ -1240,6 +1240,31 @@ def test_include_passed_header_agrees_with_the_tool_side_cut(
     assert "shown;" not in text
 
 
+def test_unknown_answer_counts_only_object_issue_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {
+        "issues": [{"element": "a", "issue": "b", "severity": "info"}, "junk", 7],
+        "checkedElements": 3,
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert is_error
+    assert "The response listed 1 issue(s) over 3 elements:" in text
+    assert "  2 malformed issue row(s) ignored (not an object)" in text
+
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_review", _REVIEW_ARGS)
+    assert (
+        "heuristic audit: it carries no mode and no counts; it listed 1 issue(s); "
+        "2 malformed issue row(s) ignored (not an object))"
+    ) in text
+
+
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {RESPONSIVE_ROUTE: _RESPONSIVE})
