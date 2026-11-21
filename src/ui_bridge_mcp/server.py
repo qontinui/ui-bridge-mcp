@@ -436,7 +436,7 @@ def _audit_issue_lines(issues: list[Any], limit: int) -> list[str]:
     return lines
 
 
-def _sdk_truncation_note(report: dict[str, Any], sent: int) -> str:
+def _sdk_truncation_note(report: dict[str, Any], sent: int, qualifier: str = "") -> str:
     """What follows "N listed" in a findings header: the SDK's own list bound.
 
     Both audit modes bound their listed findings by ``maxResults``
@@ -445,23 +445,25 @@ def _sdk_truncation_note(report: dict[str, Any], sent: int) -> str:
     actually carried. A missing flag is unknown, never "not truncated"; a
     ``listableResults`` that differs from ``sent`` is shown, never hidden, and
     when the list claims not to be truncated that difference is called out as
-    the SDK's counts disagreeing.
+    the SDK's counts disagreeing. ``qualifier`` follows each "listable" (e.g.
+    " incl. passes" when ``includePassed`` makes the SDK count passes too).
     """
     truncated = report.get("resultsTruncated")
     listable = report.get("listableResults")
     differs = _number(listable) and listable != sent
     if truncated is True:
         return (
-            f" of {_count_or_unknown(listable)} listable; "
+            f" of {_count_or_unknown(listable)} listable{qualifier}; "
             "the SDK cut the list at "
             f"maxResults={_count_or_unknown(report.get('maxResults'))}"
         )
     if truncated is not False:
-        of = f" of {listable} listable" if differs else ""
+        of = f" of {listable} listable{qualifier}" if differs else ""
         return f"{of}; whether the SDK truncated the list is unknown"
     if differs:
         return (
-            f" of {listable} listable; the SDK's counts disagree: it sent {sent} "
+            f" of {listable} listable{qualifier}; the SDK's counts disagree: it "
+            f"sent {sent} "
             "row(s) and says the list was not truncated"
         )
     return ""
@@ -708,10 +710,18 @@ def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
         return lines
     rows = [row for row in results if isinstance(row, dict)]
     failing = [row for row in rows if row.get("passed") is not True]
-    lines.append(
-        f"Failing rows ({len(failing)} listed"
-        f"{_sdk_truncation_note(report, len(rows))}):"
-    )
+    if report.get("includePassed") is True:
+        # listableResults (and maxResults) count passes too: the bound is
+        # stated in rows, never set against the failing count alone.
+        lines.append(
+            f"Failing rows ({len(failing)} shown; {len(rows)} rows sent incl. "
+            f"passes{_sdk_truncation_note(report, len(rows), ' incl. passes')}):"
+        )
+    else:
+        lines.append(
+            f"Failing rows ({len(failing)} listed"
+            f"{_sdk_truncation_note(report, len(rows))}):"
+        )
     for row in failing[:limit]:
         eid = row.get("elementId", "?")
         rule_id = row.get("ruleId", "?")

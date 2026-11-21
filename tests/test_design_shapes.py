@@ -1113,6 +1113,66 @@ def test_matching_listable_count_adds_nothing(
     assert "Issues (2 listed):" in text
 
 
+def _with_passes(**overrides: Any) -> dict[str, Any]:
+    """The style-guide fixture with ``includePassed`` and one passing row."""
+    passing = {
+        "elementId": "hero",
+        "ruleId": "hero-color",
+        "passed": True,
+        "severity": "info",
+        "constraintResults": [],
+    }
+    return {
+        **_AUDIT,
+        "includePassed": True,
+        "results": [*_AUDIT["results"], passing],
+        **overrides,
+    }
+
+
+def test_include_passed_truncated_header_counts_rows_not_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``listableResults`` counts passes too: never "N of 47" failing rows."""
+    report = _with_passes(maxResults=3, listableResults=47, resultsTruncated=True)
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert (
+        "Failing rows (2 shown; 3 rows sent incl. passes of 47 listable incl. "
+        "passes; the SDK cut the list at maxResults=3):"
+    ) in text
+    assert "2 listed of 47 listable" not in text
+
+
+def test_include_passed_disagreeing_counts_are_stated_in_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _with_passes(listableResults=5, resultsTruncated=False)
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert (
+        "Failing rows (2 shown; 3 rows sent incl. passes of 5 listable incl. "
+        "passes; the SDK's counts disagree: it sent 3 row(s) and says the list "
+        "was not truncated):"
+    ) in text
+
+
+def test_include_passed_matching_counts_add_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _with_passes(listableResults=3, resultsTruncated=False)
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_audit", {})
+    assert "Failing rows (2 shown; 3 rows sent incl. passes):" in text
+
+
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {RESPONSIVE_ROUTE: _RESPONSIVE})
