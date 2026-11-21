@@ -801,7 +801,7 @@ FAILURE_PATHS: list[FailurePath] = [
             "ui_element_screenshot|sdk_element_screenshot: Element '{}' not found in "
             "snapshot.",
             tool,
-            {"element_id": "gone"},
+            {"element_id": "gone", "target": "web"},
             {snapshot: ok({"elements": [{"id": "other"}]})},
             "Element 'gone' not found in snapshot.",
         )
@@ -815,31 +815,25 @@ FAILURE_PATHS: list[FailurePath] = [
             "ui_element_screenshot|sdk_element_screenshot: Element '{}' has no "
             "bounding rect.",
             tool,
-            {"element_id": "box"},
+            {"element_id": "box", "target": "web"},
             {
                 snapshot: ok({"elements": [{"id": "box"}]}),
-                shot: ok({"screenshot": "aGk=", "width": 10, "height": 10}),
+                "/ui-bridge/vision/capture": ok(
+                    {"base64": "aGk=", "width": 10, "height": 10, "format": "png"}
+                ),
             },
             "Element 'box' has no bounding rect.",
         )
-        for tool, snapshot, shot in (
-            (
-                "ui_element_screenshot",
-                "/ui-bridge/control/snapshot",
-                "/ui-bridge/control/annotated-screenshot",
-            ),
-            (
-                "sdk_element_screenshot",
-                "/ui-bridge/sdk/snapshot",
-                "/ui-bridge/sdk/screenshot",
-            ),
+        for tool, snapshot in (
+            ("ui_element_screenshot", "/ui-bridge/control/snapshot"),
+            ("sdk_element_screenshot", "/ui-bridge/sdk/snapshot"),
         )
     ],
     FailurePath(
         "sdk_screenshot_diff: No baseline found for '{}'. Save one first with "
         "sdk_screenshot_baseline_save.",
         "sdk_screenshot_diff",
-        {"baseline_key": "home"},
+        {"baseline_key": "home", "target": "web"},
         {},
         "No baseline found for 'home'.",
         setup=_fresh("baseline_store", BaselineStore),
@@ -848,7 +842,7 @@ FAILURE_PATHS: list[FailurePath] = [
         "sdk_screenshot_after: No 'before' screenshot saved. Call "
         "sdk_screenshot_before first.",
         "sdk_screenshot_after",
-        {},
+        {"target": "web"},
         {},
         "No 'before' screenshot saved.",
         setup=_fresh("baseline_store", BaselineStore),

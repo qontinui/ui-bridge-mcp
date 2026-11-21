@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 from urllib.parse import quote
@@ -53,6 +54,12 @@ def _port_from_environment() -> int:
 # assigns itself when the failure happened before any body could carry a code.
 CODE_APP_UNREACHABLE = "app_unreachable"
 CODE_PRODUCER_FAILED = "producer_failed"
+
+# The runner's capture route and the code of its over-the-inline-cap 413
+# (``vision_capture_access.rs`` ``INLINE_TOO_LARGE``; ``hint`` carries ``url``).
+VISION_CAPTURE_ROUTE = "/ui-bridge/vision/capture"
+CODE_INLINE_TOO_LARGE = "INLINE_TOO_LARGE"
+_HINT_URL = re.compile(r'"url":"([^"]+)"')
 
 # The closed Observation ``UnknownCode`` set, in the canonical wire-contract
 # order: the twin of the ui-bridge SDK's
@@ -328,6 +335,61 @@ def render_body_error(body: Any, raw_text: str) -> str:
         # A plain ``{error, detail}`` body (the runner's 400 refusals, FastAPI).
         lines.append(f"detail: {_compact(body['detail'])}")
     return "\n".join(lines)
+
+
+def _inline_too_large_url(error: str) -> str | None:
+    """The ``url`` from a rendered ``INLINE_TOO_LARGE`` hint, if it is there."""
+    match = _HINT_URL.search(error)
+    return match.group(1) if match else None
+
+
+def _inline_capture(response: UIBridgeResponse) -> UIBridgeResponse:
+    """A successful ``vision/capture`` answer narrowed to its inline image.
+
+    An answer without the inline bytes or the pixel size is a failure, not an
+    empty image: the caller asked for ``inline: true``.
+    """
+    data = response.data if isinstance(response.data, dict) else {}
+    b64 = data.get("base64")
+    width = data.get("width")
+    height = data.get("height")
+    missing = [
+        name
+        for name, ok in (
+            ("base64", isinstance(b64, str) and bool(b64)),
+            ("width", isinstance(width, int) and not isinstance(width, bool)),
+            ("height", isinstance(height, int) and not isinstance(height, bool)),
+        )
+        if not ok
+    ]
+    if missing:
+        shape = (
+            "a multi-output {captures} answer"
+            if "captures" in data
+            else f"keys {sorted(data.keys())}"
+        )
+        return UIBridgeResponse(
+            success=False,
+            error=(
+                "vision/capture answered without "
+                f"{', '.join(missing)} (got {shape}); the image is UNKNOWN"
+            ),
+            code=CODE_PRODUCER_FAILED,
+            status=response.status,
+        )
+    sha = data.get("sha256")
+    fmt = data.get("format")
+    return UIBridgeResponse(
+        success=True,
+        data={
+            "base64": b64,
+            "width": width,
+            "height": height,
+            "sha256": sha if isinstance(sha, str) else None,
+            "format": fmt if isinstance(fmt, str) else None,
+        },
+        status=response.status,
+    )
 
 
 class UIBridgeClient:
@@ -654,6 +716,64 @@ class UIBridgeClient:
             "/ui-bridge/vision/assert",
             {"snapshot": snapshot, "assertions": assertions},
         )
+
+    async def vision_capture(
+        self,
+        target: str | None = None,
+        region: dict[str, int] | None = None,
+        element: str | None = None,
+        *,
+        contract: str | None = None,
+    ) -> UIBridgeResponse:
+        """Capture a frame through ``POST /ui-bridge/vision/capture``, inline.
+
+        The runner's one capture route (its ``CaptureRequest``,
+        ``src-tauri/src/mcp/ui_bridge/vision_routes.rs``). The SDK screenshot
+        and control annotated-screenshot routes this replaced were deleted
+        from the runner on 2026-05-13.
+
+        Args:
+            target: Frame source: a registered device / app id or an adb serial.
+                ``None`` captures the runner's own window.
+            region: Pixel-space crop ``{x, y, w, h}`` applied after capture.
+            element: Element id; the runner crops to its rect.
+            contract: Output contract: ``"claude"`` (the runner default, lossy
+                and size-bounded), ``"webp"``, or ``"png_strict"`` (lossless).
+
+        Every capture is taken fresh (``force``): the runner's cache is keyed
+        on its UI-mutation counter, which a change it did not drive never bumps.
+
+        On success ``data`` is ``{base64, width, height, sha256, format}``.
+        ``sha256`` is the runner's hash of the cache KEY, not of the image
+        bytes. A capture over the runner's inline cap answers 413
+        ``INLINE_TOO_LARGE``; that failure is returned with the ``url`` the
+        bytes are served from, and is not retried.
+        """
+        body: dict[str, Any] = {"inline": True, "force": True}
+        if target is not None:
+            body["target"] = target
+        if region is not None:
+            body["region"] = region
+        if element is not None:
+            body["element"] = element
+        if contract is not None:
+            body["contract"] = contract
+        response = await self._request("POST", VISION_CAPTURE_ROUTE, body)
+        if not response.success:
+            if response.code == CODE_INLINE_TOO_LARGE:
+                url = _inline_too_large_url(response.error or "")
+                where = (
+                    f"GET {self.base_url}{url}"
+                    if url is not None
+                    else "the url named in the runner's hint (not found in it)"
+                )
+                response.error = (
+                    "capture is too large to return inline; it was taken and "
+                    f"cached, and is not retried here. Fetch it with {where}. "
+                    f"Runner said: {response.error}"
+                )
+            return response
+        return _inline_capture(response)
 
     async def control_list_elements(self) -> UIBridgeResponse:
         """List all registered UI elements in the runner's webview."""
@@ -1061,10 +1181,6 @@ class UIBridgeClient:
     async def sdk_ai_summary(self) -> UIBridgeResponse:
         """Get an AI-friendly summary of the current page."""
         return await self._request("GET", "/ui-bridge/sdk/ai/summary")
-
-    async def sdk_screenshot(self) -> UIBridgeResponse:
-        """Capture a screenshot of the monitor where the SDK app is running."""
-        return await self._request("GET", "/ui-bridge/sdk/screenshot")
 
     async def sdk_components(self) -> UIBridgeResponse:
         """List all registered components in the connected SDK app."""
@@ -1953,30 +2069,6 @@ class UIBridgeClient:
         """Get change buffer size and enabled status (SDK mode)."""
         return await self._request("GET", "/ui-bridge/sdk/ai/change-buffer/size")
 
-    # -------------------------------------------------------------------------
-    # Agent Mode - Annotated Screenshots
-    # -------------------------------------------------------------------------
-
-    async def control_annotated_screenshot(
-        self, monitor: int | None = None, runner: bool = False
-    ) -> UIBridgeResponse:
-        """Get a screenshot of the runner's monitor for annotation.
-
-        Returns screenshot base64, width, and height in one response.
-
-        Args:
-            monitor: Monitor index (0-based). Defaults to primary.
-            runner: If True, capture the runner's Tauri window instead of monitor.
-        """
-        params: dict[str, str] | None = None
-        if monitor is not None:
-            params = params or {}
-            params["monitor"] = str(monitor)
-        if runner:
-            params = params or {}
-            params["runner"] = "true"
-        return await self._get("/ui-bridge/control/annotated-screenshot", params=params)
-
     async def control_query_selector(
         self,
         selector: str,
@@ -2017,19 +2109,6 @@ class UIBridgeClient:
             "/ui-bridge/sdk/control/page-evaluate",
             {"expression": expression},
         )
-
-    async def sdk_screenshot_raw(self, monitor: int | None = None) -> UIBridgeResponse:
-        """Get raw screenshot data from the SDK app's monitor.
-
-        Returns screenshot base64, width, and height for annotation.
-
-        Args:
-            monitor: Monitor index (0-based). Defaults to primary.
-        """
-        params: dict[str, str] | None = None
-        if monitor is not None:
-            params = {"monitor": str(monitor)}
-        return await self._request("GET", "/ui-bridge/sdk/screenshot", params=params)
 
     async def _get(
         self,

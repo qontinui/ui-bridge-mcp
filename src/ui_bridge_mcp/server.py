@@ -599,6 +599,61 @@ def _quality_metric_lines(report: dict[str, Any], issue_limit: int) -> list[str]
     return lines
 
 
+# Lossless frames for the tools that compare pixels or crop: a lossy encoding
+# would turn its own artifacts into "changes".
+_LOSSLESS_CONTRACT = "png_strict"
+
+
+def _capture_target(arguments: dict[str, Any], tool: str) -> str | ToolResult:
+    """The ``target`` an ``sdk_*`` capture tool needs, or the error to return.
+
+    ``POST /ui-bridge/vision/capture`` with no ``target`` captures the runner's
+    own window. For a tool that names the SDK app that would be a picture of
+    the wrong thing, so the target is required rather than defaulted.
+    """
+    target = arguments.get("target")
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    return _tool_error(
+        f"Error: {tool} needs `target`: the app or device id the runner captures "
+        "(a registered app id, a paired device id, or an adb serial). Without it "
+        "the runner would capture its own window, not the SDK app."
+    )
+
+
+async def _capture_frame(
+    ui_client: UIBridgeClient,
+    target: str | None,
+    contract: str | None = None,
+) -> dict[str, Any] | ToolResult:
+    """An inline ``vision/capture`` frame, or the flagged error to return."""
+    resp = await ui_client.vision_capture(target=target, contract=contract)
+    if not resp.success:
+        return _tool_error(f"Error getting screenshot: {resp.describe_error()}")
+    return _as_dict(resp.data)
+
+
+def _css_viewport(snapshot: dict[str, Any], frame: dict[str, Any]) -> tuple[int, int]:
+    """The CSS size element rects are measured in, for scaling onto the frame.
+
+    The snapshot's own viewport when it reports one; otherwise the frame's
+    pixel size (scale 1). A capture contract may downscale the frame, so its
+    pixel size is not the CSS size whenever the snapshot can say better.
+    """
+    viewport = _as_dict(snapshot.get("viewport"))
+    width = viewport.get("viewportWidth")
+    height = viewport.get("viewportHeight")
+    if _number(width) and _number(height) and width > 0 and height > 0:
+        return int(width), int(height)
+    return int(frame["width"]), int(frame["height"])
+
+
+def _frame_mime(frame: dict[str, Any]) -> str:
+    """The frame's MIME type from the runner's ``format`` field."""
+    fmt = frame.get("format")
+    return mime_type_for_format(fmt) if isinstance(fmt, str) else "image/png"
+
+
 def _percent(value: Any) -> str:
     """A 0-1 score as a percentage; UNKNOWN when the producer sent none."""
     return f"{value:.0%}" if _number(value) else "UNKNOWN"
@@ -3549,13 +3604,20 @@ key elements, and overall state.""",
     ),
     types.Tool(
         name="sdk_screenshot",
-        description="""Capture a screenshot of the monitor where the SDK app is running.
+        description="""Capture a screenshot of an SDK app or device through the runner's
+POST /ui-bridge/vision/capture route.
 
-Returns screenshot metadata.""",
+Returns the image (the runner's default `claude` contract), with its pixel size and
+the runner's cache-key hash.""",
         inputSchema={
             "type": "object",
-            "properties": {},
-            "required": [],
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
+                },
+            },
+            "required": ["target"],
         },
     ),
     # Page Navigation Tools
@@ -3749,10 +3811,6 @@ Supports smart cropping:
         inputSchema={
             "type": "object",
             "properties": {
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index (0-based). Defaults to primary monitor.",
-                },
                 "mode": {
                     "type": "string",
                     "enum": [
@@ -3796,7 +3854,7 @@ Supports smart cropping:
     ),
     types.Tool(
         name="sdk_annotated_screenshot",
-        description="""Capture a screenshot of the SDK app's monitor with element labels overlaid.
+        description="""Capture a screenshot of an SDK app (`target`) with element labels overlaid.
 
 Each visible element gets a numbered overlay (@e1, @e2) matching agent mode refs.
 Supports annotation modes for different visualization styles:
@@ -3818,9 +3876,9 @@ Supports smart cropping:
         inputSchema={
             "type": "object",
             "properties": {
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index (0-based). Defaults to primary monitor.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
                 "mode": {
                     "type": "string",
@@ -3860,7 +3918,7 @@ Supports smart cropping:
                     "description": "Only annotate these element IDs/refs. Overrides mode filtering.",
                 },
             },
-            "required": [],
+            "required": ["target"],
         },
     ),
     # Element Screenshot Tools
@@ -3876,10 +3934,6 @@ Useful for inspecting individual components without full-page noise.""",
                 "element_id": {
                     "type": "string",
                     "description": "Element ID or @ref to capture.",
-                },
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index (0-based). Defaults to primary.",
                 },
                 "padding": {
                     "type": "integer",
@@ -3911,9 +3965,9 @@ Useful for inspecting individual components without full-page noise.""",
                     "type": "string",
                     "description": "Element ID or @ref to capture.",
                 },
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index (0-based). Defaults to primary.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
                 "padding": {
                     "type": "integer",
@@ -3929,7 +3983,7 @@ Useful for inspecting individual components without full-page noise.""",
                     "description": "Output format. Default: png.",
                 },
             },
-            "required": ["element_id"],
+            "required": ["element_id", "target"],
         },
     ),
     # Screenshot Diffing Tools
@@ -3950,12 +4004,12 @@ and pass/fail result. Save a baseline first with sdk_screenshot_baseline_save.""
                     "type": "number",
                     "description": "Max allowed change percentage (0.0-1.0). Default: 0.01 (1%).",
                 },
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index. Defaults to primary.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
             },
-            "required": ["baseline_key"],
+            "required": ["baseline_key", "target"],
         },
     ),
     types.Tool(
@@ -3971,12 +4025,12 @@ The baseline persists for the duration of this MCP session.""",
                     "type": "string",
                     "description": "Key to save the baseline under (e.g., route name).",
                 },
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index. Defaults to primary.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
             },
-            "required": ["baseline_key"],
+            "required": ["baseline_key", "target"],
         },
     ),
     types.Tool(
@@ -3998,12 +4052,12 @@ capture the result and get a side-by-side comparison.""",
         inputSchema={
             "type": "object",
             "properties": {
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index. Defaults to primary.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
             },
-            "required": [],
+            "required": ["target"],
         },
     ),
     types.Tool(
@@ -4015,9 +4069,9 @@ plus a diff overlay highlighting changes. Must call sdk_screenshot_before first.
         inputSchema={
             "type": "object",
             "properties": {
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index. Defaults to primary.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
                 "layout": {
                     "type": "string",
@@ -4025,7 +4079,7 @@ plus a diff overlay highlighting changes. Must call sdk_screenshot_before first.
                     "description": "Comparison layout. Default: side-by-side.",
                 },
             },
-            "required": [],
+            "required": ["target"],
         },
     ),
     # Visual Description Tool
@@ -4038,12 +4092,7 @@ element type breakdown, interactive vs content count, modal/toast/error status, 
 Useful as a lightweight alternative to screenshots for understanding page layout.""",
         inputSchema={
             "type": "object",
-            "properties": {
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index. Defaults to primary.",
-                },
-            },
+            "properties": {},
             "required": [],
         },
     ),
@@ -4060,16 +4109,16 @@ Returns: text summary of changes + changed tile data as JSON.""",
         inputSchema={
             "type": "object",
             "properties": {
-                "monitor": {
-                    "type": "integer",
-                    "description": "Monitor index. Defaults to primary.",
+                "target": {
+                    "type": "string",
+                    "description": "The SDK app or device to capture, as the runner knows it: a registered app id, a paired device id, or an adb serial (POST /ui-bridge/vision/capture `target`). Required: without it the runner would capture its own window, not the app.",
                 },
                 "reset": {
                     "type": "boolean",
                     "description": "Reset delta state, forcing a full capture. Default: false.",
                 },
             },
-            "required": [],
+            "required": ["target"],
         },
     ),
     # =========================================================================
@@ -6561,12 +6610,25 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             return [types.TextContent(type="text", text="Navigated forward")]
 
         elif name == "sdk_screenshot":
-            response = await ui_client.sdk_screenshot()
-            if not response.success:
-                return _error_result(response)
-            data = response.data or {}
-            path = data.get("screenshot_path", data.get("path", "unknown"))
-            return [types.TextContent(type="text", text=f"Screenshot captured: {path}")]
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
+            frame = await _capture_frame(ui_client, target)
+            if not isinstance(frame, dict):
+                return frame
+            return [
+                types.TextContent(
+                    type="text",
+                    text=(
+                        f"Screenshot of '{target}': {frame['width']}x{frame['height']}px "
+                        f"{frame.get('format') or 'format unknown'} "
+                        f"(runner cache key {frame.get('sha256') or 'unknown'})"
+                    ),
+                ),
+                types.ImageContent(
+                    type="image", data=frame["base64"], mimeType=_frame_mime(frame)
+                ),
+            ]
 
         # Cross-App Analysis Tools
         elif name == "sdk_analyze_data":
@@ -6945,7 +7007,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         # Agent Mode: Annotated Screenshots
         elif name == "ui_annotated_screenshot":
-            monitor = arguments.get("monitor")
             opts = _build_annotation_options(arguments, ref_manager)
             # Get full snapshot for element positions + modal/viewport context
             snap_resp = await ui_client.control_snapshot()
@@ -6963,22 +7024,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 if design_resp.success:
                     design_data = (design_resp.data or {}).get("elements", [])
 
-            # Get screenshot (runner=True to capture Tauri window, not monitor)
-            screenshot_resp = await ui_client.control_annotated_screenshot(
-                monitor=monitor, runner=True
-            )
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            ss_width = ss_data.get("width", 0)
-            ss_height = ss_data.get("height", 0)
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            # No target: vision/capture captures the runner's own window.
+            frame = await _capture_frame(ui_client, None)
+            if not isinstance(frame, dict):
+                return frame
+            ss_width, ss_height = _css_viewport(snap_data, frame)
             annotated_b64 = annotate_screenshot(
-                screenshot_b64,
+                frame["base64"],
                 snap_elements,
                 ss_width,
                 ss_height,
@@ -7007,7 +7059,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             return result_content
 
         elif name == "sdk_annotated_screenshot":
-            monitor = arguments.get("monitor")
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
             opts = _build_annotation_options(arguments, ref_manager)
             # Get full snapshot
             snap_resp = await ui_client.sdk_snapshot()
@@ -7025,20 +7079,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 if design_resp.success:
                     design_data = (design_resp.data or {}).get("elements", [])
 
-            # Get screenshot
-            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            ss_width = ss_data.get("width", 0)
-            ss_height = ss_data.get("height", 0)
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            frame = await _capture_frame(ui_client, target)
+            if not isinstance(frame, dict):
+                return frame
+            ss_width, ss_height = _css_viewport(snap_data, frame)
             annotated_b64 = annotate_screenshot(
-                screenshot_b64,
+                frame["base64"],
                 snap_elements,
                 ss_width,
                 ss_height,
@@ -7070,12 +7116,17 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         # Element-level screenshots
         elif name in ("ui_element_screenshot", "sdk_element_screenshot"):
             element_id = ref_manager.resolve(arguments["element_id"])
-            monitor = arguments.get("monitor")
             padding = arguments.get("padding", 16)
             scale = arguments.get("scale", 1.0)
             fmt = arguments.get("format", "png")
 
             is_ui = name == "ui_element_screenshot"
+            element_target: str | None = None
+            if not is_ui:
+                checked = _capture_target(arguments, name)
+                if not isinstance(checked, str):
+                    return checked
+                element_target = checked
             snap_resp = (
                 await ui_client.control_snapshot()
                 if is_ui
@@ -7085,33 +7136,25 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(
                     f"Error getting snapshot: {snap_resp.describe_error()}"
                 )
-            snap_elements = (snap_resp.data or {}).get("elements", [])
+            el_snap_data = _as_dict(snap_resp.data)
+            snap_elements = el_snap_data.get("elements", [])
             target_el = next(
                 (e for e in snap_elements if e.get("id") == element_id), None
             )
             if not target_el:
                 return _tool_error(f"Element '{element_id}' not found in snapshot.")
 
-            screenshot_resp = (
-                await ui_client.control_annotated_screenshot(
-                    monitor=monitor, runner=True
-                )
-                if is_ui
-                else await ui_client.sdk_screenshot_raw(monitor=monitor)
+            # The ui_ tool captures the runner's own window (no target). The
+            # frame is lossless so the crop is not a re-encode of a lossy image.
+            frame = await _capture_frame(
+                ui_client, element_target, contract=_LOSSLESS_CONTRACT
             )
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            ss_width = ss_data.get("width", 0)
-            ss_height = ss_data.get("height", 0)
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            if not isinstance(frame, dict):
+                return frame
+            ss_width, ss_height = _css_viewport(el_snap_data, frame)
 
             cropped = crop_to_element(
-                screenshot_b64,
+                frame["base64"],
                 target_el,
                 ss_width,
                 ss_height,
@@ -7132,17 +7175,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         # Screenshot baseline management
         elif name == "sdk_screenshot_baseline_save":
             key = arguments["baseline_key"]
-            monitor = arguments.get("monitor")
-            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
-            baseline_store.save_baseline(key, base64.b64decode(screenshot_b64))
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
+            frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
+            if not isinstance(frame, dict):
+                return frame
+            baseline_store.save_baseline(key, base64.b64decode(frame["base64"]))
             return [types.TextContent(type="text", text=f"Baseline saved: '{key}'")]
 
         elif name == "sdk_screenshot_baseline_list":
@@ -7157,7 +7196,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
         elif name == "sdk_screenshot_diff":
             key = arguments["baseline_key"]
             threshold = arguments.get("threshold", 0.01)
-            monitor = arguments.get("monitor")
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
 
             baseline_bytes = baseline_store.get_baseline(key)
             if baseline_bytes is None:
@@ -7165,15 +7206,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"No baseline found for '{key}'. Save one first with sdk_screenshot_baseline_save."
                 )
 
-            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
+            if not isinstance(frame, dict):
+                return frame
+            screenshot_b64 = frame["base64"]
 
             baseline_b64 = base64.b64encode(baseline_bytes).decode()
             result = diff_screenshots(baseline_b64, screenshot_b64, threshold=threshold)
@@ -7197,16 +7233,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         # Before/After comparison
         elif name == "sdk_screenshot_before":
-            monitor = arguments.get("monitor")
-            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
+            frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
+            if not isinstance(frame, dict):
+                return frame
+            screenshot_b64 = frame["base64"]
             baseline_store.save_before(base64.b64decode(screenshot_b64))
             return [
                 types.TextContent(
@@ -7216,7 +7249,9 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             ]
 
         elif name == "sdk_screenshot_after":
-            monitor = arguments.get("monitor")
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
             layout = arguments.get("layout", "side-by-side")
 
             before_bytes = baseline_store.get_before()
@@ -7225,15 +7260,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     "No 'before' screenshot saved. Call sdk_screenshot_before first."
                 )
 
-            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
+            if not isinstance(frame, dict):
+                return frame
+            screenshot_b64 = frame["base64"]
 
             before_b64 = base64.b64encode(before_bytes).decode()
 
@@ -7283,19 +7313,16 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
         # Delta / Incremental Screenshot (D3)
         elif name == "sdk_screenshot_delta":
-            monitor = arguments.get("monitor")
+            target = _capture_target(arguments, name)
+            if not isinstance(target, str):
+                return target
             if arguments.get("reset", False):
                 delta_encoder.reset()
 
-            screenshot_resp = await ui_client.sdk_screenshot_raw(monitor=monitor)
-            if not screenshot_resp.success:
-                return _tool_error(
-                    f"Error getting screenshot: {screenshot_resp.describe_error()}"
-                )
-            ss_data = screenshot_resp.data or {}
-            screenshot_b64 = ss_data.get("screenshot", "")
-            if not screenshot_b64:
-                return _tool_error("Error: No screenshot data returned")
+            frame = await _capture_frame(ui_client, target, _LOSSLESS_CONTRACT)
+            if not isinstance(frame, dict):
+                return frame
+            screenshot_b64 = frame["base64"]
 
             delta = delta_encoder.encode_delta(screenshot_b64)
 
