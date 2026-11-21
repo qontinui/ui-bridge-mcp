@@ -23,7 +23,7 @@ from mcp.server.stdio import stdio_server
 
 from .client import (
     AI_ASSERT_STATES,
-    CODE_INLINE_TOO_LARGE,
+    CODE_APP_UNREACHABLE,
     UIBridgeClient,
     UIBridgeResponse,
     Unknown,
@@ -680,9 +680,16 @@ async def _capture_frame(
         follow_oversize=contract == _LOSSLESS_CONTRACT,
     )
     if not resp.success:
-        # Diagnosed only for a target, and only when the frame was not taken:
-        # an INLINE_TOO_LARGE capture succeeded and is merely oversize.
-        if target is None or resp.code == CODE_INLINE_TOO_LARGE:
+        # Diagnosed only for a target, only when the runner answered (a
+        # transport failure says nothing about frame sources), and only when
+        # the frame was not taken (an oversize capture, or its cache
+        # follow-up, failing is not a frame-source failure).
+        if (
+            target is None
+            or resp.capture_taken
+            or resp.status is None
+            or resp.code == CODE_APP_UNREACHABLE
+        ):
             cause = resp.describe_error()
         else:
             cause = await _diagnose_capture_failure(ui_client, target, resp)
@@ -693,6 +700,9 @@ async def _capture_frame(
 # The frame source a runner advertises in ``/health`` ``visionFrameSources``
 # once it can capture a WebSocket-transport app over the app's own socket.
 _WEBSOCKET_FRAME_SOURCE = "websocket_relay"
+# The code this server mints when a runner build has no WebSocket frame
+# source and the target is a WebSocket-transport app.
+CODE_FRAME_SOURCE_MISSING = "FRAME_SOURCE_MISSING"
 
 
 async def _diagnose_capture_failure(
@@ -703,31 +713,38 @@ async def _diagnose_capture_failure(
     Plan 2026-11-21-vision-capture-cannot-frame-a-websocket-transport-app, D5:
     the capture is never pre-checked, so a successful one costs no extra read.
     A runner build without the ``websocket_relay`` frame source HTTP-GETs a
-    WebSocket app's page origin and reports the resulting 404, which names the
-    wrong cause; that case is rewritten into a sentence naming the build. A
-    build that has the source keeps its own ``code`` and message. A read that
-    fails leaves the capability UNKNOWN, and the error says so.
+    WebSocket app's page origin instead of using its socket, and reports
+    whatever that GET did, which names the wrong cause; that case is rewritten
+    under ``FRAME_SOURCE_MISSING`` into a sentence naming the build. A build
+    that has the source keeps its own ``code`` and message. A read that fails
+    leaves the capability UNKNOWN, and the original error (its ``[code=…]``
+    first) says so after its own words.
     """
     original = resp.describe_error()
     row = await ui_client.registered_app(target)
     if isinstance(row, Unknown):
-        return f"runner capability UNKNOWN ({row.reason}): {original}"
+        return f"{original} (runner capability UNKNOWN ({row.reason}))"
     if row is None or row.get("transport") != "websocket":
         return original
     health = await ui_client.vision_frame_sources()
     if isinstance(health, Unknown):
-        return f"runner capability UNKNOWN ({health.reason}): {original}"
+        return f"{original} (runner capability UNKNOWN ({health.reason}))"
     if health.sources is not None and _WEBSOCKET_FRAME_SOURCE in health.sources:
         return original
     build = f" (build {health.build_id})" if health.build_id else ""
-    return (
-        f"the runner{build} cannot capture WebSocket-transport app '{target}': "
-        "its capture route HTTP-GETs the app's page origin, which answers 404. "
-        "A runner built from qontinui-runner origin/main at or after this plan's "
-        "Phase 1 captures it over the app's socket. "
-        f"(plan 2026-11-21-vision-capture-cannot-frame-a-websocket-transport-app; "
-        f"runner said: {original})"
-    )
+    return UIBridgeResponse(
+        success=False,
+        code=CODE_FRAME_SOURCE_MISSING,
+        status=resp.status,
+        error=(
+            f"the runner{build} cannot capture WebSocket-transport app "
+            f"'{target}': its capture route HTTP-GETs the app's page origin "
+            "instead of using the app's socket. A runner built from "
+            "qontinui-runner origin/main at or after Phase 1 of plan "
+            "2026-11-21-vision-capture-cannot-frame-a-websocket-transport-app "
+            f"captures it over the app's socket. Runner said: {original}"
+        ),
+    ).describe_error()
 
 
 # The longest edge a full-frame-sized image (a frame, a side-by-side

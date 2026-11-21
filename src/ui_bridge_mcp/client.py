@@ -229,6 +229,11 @@ class UIBridgeResponse:
     # on every failure that carried a body (non-2xx, and a 2xx whose
     # ``success`` is false); ``None`` when the body had none.
     hint: Any = None
+    # Set by ``vision_capture`` on a failure that came AFTER the runner took
+    # the frame: an INLINE_TOO_LARGE answer (the frame was taken and cached),
+    # whatever its cache follow-up then did, or a 200 whose frame could not
+    # be read. Such a failure is not a frame-source failure.
+    capture_taken: bool = False
 
     def describe_error(self) -> str:
         """Render the failure for a tool result: typed code and status first.
@@ -896,46 +901,61 @@ class UIBridgeClient:
         if contract is not None:
             body["contract"] = contract
         response = await self._request("POST", VISION_CAPTURE_ROUTE, body)
-        if not response.success:
-            if response.code != CODE_INLINE_TOO_LARGE:
-                return response
-            url = _inline_too_large_url(response)
-            hint = response.hint if isinstance(response.hint, dict) else {}
-            size = hint.get("bytes")
-            if follow_oversize and url is not None:
-                if (
-                    isinstance(size, int)
-                    and not isinstance(size, bool)
-                    and size > MAX_CACHED_CAPTURE_BYTES
-                ):
-                    return UIBridgeResponse(
-                        success=False,
-                        error=(
-                            f"capture is {size} bytes (the runner's hint.bytes), "
-                            "over this client's MAX_CACHED_CAPTURE_BYTES="
-                            f"{MAX_CACHED_CAPTURE_BYTES}; it was not read from "
-                            f"GET {self.base_url}{url}"
-                        ),
-                        code=CODE_INLINE_TOO_LARGE,
-                        status=response.status,
-                        hint=response.hint,
-                    )
-                return await self._read_cached_capture(url)
-            where = (
-                f"Fetch it with GET {self.base_url}{url}."
-                if url is not None
-                else (
-                    "The answer carried no followable cache url in its hint "
-                    "(only /ui-bridge/vision/cache/<64 hex> is followed)."
-                )
-            )
-            response.error = (
-                "capture is too large to return inline; it was taken and "
-                f"cached, and is not retried here. {where} "
-                f"Runner said: {response.error}"
-            )
+        if not response.success and response.code != CODE_INLINE_TOO_LARGE:
             return response
-        return _inline_capture(response)
+        if response.success:
+            result = _inline_capture(response)
+        else:
+            result = await self._oversize_capture(response, follow_oversize)
+        if not result.success:
+            result.capture_taken = True
+        return result
+
+    async def _oversize_capture(
+        self, response: UIBridgeResponse, follow_oversize: bool
+    ) -> UIBridgeResponse:
+        """The answer to a capture the runner took but would not return inline.
+
+        ``response`` is the runner's 413 ``INLINE_TOO_LARGE``. With
+        ``follow_oversize`` the cached capture is read from its ``hint.url``;
+        otherwise the failure is returned naming that url.
+        """
+        url = _inline_too_large_url(response)
+        hint = response.hint if isinstance(response.hint, dict) else {}
+        size = hint.get("bytes")
+        if follow_oversize and url is not None:
+            if (
+                isinstance(size, int)
+                and not isinstance(size, bool)
+                and size > MAX_CACHED_CAPTURE_BYTES
+            ):
+                return UIBridgeResponse(
+                    success=False,
+                    error=(
+                        f"capture is {size} bytes (the runner's hint.bytes), "
+                        "over this client's MAX_CACHED_CAPTURE_BYTES="
+                        f"{MAX_CACHED_CAPTURE_BYTES}; it was not read from "
+                        f"GET {self.base_url}{url}"
+                    ),
+                    code=CODE_INLINE_TOO_LARGE,
+                    status=response.status,
+                    hint=response.hint,
+                )
+            return await self._read_cached_capture(url)
+        where = (
+            f"Fetch it with GET {self.base_url}{url}."
+            if url is not None
+            else (
+                "The answer carried no followable cache url in its hint "
+                "(only /ui-bridge/vision/cache/<64 hex> is followed)."
+            )
+        )
+        response.error = (
+            "capture is too large to return inline; it was taken and "
+            f"cached, and is not retried here. {where} "
+            f"Runner said: {response.error}"
+        )
+        return response
 
     async def _read_cached_capture(self, url: str) -> UIBridgeResponse:
         """A cached capture read from ``GET <url>``, as an inline frame.
