@@ -23,8 +23,13 @@ import pytest
 from mcp import types
 from PIL import Image
 
+import ui_bridge_mcp.client as client_mod
 import ui_bridge_mcp.server as server_mod
-from ui_bridge_mcp.client import RunnerFrameSources, UIBridgeClient, Unknown
+from ui_bridge_mcp.client import UIBridgeClient
+
+# The reader types are reached through the module, not imported by name, so this
+# file still COLLECTS against a client that predates them: the server-level tests
+# then fail on their assertions, which is the red the arming proof needs.
 
 CAPTURE = "/ui-bridge/vision/capture"
 HEALTH = "/health"
@@ -313,7 +318,7 @@ def _read(runner: Runner, reader: str, *args: Any) -> Any:
 
 def test_frame_sources_absent_is_none_with_the_build_id() -> None:
     got = _read(Runner({HEALTH: _health(None)}), "vision_frame_sources")
-    assert got == RunnerFrameSources(sources=None, build_id=OLD_BUILD)
+    assert got == client_mod.RunnerFrameSources(sources=None, build_id=OLD_BUILD)
 
 
 def test_frame_sources_read_from_the_top_level_mirror() -> None:
@@ -321,17 +326,19 @@ def test_frame_sources_read_from_the_top_level_mirror() -> None:
         Runner({HEALTH: _health(NEW_SOURCES, top_level_only=True)}),
         "vision_frame_sources",
     )
-    assert got == RunnerFrameSources(sources=NEW_SOURCES, build_id=OLD_BUILD)
+    assert got == client_mod.RunnerFrameSources(sources=NEW_SOURCES, build_id=OLD_BUILD)
 
 
 def test_frame_sources_malformed_or_unreachable_is_unknown() -> None:
     bad = httpx.Response(200, json={"success": True, "data": {"visionFrameSources": 3}})
-    assert isinstance(_read(Runner({HEALTH: bad}), "vision_frame_sources"), Unknown)
-    assert isinstance(_read(Runner({}), "vision_frame_sources"), Unknown)
+    assert isinstance(
+        _read(Runner({HEALTH: bad}), "vision_frame_sources"), client_mod.Unknown
+    )
+    assert isinstance(_read(Runner({}), "vision_frame_sources"), client_mod.Unknown)
 
 
 def test_registered_app_absent_row_is_none_and_failed_read_is_unknown() -> None:
     assert _read(Runner({REGISTERED: _REGISTRY}), "registered_app", "nope") is None
     row = _read(Runner({REGISTERED: _REGISTRY}), "registered_app", WS_APP)
     assert row["transport"] == "websocket"
-    assert isinstance(_read(Runner({}), "registered_app", WS_APP), Unknown)
+    assert isinstance(_read(Runner({}), "registered_app", WS_APP), client_mod.Unknown)
