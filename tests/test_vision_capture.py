@@ -298,6 +298,169 @@ def test_screenshot_tool_reports_inline_too_large(
     assert is_error
     assert "/ui-bridge/vision/cache/feed" in _text(items)
     assert len(runner.captures()) == 1
+    # The default (size-bounded) contract does not follow the url.
+    assert [p for p, _ in runner.requests if p.startswith(CACHE)] == []
+
+
+CACHE = "/ui-bridge/vision/cache/"
+_CACHE_URL = CACHE + "a" * 64
+
+
+def _too_large() -> httpx.Response:
+    return httpx.Response(
+        413,
+        json={
+            "success": False,
+            "error": "capture is 9000000 bytes, over the 5242880-byte inline cap",
+            "code": "INLINE_TOO_LARGE",
+            "hint": {"url": _CACHE_URL, "bytes": 9000000, "maxBytes": 5242880},
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "tool,routes,arguments",
+    [
+        ("sdk_screenshot_baseline_save", {}, {"baseline_key": "home"}),
+        ("sdk_screenshot_before", {}, {}),
+        ("sdk_screenshot_delta", {}, {}),
+        (
+            "sdk_element_screenshot",
+            {"/ui-bridge/sdk/snapshot": _SNAPSHOT},
+            {"element_id": "btn", "padding": 0},
+        ),
+    ],
+)
+def test_lossless_capture_over_the_inline_cap_is_read_from_the_cache(
+    tool: str,
+    routes: dict[str, Any],
+    arguments: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A png_strict frame is not resized, so a big window answers 413.
+
+    The capture was taken and cached; the tool reads it from ``hint.url``
+    instead of failing, and does not capture again.
+    """
+    png = base64.b64decode(_png(40, 20))
+    runner = Runner(
+        {
+            **routes,
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(
+                200, content=png, headers={"content-type": "image/png"}
+            ),
+        }
+    )
+    _install(monkeypatch, runner)
+    items, is_error = _call(tool, {**arguments, "target": "web"})
+    assert not is_error, _text(items)
+    assert [c["contract"] for c in runner.captures()] == ["png_strict"]
+    assert [p for p, _ in runner.requests if p.startswith(CACHE)] == [_CACHE_URL]
+
+
+def test_client_follows_hint_url_from_the_413_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    png = base64.b64decode(_png(40, 20))
+    runner = Runner(
+        {
+            CAPTURE: _too_large(),
+            _CACHE_URL: httpx.Response(
+                200, content=png, headers={"content-type": "image/png"}
+            ),
+        }
+    )
+    c = _install(monkeypatch, runner)
+
+    async def go() -> Any:
+        try:
+            return await c.vision_capture(
+                target="web", contract="png_strict", follow_oversize=True
+            )
+        finally:
+            await c.close()
+
+    resp = asyncio.run(go())
+    assert resp.success, resp.error
+    assert (resp.data["width"], resp.data["height"]) == (40, 20)
+    assert resp.data["format"] == "png"
+    assert resp.data["sha256"] == "a" * 64
+    assert base64.b64decode(resp.data["base64"]) == png
+
+
+def test_annotation_with_no_viewport_returns_the_plain_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No CSS viewport: the scale is UNKNOWN, so nothing is drawn."""
+    snapshot = {"elements": _SNAPSHOT["elements"]}
+    b64 = _png()
+    runner = Runner({"/ui-bridge/control/snapshot": snapshot, CAPTURE: _frame(b64)})
+    _install(monkeypatch, runner)
+    items, is_error = _call("ui_annotated_screenshot", {"mode": "all"})
+    assert not is_error, _text(items)
+    assert "Annotation scale UNKNOWN" in _text(items)
+    images = _images(items)
+    assert len(images) == 1 and images[0].data == b64
+    assert images[0].mimeType == "image/png"
+
+
+def _jpeg() -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+@pytest.mark.parametrize(
+    "b64,fmt,label,mime",
+    [
+        # The bytes win over a wrong `format` field.
+        (_jpeg(), "png", "jpeg", "image/jpeg"),
+        # Neither the bytes nor the field name a format: UNKNOWN, not png.
+        (
+            base64.b64encode(b"not an image at all").decode(),
+            None,
+            "format UNKNOWN",
+            "application/octet-stream",
+        ),
+    ],
+)
+def test_screenshot_mime_is_sniffed_not_assumed(
+    b64: str, fmt: str | None, label: str, mime: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = {**_frame(b64), "format": fmt}
+    runner = Runner({CAPTURE: frame})
+    _install(monkeypatch, runner)
+    items, is_error = _call("sdk_screenshot", {"target": "web"})
+    assert not is_error, _text(items)
+    assert label in _text(items)
+    assert _images(items)[0].mimeType == mime
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "ui_annotated_screenshot",
+        "sdk_annotated_screenshot",
+        "ui_element_screenshot",
+        "sdk_element_screenshot",
+        "sdk_screenshot_diff",
+        "sdk_screenshot_baseline_save",
+        "sdk_screenshot_before",
+        "sdk_screenshot_after",
+        "sdk_screenshot_delta",
+        "sdk_visual_description",
+    ],
+)
+def test_dropped_monitor_argument_is_refused(
+    tool: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = Runner({CAPTURE: _frame()})
+    _install(monkeypatch, runner)
+    items, is_error = _call(tool, {"monitor": 1, "target": "web", "element_id": "b"})
+    assert is_error
+    assert "cannot capture a monitor" in _text(items)
+    assert runner.requests == []
 
 
 @pytest.mark.parametrize(

@@ -28,7 +28,16 @@ from ui_bridge_mcp.client import UIBridgeClient
 _AUDIT: dict[str, Any] = {
     "mode": "style-guide",
     "guideName": "brand",
+    # DesignSelectionReport: totalElements is the SELECTION, checkedElements
+    # what was audited (SDK designAuditOf).
     "totalElements": 4,
+    "checkedElements": 4,
+    "limit": 200,
+    "truncated": False,
+    "missingElementIds": [],
+    "missingElementCount": 0,
+    "unreadableElementIds": [],
+    "unreadableElementCount": 0,
     "totalRules": 2,
     "passedCount": 1,
     "failedCount": 3,
@@ -179,6 +188,41 @@ def test_design_audit_reads_summary_counts_and_lists_results(
     # The SDK's truncation is disclosed, with the full listable count.
     assert "2 listed of 3 listable" in text
     assert "maxResults=2" in text
+    assert "Elements: checked 4 of 4 selected\n" in text
+
+
+def test_design_audit_discloses_a_selection_the_element_limit_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``totalElements`` is the selection; the limit audited only part of it."""
+    report = {
+        **_AUDIT,
+        "totalElements": 250,
+        "checkedElements": 200,
+        "limit": 200,
+        "truncated": True,
+        "missingElementCount": 2,
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_audit", {})
+    assert not is_error, text
+    assert (
+        "Elements: checked 200 of 250 selected (the SDK's element limit=200 cut "
+        "the selection; the rest were NOT audited); 2 requested ids not registered"
+    ) in text
+    # The selection count is never presented as the checked count.
+    assert "Elements: 250" not in text
+
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call(
+        "sdk_design_review",
+        {"include_state_variations": False, "include_quality_evaluation": False},
+    )
+    assert "Elements: checked 200 of 250 selected" in text
 
 
 def test_design_audit_missing_summary_is_unknown_not_zero(

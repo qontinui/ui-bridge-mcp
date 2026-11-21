@@ -19,7 +19,12 @@ from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from .client import AI_ASSERT_STATES, UIBridgeClient, UIBridgeResponse
+from .client import (
+    AI_ASSERT_STATES,
+    UIBridgeClient,
+    UIBridgeResponse,
+    sniff_image_format,
+)
 from .elements import (
     element_state,
     is_content_element,
@@ -426,6 +431,36 @@ def _count_or_unknown(value: Any) -> str:
     return str(value) if _number(value) else "unknown"
 
 
+def _audit_selection(report: dict[str, Any]) -> str:
+    """How many elements the audit checked, out of how many it selected.
+
+    In style-guide mode ``totalElements`` is the SELECTION (registered elements
+    with a live node), not the checked count: the SDK's element ``limit`` can
+    cut it (``truncated``), and ``checkedElements`` is what was audited (SDK
+    ``specs/design-request.ts`` ``DesignSelectionReport``, ``designAuditOf``).
+    """
+    line = (
+        f"Elements: checked {_count_or_unknown(report.get('checkedElements'))} of "
+        f"{_count_or_unknown(report.get('totalElements'))} selected"
+    )
+    truncated = report.get("truncated")
+    if truncated is True:
+        line += (
+            f" (the SDK's element limit={_count_or_unknown(report.get('limit'))} "
+            "cut the selection; the rest were NOT audited)"
+        )
+    elif truncated is not False:
+        line += " (whether the element limit cut the selection is unknown)"
+    for field, label in (
+        ("missingElementCount", "requested ids not registered"),
+        ("unreadableElementCount", "selected elements with no readable node"),
+    ):
+        value = report.get(field)
+        if _number(value) and value > 0:
+            line += f"; {value} {label}"
+    return line
+
+
 def _style_audit_findings(report: dict[str, Any], limit: int) -> list[str]:
     """The severity counts and failing rows of a style-guide ``/design/audit``.
 
@@ -626,32 +661,128 @@ async def _capture_frame(
     target: str | None,
     contract: str | None = None,
 ) -> dict[str, Any] | ToolResult:
-    """An inline ``vision/capture`` frame, or the flagged error to return."""
-    resp = await ui_client.vision_capture(target=target, contract=contract)
+    """An inline ``vision/capture`` frame, or the flagged error to return.
+
+    A lossless (``png_strict``) frame is not resized, so a large or HiDPI
+    window passes the runner's inline cap; for those the capture the runner
+    already cached is read from the answer's ``hint.url`` instead of failing.
+    """
+    resp = await ui_client.vision_capture(
+        target=target,
+        contract=contract,
+        follow_oversize=contract == _LOSSLESS_CONTRACT,
+    )
     if not resp.success:
         return _tool_error(f"Error getting screenshot: {resp.describe_error()}")
     return _as_dict(resp.data)
 
 
-def _css_viewport(snapshot: dict[str, Any], frame: dict[str, Any]) -> tuple[int, int]:
-    """The CSS size element rects are measured in, for scaling onto the frame.
+# A tool that dropped ``monitor`` refuses it rather than ignoring it.
+_MONITOR_DROPPED_TOOLS = frozenset(
+    {
+        "ui_annotated_screenshot",
+        "sdk_annotated_screenshot",
+        "ui_element_screenshot",
+        "sdk_element_screenshot",
+        "sdk_screenshot_diff",
+        "sdk_screenshot_baseline_save",
+        "sdk_screenshot_before",
+        "sdk_screenshot_after",
+        "sdk_screenshot_delta",
+        "sdk_visual_description",
+    }
+)
 
-    The snapshot's own viewport when it reports one; otherwise the frame's
-    pixel size (scale 1). A capture contract may downscale the frame, so its
-    pixel size is not the CSS size whenever the snapshot can say better.
+
+def _css_viewport(snapshot: dict[str, Any]) -> tuple[int, int] | None:
+    """The CSS size element rects are measured in, or ``None`` when UNKNOWN.
+
+    Only the snapshot's own viewport says it. The frame's pixel size does not:
+    a capture contract may downscale the frame, and a HiDPI frame is larger
+    than its CSS size, so defaulting to it would draw at the wrong scale.
     """
     viewport = _as_dict(snapshot.get("viewport"))
     width = viewport.get("viewportWidth")
     height = viewport.get("viewportHeight")
     if _number(width) and _number(height) and width > 0 and height > 0:
         return int(width), int(height)
-    return int(frame["width"]), int(frame["height"])
+    return None
 
 
-def _frame_mime(frame: dict[str, Any]) -> str:
-    """The frame's MIME type from the runner's ``format`` field."""
+def _frame_format(frame: dict[str, Any]) -> str | None:
+    """The frame's image format, read from its own magic bytes.
+
+    The runner's ``format`` field is not trusted over the bytes; ``None``
+    when neither the bytes nor the field name a known format.
+    """
+    try:
+        head = base64.b64decode(str(frame.get("base64", ""))[:64])
+    except ValueError:
+        head = b""
+    sniffed = sniff_image_format(head)
+    if sniffed is not None:
+        return sniffed
     fmt = frame.get("format")
-    return mime_type_for_format(fmt) if isinstance(fmt, str) else "image/png"
+    return fmt if fmt in ("png", "jpeg", "webp") else None
+
+
+def _annotated_result(
+    frame: dict[str, Any],
+    snap_data: dict[str, Any],
+    snap_elements: list[dict[str, Any]],
+    opts: AnnotationOptions,
+    design_data: list[dict[str, Any]] | None,
+) -> list[types.TextContent | types.ImageContent]:
+    """The annotated frame, or the plain one when the scale is UNKNOWN."""
+    css = _css_viewport(snap_data)
+    if css is None:
+        fmt = _frame_format(frame)
+        return [
+            types.TextContent(
+                type="text",
+                text=(
+                    "Annotation scale UNKNOWN: the snapshot reported no "
+                    "viewport, so element rects cannot be placed on the "
+                    f"{frame['width']}x{frame['height']}px frame. Returning the "
+                    "plain frame, unannotated."
+                ),
+            ),
+            types.ImageContent(
+                type="image",
+                data=frame["base64"],
+                mimeType=mime_type_for_format(fmt)
+                if fmt is not None
+                else "application/octet-stream",
+            ),
+        ]
+    annotated_b64 = annotate_screenshot(
+        frame["base64"],
+        snap_elements,
+        css[0],
+        css[1],
+        ref_manager,
+        options=opts,
+        snapshot=snap_data,
+        design_data=design_data,
+    )
+    result: list[types.TextContent | types.ImageContent] = [
+        types.ImageContent(
+            type="image",
+            data=annotated_b64,
+            mimeType=mime_type_for_format(opts.format),
+        )
+    ]
+    if opts.mode == "accessibility":
+        result.insert(
+            0,
+            types.TextContent(
+                type="text",
+                text="Accessibility overlay applied. Focus order numbers, "
+                "touch target warnings (orange), and missing label indicators "
+                "(pink) are drawn on the image.",
+            ),
+        )
+    return result
 
 
 def _percent(value: Any) -> str:
@@ -5339,6 +5470,12 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
     """Handle tool calls. A failure is returned via ``_tool_error`` (isError)."""
     ui_client = get_client()
 
+    if name in _MONITOR_DROPPED_TOOLS and "monitor" in arguments:
+        return _tool_error(
+            f"Error: {name} no longer takes `monitor`: it captures through "
+            "POST /ui-bridge/vision/capture, which cannot capture a monitor."
+        )
+
     try:
         # Health check
         if name == "ui_health":
@@ -6616,17 +6753,22 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, target)
             if not isinstance(frame, dict):
                 return frame
+            shot_format = _frame_format(frame)
             return [
                 types.TextContent(
                     type="text",
                     text=(
                         f"Screenshot of '{target}': {frame['width']}x{frame['height']}px "
-                        f"{frame.get('format') or 'format unknown'} "
+                        f"{shot_format or 'format UNKNOWN'} "
                         f"(runner cache key {frame.get('sha256') or 'unknown'})"
                     ),
                 ),
                 types.ImageContent(
-                    type="image", data=frame["base64"], mimeType=_frame_mime(frame)
+                    type="image",
+                    data=frame["base64"],
+                    mimeType=mime_type_for_format(shot_format)
+                    if shot_format is not None
+                    else "application/octet-stream",
                 ),
             ]
 
@@ -7028,35 +7170,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, None)
             if not isinstance(frame, dict):
                 return frame
-            ss_width, ss_height = _css_viewport(snap_data, frame)
-            annotated_b64 = annotate_screenshot(
-                frame["base64"],
-                snap_elements,
-                ss_width,
-                ss_height,
-                ref_manager,
-                options=opts,
-                snapshot=snap_data,
-                design_data=design_data,
-            )
-            result_content: list[types.TextContent | types.ImageContent] = [
-                types.ImageContent(
-                    type="image",
-                    data=annotated_b64,
-                    mimeType=mime_type_for_format(opts.format),
-                )
-            ]
-            if opts.mode == "accessibility":
-                result_content.insert(
-                    0,
-                    types.TextContent(
-                        type="text",
-                        text="Accessibility overlay applied. Focus order numbers, "
-                        "touch target warnings (orange), and missing label indicators "
-                        "(pink) are drawn on the image.",
-                    ),
-                )
-            return result_content
+            return _annotated_result(frame, snap_data, snap_elements, opts, design_data)
 
         elif name == "sdk_annotated_screenshot":
             target = _capture_target(arguments, name)
@@ -7082,36 +7196,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             frame = await _capture_frame(ui_client, target)
             if not isinstance(frame, dict):
                 return frame
-            ss_width, ss_height = _css_viewport(snap_data, frame)
-            annotated_b64 = annotate_screenshot(
-                frame["base64"],
-                snap_elements,
-                ss_width,
-                ss_height,
-                ref_manager,
-                options=opts,
-                snapshot=snap_data,
-                design_data=design_data,
-            )
-            result_content = [
-                types.ImageContent(
-                    type="image",
-                    data=annotated_b64,
-                    mimeType=mime_type_for_format(opts.format),
-                )
-            ]
-            # For accessibility mode, also return text summary of issues
-            if opts.mode == "accessibility":
-                result_content.insert(
-                    0,
-                    types.TextContent(
-                        type="text",
-                        text="Accessibility overlay applied. Focus order numbers, "
-                        "touch target warnings (orange), and missing label indicators "
-                        "(pink) are drawn on the image.",
-                    ),
-                )
-            return result_content
+            return _annotated_result(frame, snap_data, snap_elements, opts, design_data)
 
         # Element-level screenshots
         elif name in ("ui_element_screenshot", "sdk_element_screenshot"):
@@ -7144,20 +7229,29 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
             if not target_el:
                 return _tool_error(f"Element '{element_id}' not found in snapshot.")
 
+            css = _css_viewport(el_snap_data)
+            if css is None:
+                return _tool_error(
+                    f"Element '{element_id}' crop scale UNKNOWN: the snapshot "
+                    "reported no viewport, so its CSS rect cannot be placed on "
+                    "the captured frame."
+                )
             # The ui_ tool captures the runner's own window (no target). The
-            # frame is lossless so the crop is not a re-encode of a lossy image.
+            # frame is lossless so the crop is not a re-encode of a lossy image,
+            # and the crop stays client-side: the runner's own `element` crop
+            # resolves ids against ITS window's elements, never a target's, and
+            # takes no padding. An over-cap frame is read from the runner cache.
             frame = await _capture_frame(
                 ui_client, element_target, contract=_LOSSLESS_CONTRACT
             )
             if not isinstance(frame, dict):
                 return frame
-            ss_width, ss_height = _css_viewport(el_snap_data, frame)
 
             cropped = crop_to_element(
                 frame["base64"],
                 target_el,
-                ss_width,
-                ss_height,
+                css[0],
+                css[1],
                 padding=padding,
                 scale=scale,
                 fmt=fmt,
@@ -7534,7 +7628,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                 return _tool_error(_style_audit_unknown(report))
             result_lines = [
                 f"Style Audit: {report.get('guideName', '?')}",
-                f"Elements: {_count_or_unknown(report.get('totalElements'))} | "
+                _audit_selection(report),
                 f"Rules: {_count_or_unknown(report.get('totalRules'))}",
                 f"Passed: {report['passedCount']} | Failed: {report['failedCount']}",
                 *_style_audit_findings(report, limit=20),
@@ -7685,6 +7779,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
                     f"\nStyle audit: {report['passedCount']} passed, "
                     f"{report['failedCount']} failed"
                 )
+                result_lines.append(f"  {_audit_selection(report)}")
                 result_lines.extend(
                     f"  {line}" for line in _style_audit_findings(report, limit=10)
                 )

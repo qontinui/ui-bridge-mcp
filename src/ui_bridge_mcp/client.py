@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 from urllib.parse import quote
@@ -59,7 +60,8 @@ CODE_PRODUCER_FAILED = "producer_failed"
 # (``vision_capture_access.rs`` ``INLINE_TOO_LARGE``; ``hint`` carries ``url``).
 VISION_CAPTURE_ROUTE = "/ui-bridge/vision/capture"
 CODE_INLINE_TOO_LARGE = "INLINE_TOO_LARGE"
-_HINT_URL = re.compile(r'"url":"([^"]+)"')
+# The runner's cache-read route serves raw bytes, not a JSON envelope.
+VISION_CACHE_PREFIX = "/ui-bridge/vision/cache/"
 
 # The closed Observation ``UnknownCode`` set, in the canonical wire-contract
 # order: the twin of the ui-bridge SDK's
@@ -208,6 +210,9 @@ class UIBridgeResponse:
     error: str | None = None
     code: str | None = None
     status: int | None = None
+    # The failure body's own ``hint`` (runner ``ApiResponse.hint``), unrendered,
+    # so a caller reads a structured field rather than parsing ``error``.
+    hint: Any = None
 
     def describe_error(self) -> str:
         """Render the failure for a tool result: typed code and status first.
@@ -337,10 +342,27 @@ def render_body_error(body: Any, raw_text: str) -> str:
     return "\n".join(lines)
 
 
-def _inline_too_large_url(error: str) -> str | None:
-    """The ``url`` from a rendered ``INLINE_TOO_LARGE`` hint, if it is there."""
-    match = _HINT_URL.search(error)
-    return match.group(1) if match else None
+def _inline_too_large_url(response: UIBridgeResponse) -> str | None:
+    """The ``hint.url`` of an ``INLINE_TOO_LARGE`` answer, when it names one.
+
+    Only a path under the runner's own cache route is followed.
+    """
+    hint = response.hint if isinstance(response.hint, dict) else {}
+    url = hint.get("url")
+    if isinstance(url, str) and url.startswith(VISION_CACHE_PREFIX):
+        return url
+    return None
+
+
+def sniff_image_format(data: bytes) -> str | None:
+    """``png`` / ``jpeg`` / ``webp`` from the magic bytes, else ``None``."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
 
 
 def _inline_capture(response: UIBridgeResponse) -> UIBridgeResponse:
@@ -572,7 +594,10 @@ class UIBridgeClient:
             body = None
         code = extract_code(body) or CODE_PRODUCER_FAILED
         error = f"API error {status}: {render_body_error(body, response.text)}"
-        return UIBridgeResponse(success=False, error=error, code=code, status=status)
+        hint = body.get("hint") if isinstance(body, dict) else None
+        return UIBridgeResponse(
+            success=False, error=error, code=code, status=status, hint=hint
+        )
 
     # -------------------------------------------------------------------------
     # Health & Status
@@ -724,13 +749,14 @@ class UIBridgeClient:
         element: str | None = None,
         *,
         contract: str | None = None,
+        follow_oversize: bool = False,
     ) -> UIBridgeResponse:
         """Capture a frame through ``POST /ui-bridge/vision/capture``, inline.
 
         The runner's one capture route (its ``CaptureRequest``,
         ``src-tauri/src/mcp/ui_bridge/vision_routes.rs``). The SDK screenshot
         and control annotated-screenshot routes this replaced were deleted
-        from the runner on 2026-05-13.
+        from the runner on 2026-05-14 (runner commit 940fd0f40).
 
         Args:
             target: Frame source: a registered device / app id or an adb serial.
@@ -738,7 +764,12 @@ class UIBridgeClient:
             region: Pixel-space crop ``{x, y, w, h}`` applied after capture.
             element: Element id; the runner crops to its rect.
             contract: Output contract: ``"claude"`` (the runner default, lossy
-                and size-bounded), ``"webp"``, or ``"png_strict"`` (lossless).
+                and size-bounded), ``"webp"``, or ``"png_strict"`` (lossless,
+                not resized, so it can pass the inline cap).
+            follow_oversize: On ``INLINE_TOO_LARGE``, read the capture the
+                runner already took and cached from the answer's ``hint.url``
+                (``GET /ui-bridge/vision/cache/<sha>``, raw bytes) instead of
+                failing. Without it the failure is returned, naming the url.
 
         Every capture is taken fresh (``force``): the runner's cache is keyed
         on its UI-mutation counter, which a change it did not drive never bumps.
@@ -760,20 +791,77 @@ class UIBridgeClient:
             body["contract"] = contract
         response = await self._request("POST", VISION_CAPTURE_ROUTE, body)
         if not response.success:
-            if response.code == CODE_INLINE_TOO_LARGE:
-                url = _inline_too_large_url(response.error or "")
-                where = (
-                    f"GET {self.base_url}{url}"
-                    if url is not None
-                    else "the url named in the runner's hint (not found in it)"
-                )
-                response.error = (
-                    "capture is too large to return inline; it was taken and "
-                    f"cached, and is not retried here. Fetch it with {where}. "
-                    f"Runner said: {response.error}"
-                )
+            if response.code != CODE_INLINE_TOO_LARGE:
+                return response
+            url = _inline_too_large_url(response)
+            if follow_oversize and url is not None:
+                return await self._read_cached_capture(url)
+            where = (
+                f"GET {self.base_url}{url}"
+                if url is not None
+                else "the url in the runner's hint (the answer carried none)"
+            )
+            response.error = (
+                "capture is too large to return inline; it was taken and "
+                f"cached, and is not retried here. Fetch it with {where}. "
+                f"Runner said: {response.error}"
+            )
             return response
         return _inline_capture(response)
+
+    async def _read_cached_capture(self, url: str) -> UIBridgeResponse:
+        """A cached capture read from ``GET <url>``, as an inline frame.
+
+        The runner's cache route answers the raw image bytes with their
+        content type (``vision_cache_get_handler``). The pixel size is read
+        from the image itself; the format from its magic bytes.
+        """
+        from PIL import Image
+
+        full = f"{self.base_url}{url}"
+        client = await self._get_client()
+        try:
+            response = await client.get(full, timeout=DEFAULT_TIMEOUT)
+        except httpx.HTTPError as e:
+            return UIBridgeResponse(
+                success=False,
+                error=f"capture over the inline cap; reading it from {full} failed: {e}",
+                code=CODE_PRODUCER_FAILED,
+            )
+        if response.status_code != 200:
+            failure = self._http_status_failure(response)
+            failure.error = (
+                f"capture over the inline cap; reading it from {full} failed: "
+                f"{failure.error}"
+            )
+            return failure
+        data = response.content
+        fmt = sniff_image_format(data)
+        try:
+            with Image.open(io.BytesIO(data)) as img:
+                width, height = img.size
+        except Exception as e:  # any decode failure leaves the frame UNKNOWN
+            return UIBridgeResponse(
+                success=False,
+                error=(
+                    f"capture read from {full} is not a decodable image "
+                    f"({type(e).__name__}: {e}); the frame is UNKNOWN"
+                ),
+                code=CODE_PRODUCER_FAILED,
+                status=response.status_code,
+            )
+        return UIBridgeResponse(
+            success=True,
+            data={
+                "base64": base64.b64encode(data).decode(),
+                "width": width,
+                "height": height,
+                "sha256": url[len(VISION_CACHE_PREFIX) :],
+                "format": fmt,
+                "fetched_from": url,
+            },
+            status=response.status_code,
+        )
 
     async def control_list_elements(self) -> UIBridgeResponse:
         """List all registered UI elements in the runner's webview."""

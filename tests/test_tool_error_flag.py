@@ -817,12 +817,32 @@ FAILURE_PATHS: list[FailurePath] = [
             tool,
             {"element_id": "box", "target": "web"},
             {
-                snapshot: ok({"elements": [{"id": "box"}]}),
+                snapshot: ok(
+                    {
+                        "elements": [{"id": "box"}],
+                        "viewport": {"viewportWidth": 10, "viewportHeight": 10},
+                    }
+                ),
                 "/ui-bridge/vision/capture": ok(
                     {"base64": "aGk=", "width": 10, "height": 10, "format": "png"}
                 ),
             },
             "Element 'box' has no bounding rect.",
+        )
+        for tool, snapshot in (
+            ("ui_element_screenshot", "/ui-bridge/control/snapshot"),
+            ("sdk_element_screenshot", "/ui-bridge/sdk/snapshot"),
+        )
+    ],
+    *[
+        FailurePath(
+            "ui_element_screenshot|sdk_element_screenshot: Element '{}' crop scale "
+            "UNKNOWN: the snapshot reported no viewport, so its CSS rect cannot be "
+            "placed on the captured frame.",
+            tool,
+            {"element_id": "box", "target": "web"},
+            {snapshot: ok({"elements": [{"id": "box"}]})},
+            "Element 'box' crop scale UNKNOWN",
         )
         for tool, snapshot in (
             ("ui_element_screenshot", "/ui-bridge/control/snapshot"),

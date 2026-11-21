@@ -732,6 +732,9 @@ def test_style_audit_report_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> Non
         # The SDK's shape: summary carries COUNTS; the failing rows are in
         # results[] (specs/design-request.ts StyleGuideDesignAuditReport).
         "summary": {"errors": 0, "warnings": 1, "info": 0},
+        "checkedElements": 4,
+        "limit": 200,
+        "truncated": False,
         "maxResults": 50,
         "listableResults": 1,
         "resultsTruncated": False,
@@ -756,7 +759,8 @@ def test_style_audit_report_is_an_answer(monkeypatch: pytest.MonkeyPatch) -> Non
     result = call("sdk_design_audit", {})
     assert result.isError is False
     assert text(result) == (
-        "Style Audit: brand\nElements: 4 | Rules: 2\nPassed: 3 | Failed: 1\n"
+        "Style Audit: brand\nElements: checked 4 of 4 selected\nRules: 2\n"
+        "Passed: 3 | Failed: 1\n"
         "Failed by severity: errors=0 warnings=1 info=0\n"
         "Failing rows (1 listed):\n"
         "  [save-btn] button-size (warning): font too small "
