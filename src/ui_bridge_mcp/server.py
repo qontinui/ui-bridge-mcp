@@ -8188,16 +8188,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult:
 
             # 4. Style audit (if guide loaded)
             audit_resp = await ui_client.sdk_design_audit(element_ids=element_ids)
-            if audit_resp.success and not _is_style_audit(audit_resp.data):
-                relay_issues = _as_dict(audit_resp.data).get("issues")
+            audit_report = _as_dict(audit_resp.data)
+            if audit_resp.success and audit_report.get("mode") == "heuristic":
+                # No guide was loaded: the SDK ran its built-in heuristics,
+                # which are findings about the page, not a guide verdict.
+                heuristic = _heuristic_audit_lines(audit_report, limit=10)
+                result_lines.append(f"\n{heuristic[0]}")
+                result_lines.extend(f"  {line}" for line in heuristic[1:])
+            elif audit_resp.success and not _is_style_audit(audit_report):
+                listed = audit_report.get("issues")
                 found = (
-                    f"; the relay's own scan reported {len(relay_issues)} issue(s)"
-                    if isinstance(relay_issues, list)
+                    f"; it listed {len(listed)} issue(s)"
+                    if isinstance(listed, list)
                     else ""
                 )
                 result_lines.append(
-                    "\nStyle audit: UNKNOWN (the response is not an audit against "
-                    f"the style guide{found})"
+                    "\nStyle audit: UNKNOWN (the response is neither a style-guide "
+                    f"audit nor a heuristic audit{found})"
                 )
             elif audit_resp.success:
                 report = _as_dict(audit_resp.data)

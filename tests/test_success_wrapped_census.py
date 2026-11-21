@@ -793,7 +793,7 @@ def test_design_review_reports_a_relay_audit_as_unknown(
         {"include_state_variations": False, "include_quality_evaluation": False},
     )
     assert "Style audit: UNKNOWN" in text(result)
-    assert "the relay's own scan reported 2 issue(s)" in text(result)
+    assert "it listed 2 issue(s)" in text(result)
     assert "0 passed, 0 failed" not in text(result)
 
 

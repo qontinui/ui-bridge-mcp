@@ -502,6 +502,73 @@ def test_audit_with_an_unknown_mode_is_unknown(
     assert "(its mode 'vibes' is not one this server reads)" in text
 
 
+_REVIEW_ARGS = {"include_state_variations": False, "include_quality_evaluation": False}
+
+
+def test_design_review_renders_a_heuristic_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the review reported every heuristic audit as ``UNKNOWN``."""
+    report = {
+        **_HEURISTIC_AUDIT,
+        "heuristicCoverage": [
+            {
+                "heuristic": "touch-target",
+                "status": "partial",
+                "checked": 2,
+                "notMeasured": 1,
+                "note": "1 element had no layout",
+            },
+            *_HEURISTIC_AUDIT["heuristicCoverage"][:3],
+        ],
+    }
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, is_error = _call("sdk_design_review", _REVIEW_ARGS)
+    assert not is_error, text
+    assert "Style audit: UNKNOWN" not in text
+    assert "\nHeuristic design audit (no style guide" in text
+    assert (
+        "  Reason: No style guide was provided or loaded; ran the built-in heuristics."
+    ) in text
+    assert "  Elements: checked 5 of 5 selected\n" in text
+    assert "  Issues (2 listed):" in text
+    assert "    [error] close-btn: Touch target 30x30" in text
+    assert (
+        "  Heuristic coverage (heuristics not fully measured):\n"
+        "    touch-target: partial (checked 2, not measured 1) - 1 element had no "
+        "layout"
+    ) in text
+    assert "passed," not in text
+
+
+def test_design_review_heuristic_audit_without_coverage_says_not_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {k: v for k, v in _HEURISTIC_AUDIT.items() if k != "heuristicCoverage"}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_review", _REVIEW_ARGS)
+    assert "  Heuristic coverage: NOT REPORTED" in text
+
+
+def test_design_review_audit_with_no_mode_and_no_counts_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = {"issues": [{"element": "a", "issue": "b", "severity": "info"}]}
+    monkeypatch.setattr(
+        server_mod, "client", _client(monkeypatch, {AUDIT_ROUTE: report})
+    )
+    text, _ = _call("sdk_design_review", _REVIEW_ARGS)
+    assert (
+        "Style audit: UNKNOWN (the response is neither a style-guide audit nor a "
+        "heuristic audit; it listed 1 issue(s))"
+    ) in text
+    assert "Heuristic design audit" not in text
+
+
 def test_design_responsive_reads_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         server_mod, "client", _client(monkeypatch, {RESPONSIVE_ROUTE: _RESPONSIVE})
