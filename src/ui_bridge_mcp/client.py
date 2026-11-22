@@ -387,6 +387,13 @@ def render_next_action(value: Any) -> str | None:
     return _compact(value)
 
 
+_REFUSAL_RENDERED_KEYS = frozenset(
+    {"code", "discriminator", "next_action", "detail", "glossary_terms"}
+)
+# Present on every refusal and not something a reader acts on.
+_REFUSAL_SILENT_KEYS = frozenset({"observed_at", "source"})
+
+
 def render_refusal(refusal: Any) -> list[str]:
     """The lines a runner's typed ``refusal`` contributes to a failure render.
 
@@ -394,14 +401,18 @@ def render_refusal(refusal: Any) -> list[str]:
     next_action, glossary_terms, detail?, observed_at, source}``. Its sentence
     is the body's own ``error`` (rendered first by the caller), so this adds
     the machine half: the code and its discriminator, what to do next, the raw
-    detail, and the glossary terms. A body without one (every runner predating
+    detail, and the glossary terms. Any other key — a relay's
+    ``unrecognised_code`` / ``unrecognised_source`` /
+    ``unrecognised_glossary_terms``, a field added later — is kept on one more
+    line rather than dropped. A body without a refusal (every runner predating
     qontinui-runner#3131), or with an empty one, contributes nothing; one with
-    no ``code`` is compacted whole rather than given an invented headline.
+    no ``code``, or that is not an object, is compacted whole rather than given
+    an invented headline.
     """
-    if not isinstance(refusal, dict) or not refusal:
+    if refusal is None or refusal == "" or refusal == {}:
         return []
     code = _str_field(refusal, "code")
-    if code is None:
+    if not isinstance(refusal, dict) or code is None:
         return [f"refusal: {_compact(refusal)}"]
     discriminator = _str_field(refusal, "discriminator")
     head = f"{code} ({discriminator})" if discriminator is not None else code
@@ -409,13 +420,23 @@ def render_refusal(refusal: Any) -> list[str]:
     next_action = render_next_action(refusal.get("next_action"))
     if next_action is not None:
         lines.append(f"next: {next_action}")
-    if refusal.get("detail") is not None:
-        lines.append(f"refusal detail: {_compact(refusal['detail'])}")
+    detail = _str_field(refusal, "detail")
+    if detail is not None:
+        lines.append(f"refusal detail: {_compact(detail)}")
     terms = refusal.get("glossary_terms")
     if isinstance(terms, list):
         names = [t for t in terms if isinstance(t, str) and t]
         if names:
             lines.append(f"glossary: {_compact(', '.join(names))}")
+    extras = {
+        key: value
+        for key, value in refusal.items()
+        if key not in _REFUSAL_RENDERED_KEYS
+        and key not in _REFUSAL_SILENT_KEYS
+        and value not in (None, "", [], {})
+    }
+    if extras:
+        lines.append(f"refusal extra: {_compact(extras)}")
     return lines
 
 
@@ -450,14 +471,17 @@ def render_body_error(body: Any, raw_text: str) -> str:
         unknown_detail = None
     lines = [head if head is not None else "(no error message in body)"]
 
-    lines.extend(render_refusal(body.get("refusal")))
+    refusal_lines = render_refusal(body.get("refusal"))
+    lines.extend(refusal_lines)
     if body.get("hint") is not None:
         lines.append(f"hint: {_compact(body['hint'])}")
     suggestions = body.get("suggestions")
     if isinstance(suggestions, list) and suggestions:
         lines.append(f"suggestions: {_compact('; '.join(map(str, suggestions)))}")
     recovery = render_next_action(detail.get("recovery"))
-    if recovery is not None:
+    # A runner carrying qontinui-runner#3131 sends the same NextAction as
+    # refusal.next_action and error_detail.recovery; say it once.
+    if recovery is not None and f"next: {recovery}" not in refusal_lines:
         lines.append(f"recovery: {recovery}")
     if detail.get("context") is not None:
         lines.append(f"context: {_compact(detail['context'])}")

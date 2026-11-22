@@ -669,9 +669,24 @@ def test_http_422_refusal_body_keeps_refusal_and_next_action(
     assert "next: resnapshot" in lines
     assert "refusal detail: no element with id btn-sav in the registry" in lines
     assert "glossary: snapshot" in lines
-    assert "recovery: resnapshot" in lines
+    # The same NextAction in error_detail.recovery is not repeated.
+    assert not any(line.startswith("recovery:") for line in lines)
     assert not any(line.startswith("suggestions:") for line in lines)
     assert 'context: {"element_id":"btn-sav"}' in lines
+
+
+def test_recovery_differing_from_next_action_is_kept() -> None:
+    body = {
+        "error": "x",
+        "refusal": {"code": "c", "next_action": {"kind": "resnapshot"}},
+        "error_detail": {"recovery": "RESNAPSHOT"},
+    }
+    assert render_body_error(body, "").splitlines() == [
+        "x",
+        "refusal: c",
+        "next: resnapshot",
+        "recovery: RESNAPSHOT",
+    ]
 
 
 def test_error_detail_code_wins_over_refusal_code() -> None:
@@ -687,7 +702,24 @@ def test_error_detail_code_wins_over_refusal_code() -> None:
     ("refusal", "rendered"),
     [
         ({}, []),
+        ("denied", ["refusal: denied"]),
         ({"detail": "d"}, ['refusal: {"detail":"d"}']),
+        ({"code": "c", "detail": ""}, ["refusal: c"]),
+        (
+            {
+                "code": "unknown",
+                "next_action": {"kind": "none_terminal"},
+                "unrecognised_code": "quota_exceeded",
+                "unrecognised_glossary_terms": [],
+                "observed_at": "2026-11-22T00:00:00Z",
+                "source": "runner",
+            },
+            [
+                "refusal: unknown",
+                "next: none_terminal",
+                'refusal extra: {"unrecognised_code":"quota_exceeded"}',
+            ],
+        ),
         (
             {
                 "code": "c",
@@ -698,9 +730,7 @@ def test_error_detail_code_wins_over_refusal_code() -> None:
         ),
     ],
 )
-def test_degenerate_refusals_render_no_noise(
-    refusal: dict[str, Any], rendered: list[str]
-) -> None:
+def test_degenerate_refusals_render_no_noise(refusal: Any, rendered: list[str]) -> None:
     body = {"error": "x", "refusal": refusal, "error_detail": {"recovery": ""}}
     assert render_body_error(body, "").splitlines() == ["x", *rendered]
 
